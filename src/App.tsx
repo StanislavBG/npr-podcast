@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { PodcastSelector } from './components/PodcastSelector';
 import { EpisodeList } from './components/EpisodeList';
 import { Player } from './components/Player';
+import { FlowVisualizer } from './components/FlowVisualizer';
 import {
   fetchPodcasts,
   fetchEpisodes,
@@ -10,6 +11,23 @@ import {
   type Episode,
 } from './services/api';
 import { detectAdSegments, type AdDetectionResult } from './services/adDetector';
+import {
+  createInitialFlowState,
+  type FlowState,
+  type StepStatus,
+} from './workflows/podcastFlow';
+
+function setStep(
+  prev: FlowState,
+  stepId: string,
+  status: StepStatus,
+): FlowState {
+  return {
+    ...prev,
+    steps: { ...prev.steps, [stepId]: status },
+    currentStep: status === 'running' ? stepId : prev.currentStep,
+  };
+}
 
 export default function App() {
   const [podcasts, setPodcasts] = useState<Podcast[]>([]);
@@ -19,6 +37,7 @@ export default function App() {
   const [ads, setAds] = useState<AdDetectionResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [flow, setFlow] = useState<FlowState>(createInitialFlowState());
   const loaded = useRef<string | null>(null);
 
   useEffect(() => {
@@ -42,11 +61,26 @@ export default function App() {
       setEpisode(null);
       setAds(null);
       setError(null);
+
+      let fs = createInitialFlowState();
+      fs = setStep(fs, 'step_fetch_rss', 'running');
+      setFlow(fs);
+
       try {
         const data = await fetchEpisodes(id);
         setEpisodes(data.episodes);
         loaded.current = id;
+
+        fs = setStep(fs, 'step_fetch_rss', 'completed');
+        fs = setStep(fs, 'step_parse_episodes', 'running');
+        setFlow(fs);
+
+        fs = setStep(fs, 'step_parse_episodes', 'completed');
+        setFlow(fs);
       } catch {
+        fs = setStep(fs, 'step_fetch_rss', 'failed');
+        fs = { ...fs, error: 'RSS fetch failed' };
+        setFlow(fs);
         setError('Could not load episodes. Check your connection.');
       } finally {
         setLoading(false);
@@ -63,15 +97,22 @@ export default function App() {
     setEpisode(ep);
     setAds(null);
 
+    setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'running'));
+
     let wordCount = 0;
     if (ep.transcriptUrl) {
       try {
         const t = await fetchTranscript(ep.transcriptUrl);
         wordCount = t.fullText.split(/\s+/).length;
+        setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'completed'));
       } catch {
-        /* continue without transcript */
+        setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
       }
+    } else {
+      setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
     }
+
+    setFlow((prev) => setStep(prev, 'step_detect_ads', 'running'));
 
     const parts = ep.duration.split(':').map(Number);
     let sec = 0;
@@ -79,7 +120,19 @@ export default function App() {
     else if (parts.length === 2) sec = parts[0] * 60 + parts[1];
     else sec = parseInt(ep.duration) || 600;
 
-    setAds(detectAdSegments(sec, wordCount, wordCount > 0));
+    const adResult = detectAdSegments(sec, wordCount, wordCount > 0);
+    setAds(adResult);
+
+    setFlow((prev) => {
+      let fs = setStep(prev, 'step_detect_ads', 'completed');
+      fs = setStep(fs, 'step_prepare_player', 'running');
+      return fs;
+    });
+
+    setFlow((prev) => {
+      const fs = setStep(prev, 'step_prepare_player', 'completed');
+      return { ...fs, currentStep: null };
+    });
   }, []);
 
   return (
@@ -104,6 +157,8 @@ export default function App() {
       ) : (
         <div className="empty">Tap an episode</div>
       )}
+
+      <FlowVisualizer flowState={flow} />
     </div>
   );
 }
