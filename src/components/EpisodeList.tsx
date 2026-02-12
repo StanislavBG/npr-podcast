@@ -1,3 +1,4 @@
+import { useRef, useEffect } from 'react';
 import type { Episode } from '../services/api';
 
 interface Props {
@@ -15,10 +16,25 @@ export function EpisodeList({
   selectedId,
   onSelect,
 }: Props) {
+  const selectedRef = useRef<HTMLButtonElement>(null);
+
+  // Scroll selected card into view
+  useEffect(() => {
+    if (selectedRef.current) {
+      selectedRef.current.scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest',
+        inline: 'center',
+      });
+    }
+  }, [selectedId]);
+
   if (loading) {
     return (
       <div className="episode-list">
-        <h2>Loading episodes...</h2>
+        <div className="episode-list-header">
+          <span className="episode-list-title">Loading...</span>
+        </div>
         <div className="loading-spinner" />
       </div>
     );
@@ -27,30 +43,34 @@ export function EpisodeList({
   if (episodes.length === 0) {
     return (
       <div className="episode-list">
-        <h2>No episodes found</h2>
-        <p>Select a podcast from the sidebar to load episodes.</p>
+        <div className="episode-list-header">
+          <span className="episode-list-title">No episodes</span>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="episode-list">
-      <h2>{podcastName}</h2>
-      <p className="episode-count">{episodes.length} episodes</p>
-      <div className="episodes">
+      <div className="episode-list-header">
+        <span className="episode-list-title">{podcastName}</span>
+        <span className="episode-count">{episodes.length} episodes</span>
+      </div>
+      <div className="episodes-scroll">
         {episodes.map((ep) => {
+          const isSelected = selectedId === ep.id;
           const date = ep.pubDate
             ? new Date(ep.pubDate).toLocaleDateString('en-US', {
                 month: 'short',
                 day: 'numeric',
-                year: 'numeric',
               })
             : '';
 
           return (
             <button
               key={ep.id}
-              className={`episode-card ${selectedId === ep.id ? 'selected' : ''}`}
+              ref={isSelected ? selectedRef : undefined}
+              className={`episode-card ${isSelected ? 'selected' : ''}`}
               onClick={() => onSelect(ep)}
             >
               <div className="episode-meta">
@@ -60,13 +80,8 @@ export function EpisodeList({
                 )}
               </div>
               <h3 className="episode-title">{ep.title}</h3>
-              <p className="episode-desc">
-                {ep.description.length > 150
-                  ? ep.description.slice(0, 150) + '...'
-                  : ep.description}
-              </p>
               {ep.transcriptUrl && (
-                <span className="transcript-badge">Transcript available</span>
+                <span className="transcript-badge">Transcript</span>
               )}
             </button>
           );

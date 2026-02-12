@@ -1,7 +1,11 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import type { Episode } from '../services/api';
 import { getAudioProxyUrl, formatTime } from '../services/api';
-import { isInAdSegment, getNextContentTime, type AdDetectionResult } from '../services/adDetector';
+import {
+  isInAdSegment,
+  getNextContentTime,
+  type AdDetectionResult,
+} from '../services/adDetector';
 
 interface Props {
   episode: Episode;
@@ -72,19 +76,30 @@ export function Player({ episode, adDetection }: Props) {
     else audio.play();
   }, [isPlaying]);
 
-  const seek = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const audio = audioRef.current;
-    if (!audio || !duration) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
-    audio.currentTime = pct * duration;
-  }, [duration]);
+  const handleSeek = useCallback(
+    (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
+      const audio = audioRef.current;
+      if (!audio || !duration) return;
+      const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+      const clientX =
+        'touches' in e ? e.touches[0].clientX : (e as React.MouseEvent).clientX;
+      const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      audio.currentTime = pct * duration;
+    },
+    [duration]
+  );
 
-  const skip = useCallback((seconds: number) => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    audio.currentTime = Math.max(0, Math.min(audio.currentTime + seconds, duration));
-  }, [duration]);
+  const skip = useCallback(
+    (seconds: number) => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      audio.currentTime = Math.max(
+        0,
+        Math.min(audio.currentTime + seconds, duration)
+      );
+    },
+    [duration]
+  );
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
 
@@ -92,29 +107,36 @@ export function Player({ episode, adDetection }: Props) {
     <div className="player">
       <audio ref={audioRef} src={audioUrl} preload="metadata" />
 
-      <div className="player-info">
-        <h3 className="player-title">{episode.title}</h3>
-        {adDetection && (
-          <div className="ad-info">
-            <span className={`ad-skip-toggle ${adSkipEnabled ? 'enabled' : ''}`}>
-              <button onClick={() => setAdSkipEnabled(!adSkipEnabled)}>
-                {adSkipEnabled ? 'Ad-Skip ON' : 'Ad-Skip OFF'}
-              </button>
-            </span>
-            <span className="ad-stats">
-              {adDetection.segments.length} ad segments detected
-              ({Math.round(adDetection.totalAdTime)}s)
-              {' \u00B7 '}Strategy: {adDetection.strategy}
-            </span>
-            {adsSkipped > 0 && (
-              <span className="ads-skipped">{adsSkipped} ads skipped</span>
-            )}
-          </div>
-        )}
-      </div>
-
       {skippedAd && <div className="skip-notification">{skippedAd}</div>}
 
+      {/* Title row */}
+      <h3 className="player-title">{episode.title}</h3>
+
+      {/* Progress bar — full width, tall touch target */}
+      <div className="progress-container" onClick={handleSeek} onTouchStart={handleSeek}>
+        <div className="progress-bar">
+          <div className="progress-fill" style={{ width: `${progress}%` }} />
+          {adDetection &&
+            duration > 0 &&
+            adDetection.segments.map((seg, i) => {
+              const left = (seg.startTime / duration) * 100;
+              const width = ((seg.endTime - seg.startTime) / duration) * 100;
+              return (
+                <div
+                  key={i}
+                  className="ad-marker"
+                  style={{ left: `${left}%`, width: `${width}%` }}
+                />
+              );
+            })}
+        </div>
+        <div className="time-display">
+          <span>{formatTime(currentTime)}</span>
+          <span>{formatTime(duration)}</span>
+        </div>
+      </div>
+
+      {/* Controls row — big touch targets */}
       <div className="player-controls">
         <button className="control-btn" onClick={() => skip(-15)}>
           -15s
@@ -127,30 +149,23 @@ export function Player({ episode, adDetection }: Props) {
         </button>
       </div>
 
-      <div className="progress-container" onClick={seek}>
-        <div className="progress-bar">
-          <div className="progress-fill" style={{ width: `${progress}%` }} />
-          {/* Render ad segment markers */}
-          {adDetection &&
-            duration > 0 &&
-            adDetection.segments.map((seg, i) => {
-              const left = (seg.startTime / duration) * 100;
-              const width = ((seg.endTime - seg.startTime) / duration) * 100;
-              return (
-                <div
-                  key={i}
-                  className="ad-marker"
-                  style={{ left: `${left}%`, width: `${width}%` }}
-                  title={`${seg.type} (${Math.round(seg.startTime)}s - ${Math.round(seg.endTime)}s) — ${Math.round(seg.confidence * 100)}% confidence`}
-                />
-              );
-            })}
+      {/* Ad info strip */}
+      {adDetection && (
+        <div className="ad-strip">
+          <button
+            className={`ad-toggle ${adSkipEnabled ? 'on' : 'off'}`}
+            onClick={() => setAdSkipEnabled(!adSkipEnabled)}
+          >
+            {adSkipEnabled ? 'Ad-Skip ON' : 'Ad-Skip OFF'}
+          </button>
+          <span className="ad-stats">
+            {adDetection.segments.length} ads ({Math.round(adDetection.totalAdTime)}s)
+          </span>
+          {adsSkipped > 0 && (
+            <span className="ads-skipped-badge">{adsSkipped} skipped</span>
+          )}
         </div>
-        <div className="time-display">
-          <span>{formatTime(currentTime)}</span>
-          <span>{formatTime(duration)}</span>
-        </div>
-      </div>
+      )}
     </div>
   );
 }

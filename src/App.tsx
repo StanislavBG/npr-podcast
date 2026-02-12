@@ -33,9 +33,9 @@ export default function App() {
   const [flowState, setFlowState] = useState<FlowState>(createInitialFlowState());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showTranscript, setShowTranscript] = useState(false);
   const loadedPodcastRef = useRef<string | null>(null);
 
-  // Update a step in the flow state
   const updateStep = useCallback(
     (stepId: string, status: StepStatus) => {
       setFlowState((prev) => ({
@@ -52,7 +52,6 @@ export default function App() {
     fetchPodcasts()
       .then(setPodcasts)
       .catch(() => {
-        // Fallback if server isn't running
         setPodcasts([
           { id: '510325', name: 'The Indicator from Planet Money' },
           { id: '510289', name: 'Planet Money' },
@@ -75,13 +74,11 @@ export default function App() {
       setAdDetection(null);
       setFlowState(createInitialFlowState());
 
-      // Step 1: Fetch RSS
       updateStep('step_fetch_rss', 'running');
       try {
         const data = await fetchEpisodes(podcastId);
         updateStep('step_fetch_rss', 'completed');
 
-        // Step 2: Parse episodes
         updateStep('step_parse_episodes', 'running');
         setEpisodes(data.episodes);
         setPodcastName(data.podcastName);
@@ -107,8 +104,8 @@ export default function App() {
       setSelectedEpisode(episode);
       setTranscript(null);
       setAdDetection(null);
+      setShowTranscript(false);
 
-      // Reset flow steps for transcript + ad detection
       setFlowState((prev) => ({
         ...prev,
         steps: {
@@ -119,7 +116,6 @@ export default function App() {
         },
       }));
 
-      // Step 3: Fetch transcript
       if (episode.transcriptUrl) {
         updateStep('step_fetch_transcript', 'running');
         try {
@@ -127,11 +123,8 @@ export default function App() {
           setTranscript(t);
           updateStep('step_fetch_transcript', 'completed');
 
-          // Step 4: Detect ads
           updateStep('step_detect_ads', 'running');
           const wordCount = t.fullText.split(/\s+/).length;
-          // We'll get actual duration from the audio element later;
-          // for now use the RSS duration as estimate
           const durationParts = episode.duration.split(':').map(Number);
           let durationSec = 0;
           if (durationParts.length === 3)
@@ -145,14 +138,11 @@ export default function App() {
           setAdDetection(detection);
           updateStep('step_detect_ads', 'completed');
 
-          // Step 5: Prepare player
           updateStep('step_prepare_player', 'running');
-          // Small delay to show the step visually
           await new Promise((r) => setTimeout(r, 200));
           updateStep('step_prepare_player', 'completed');
         } catch {
           updateStep('step_fetch_transcript', 'failed');
-          // Still allow playback without transcript — use heuristic detection
           updateStep('step_detect_ads', 'running');
           const durationSec = parseInt(episode.duration) || 600;
           const detection = detectAdSegments(durationSec, 0, false);
@@ -164,7 +154,6 @@ export default function App() {
         }
       } else {
         updateStep('step_fetch_transcript', 'skipped');
-        // Heuristic-only ad detection
         updateStep('step_detect_ads', 'running');
         const durationSec = parseInt(episode.duration) || 600;
         const detection = detectAdSegments(durationSec, 0, false);
@@ -180,60 +169,66 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* ── Top bar: branding + podcast dropdown ── */}
       <header className="app-header">
-        <div className="header-content">
-          <h1>NPR Podcast Player</h1>
-          <p className="subtitle">Ad-free listening experience</p>
-        </div>
-      </header>
-
-      <main className="app-main">
-        <div className="sidebar">
+        <div className="header-row">
+          <div className="header-brand">
+            <h1>NPR Podcast Player</h1>
+            <span className="subtitle">Ad-free listening</span>
+          </div>
           <PodcastSelector
             podcasts={podcasts}
             selected={selectedPodcast}
-            onSelect={(id) => {
-              setSelectedPodcast(id);
-            }}
-          />
-
-          <FlowVisualizer flowState={flowState} />
-        </div>
-
-        <div className="content">
-          {error && <div className="error-banner">{error}</div>}
-
-          <EpisodeList
-            episodes={episodes}
-            podcastName={podcastName}
-            loading={loading}
-            selectedId={selectedEpisode?.id || null}
-            onSelect={selectEpisode}
+            onSelect={setSelectedPodcast}
           />
         </div>
+      </header>
 
-        <div className="player-panel">
-          {selectedEpisode && (
-            <>
-              <Player
-                episode={selectedEpisode}
-                adDetection={adDetection}
-              />
-              {transcript && (
-                <TranscriptView
-                  transcript={transcript}
-                  adDetection={adDetection}
-                />
-              )}
-            </>
+      {/* ── Episode strip: horizontal scrollable cards ── */}
+      <section className="section-episodes">
+        {error && <div className="error-banner">{error}</div>}
+        <EpisodeList
+          episodes={episodes}
+          podcastName={podcastName}
+          loading={loading}
+          selectedId={selectedEpisode?.id || null}
+          onSelect={selectEpisode}
+        />
+      </section>
+
+      {/* ── Player / Ad widget ── */}
+      <section className="section-player">
+        {selectedEpisode ? (
+          <Player episode={selectedEpisode} adDetection={adDetection} />
+        ) : (
+          <div className="player-placeholder">
+            <p>Select an episode to start listening</p>
+          </div>
+        )}
+      </section>
+
+      {/* ── Flow control widget ── */}
+      <section className="section-flow">
+        <FlowVisualizer flowState={flowState} />
+      </section>
+
+      {/* ── Transcript (collapsible) ── */}
+      {transcript && selectedEpisode && (
+        <section className="section-transcript">
+          <button
+            className="transcript-toggle"
+            onClick={() => setShowTranscript(!showTranscript)}
+          >
+            <span>Transcript</span>
+            <span className={`toggle-chevron ${showTranscript ? 'open' : ''}`}>
+              &#9662;
+            </span>
+          </button>
+          {showTranscript && (
+            <TranscriptView transcript={transcript} adDetection={adDetection} />
           )}
-          {!selectedEpisode && (
-            <div className="player-placeholder">
-              <p>Select an episode to start listening</p>
-            </div>
-          )}
-        </div>
-      </main>
+        </section>
+      )}
     </div>
   );
 }

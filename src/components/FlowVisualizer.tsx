@@ -16,11 +16,14 @@ export function FlowVisualizer({ flowState }: Props) {
   const activity = getFlowActivity(flowState);
 
   return (
-    <div className="flow-visualizer">
-      <h2>Processing Flow</h2>
-      <p className="flow-subtitle">bilko-flow pipeline</p>
+    <div className="flow-widget">
+      <div className="flow-widget-header">
+        <span className="flow-widget-title">Pipeline</span>
+        <span className="flow-widget-badge">bilko-flow</span>
+      </div>
       <FlowProgress
-        mode="expanded"
+        mode="auto"
+        autoBreakpoint={500}
         steps={steps}
         label="NPR Podcast Pipeline"
         status={status}
