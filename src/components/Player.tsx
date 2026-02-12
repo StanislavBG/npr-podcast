@@ -3,6 +3,32 @@ import type { Episode } from '../services/api';
 import { getAudioProxyUrl, formatTime } from '../services/api';
 import { isInAdSegment, getNextContentTime, type AdDetectionResult } from '../services/adDetector';
 
+function CopyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function LinkIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    </svg>
+  );
+}
+
 interface Props {
   episode: Episode;
   adDetection: AdDetectionResult | null;
@@ -74,6 +100,21 @@ export function Player({ episode, adDetection }: Props) {
     [dur]
   );
 
+  const [copied, setCopied] = useState(false);
+
+  const copyLink = useCallback(() => {
+    if (!episode.link) return;
+    navigator.clipboard.writeText(episode.link).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, [episode.link]);
+
+  // Reset copied state when episode changes
+  useEffect(() => {
+    setCopied(false);
+  }, [episode.id]);
+
   const pct = dur > 0 ? (time / dur) * 100 : 0;
 
   return (
@@ -87,6 +128,24 @@ export function Player({ episode, adDetection }: Props) {
       <div className="now">{episode.title}</div>
       {episode.description && (
         <div className="desc">{episode.description}</div>
+      )}
+
+      {episode.link && (
+        <div className="episode-link-row">
+          <a
+            className="episode-link"
+            href={episode.link}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={episode.link}
+          >
+            <LinkIcon />
+            <span className="episode-link-text">{episode.link.replace(/^https?:\/\/(www\.)?/, '')}</span>
+          </a>
+          <button className="copy-btn" onClick={copyLink} title="Copy link">
+            {copied ? <CheckIcon /> : <CopyIcon />}
+          </button>
+        </div>
       )}
 
       {skippedAd && <div className="skip-notification">{skippedAd}</div>}

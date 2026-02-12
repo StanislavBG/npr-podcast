@@ -156,6 +156,24 @@ button {
 
 .ep.on .ep-title { color: #fff; }
 
+/* Episode external link icon */
+.ep-link-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 6px;
+  padding: 4px;
+  border-radius: 6px;
+  color: var(--fg3);
+  transition: color 0.15s, background 0.15s;
+  text-decoration: none;
+}
+.ep-link-icon:hover,
+.ep-link-icon:active {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.1);
+}
+
 /* ── Loading dot ── */
 .dot {
   width: 6px;
@@ -216,6 +234,67 @@ button {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* Episode link row (in Player) */
+.episode-link-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 20px;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.episode-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fg3);
+  text-decoration: none;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 4px 8px;
+  border-radius: 8px;
+  transition: color 0.15s, background 0.15s;
+  overflow: hidden;
+  max-width: calc(100% - 36px);
+}
+
+.episode-link:hover,
+.episode-link:active {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.episode-link svg {
+  flex-shrink: 0;
+}
+
+.episode-link-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--fg3);
+  transition: color 0.15s, background 0.15s;
+}
+
+.copy-btn:hover,
+.copy-btn:active {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 /* No audio fallback */
