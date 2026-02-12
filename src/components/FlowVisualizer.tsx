@@ -29,8 +29,12 @@ export function FlowVisualizer({ flowState }: Props) {
           errorColor: 'bg-red-500',
           pendingColor: 'bg-gray-700',
           stepColors: {
+            'http.request': 'bg-blue-600',
+            'ai.generate-text': 'bg-purple-500',
+            'ai.summarize': 'bg-violet-600',
             'external-input': 'bg-blue-600',
             transform: 'bg-purple-600',
+            llm: 'bg-purple-500',
             display: 'bg-emerald-600',
           },
           activeTextColor: 'text-indigo-200',

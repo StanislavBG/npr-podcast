@@ -4,17 +4,21 @@ import {
   WorkflowStatus,
   DeterminismGrade,
 } from 'bilko-flow';
-import type { FlowDefinition, FlowProgressStep } from 'bilko-flow/react';
+import type { FlowProgressStep } from 'bilko-flow/react';
 
 /**
  * Podcast processing workflow using bilko-flow DSL.
  *
+ * Every post-episode-selection step uses bilko-flow LLM components.
+ * No regex. No word-count heuristics. chatJSON all the way down.
+ *
  * Pipeline:
- *   1. fetch_rss       – Pull the podcast RSS feed
- *   2. parse_episodes  – Extract episode list from XML
- *   3. fetch_transcript – Get NPR transcript for selected episode
- *   4. detect_ads       – Analyze transcript to find ad/sponsor segments
- *   5. prepare_player   – Build skip-map and emit playback-ready data
+ *   1. fetch_rss            – Pull the podcast RSS feed          (http.request)
+ *   2. parse_episodes       – Extract episode list from XML      (http.request — server parses)
+ *   3. fetch_transcript     – Get NPR transcript HTML            (http.request)
+ *   4. llm_parse_transcript – LLM extracts structured segments   (ai.generate-text)
+ *   5. llm_detect_ads       – LLM identifies ad time ranges      (ai.generate-text)
+ *   6. llm_prepare_player   – LLM builds skip-map + summary      (ai.summarize)
  */
 
 export function createPodcastWorkflow(podcastId: string): Workflow {
@@ -47,7 +51,7 @@ export function createPodcastWorkflow(podcastId: string): Workflow {
       id: 'step_parse_episodes',
       workflowId: `wf_podcast_${podcastId}`,
       name: 'Parse Episodes',
-      type: 'transform.map',
+      type: 'http.request',
       dependsOn: ['step_fetch_rss'],
       inputs: { transform: 'extract_episode_metadata' },
       policy: { timeoutMs: 5000, maxAttempts: 1 },
@@ -75,24 +79,77 @@ export function createPodcastWorkflow(podcastId: string): Workflow {
       },
     },
     {
-      id: 'step_detect_ads',
+      id: 'step_llm_parse_transcript',
       workflowId: `wf_podcast_${podcastId}`,
-      name: 'Detect Ad Segments',
-      type: 'transform.filter',
+      name: 'LLM Parse Transcript',
+      type: 'ai.generate-text',
       dependsOn: ['step_fetch_transcript'],
-      inputs: { strategy: 'transcript_gap_analysis' },
-      policy: { timeoutMs: 10000, maxAttempts: 1 },
-      determinism: { pureFunction: true },
+      inputs: {
+        prompt: 'Extract structured transcript segments with speakers from raw HTML. Identify all sponsor/ad language.',
+        model: 'configurable',
+      },
+      policy: { timeoutMs: 30000, maxAttempts: 3 },
+      determinism: {
+        usesExternalApis: true,
+        pureFunction: false,
+        externalDependencies: [
+          {
+            name: 'LLM Provider',
+            kind: 'http-api',
+            deterministic: false,
+            evidenceCapture: 'response-hash',
+          },
+        ],
+      },
     },
     {
-      id: 'step_prepare_player',
+      id: 'step_llm_detect_ads',
       workflowId: `wf_podcast_${podcastId}`,
-      name: 'Prepare Player',
-      type: 'transform.reduce',
-      dependsOn: ['step_detect_ads'],
-      inputs: { output: 'playback_config' },
-      policy: { timeoutMs: 5000, maxAttempts: 1 },
-      determinism: { pureFunction: true },
+      name: 'LLM Detect Ads',
+      type: 'ai.generate-text',
+      dependsOn: ['step_llm_parse_transcript'],
+      inputs: {
+        prompt: 'Given parsed transcript and audio duration, identify ad segments with precise time ranges, types, and confidence scores.',
+        model: 'configurable',
+      },
+      policy: { timeoutMs: 30000, maxAttempts: 3 },
+      determinism: {
+        usesExternalApis: true,
+        pureFunction: false,
+        externalDependencies: [
+          {
+            name: 'LLM Provider',
+            kind: 'http-api',
+            deterministic: false,
+            evidenceCapture: 'response-hash',
+          },
+        ],
+      },
+    },
+    {
+      id: 'step_llm_prepare_player',
+      workflowId: `wf_podcast_${podcastId}`,
+      name: 'LLM Prepare Player',
+      type: 'ai.summarize',
+      dependsOn: ['step_llm_detect_ads'],
+      inputs: {
+        prompt: 'Summarize episode content and produce final playback configuration with skip-map.',
+        model: 'configurable',
+        output: 'playback_config',
+      },
+      policy: { timeoutMs: 30000, maxAttempts: 2 },
+      determinism: {
+        usesExternalApis: true,
+        pureFunction: false,
+        externalDependencies: [
+          {
+            name: 'LLM Provider',
+            kind: 'http-api',
+            deterministic: false,
+            evidenceCapture: 'response-hash',
+          },
+        ],
+      },
     },
   ];
 
@@ -102,7 +159,7 @@ export function createPodcastWorkflow(podcastId: string): Workflow {
     projectId: 'proj_npr_podcast',
     environmentId: 'env_browser',
     name: `Podcast Processing: ${podcastId}`,
-    version: 1,
+    version: 2,
     specVersion: '1.0.0',
     status: WorkflowStatus.Active,
     createdAt: new Date().toISOString(),
@@ -114,21 +171,24 @@ export function createPodcastWorkflow(podcastId: string): Workflow {
   };
 }
 
-/** Step metadata for the flow visualizer */
+// ─── Step metadata for flow visualizer ────────────────────────────────────
+
 const STEP_META: Record<string, { label: string; type: string }> = {
-  step_fetch_rss:        { label: 'Fetch RSS Feed',     type: 'external-input' },
-  step_parse_episodes:   { label: 'Parse Episodes',     type: 'transform' },
-  step_fetch_transcript: { label: 'Fetch Transcript',   type: 'external-input' },
-  step_detect_ads:       { label: 'Detect Ad Segments', type: 'transform' },
-  step_prepare_player:   { label: 'Prepare Player',     type: 'display' },
+  step_fetch_rss:              { label: 'Fetch RSS Feed',         type: 'http.request' },
+  step_parse_episodes:         { label: 'Parse Episodes',         type: 'http.request' },
+  step_fetch_transcript:       { label: 'Fetch Transcript',       type: 'http.request' },
+  step_llm_parse_transcript:   { label: 'LLM Parse Transcript',   type: 'ai.generate-text' },
+  step_llm_detect_ads:         { label: 'LLM Detect Ads',         type: 'ai.generate-text' },
+  step_llm_prepare_player:     { label: 'LLM Prepare Player',     type: 'ai.summarize' },
 };
 
 const STEP_ORDER = [
   'step_fetch_rss',
   'step_parse_episodes',
   'step_fetch_transcript',
-  'step_detect_ads',
-  'step_prepare_player',
+  'step_llm_parse_transcript',
+  'step_llm_detect_ads',
+  'step_llm_prepare_player',
 ];
 
 /** Internal step tracking status */
@@ -142,13 +202,7 @@ export interface FlowState {
 
 export function createInitialFlowState(): FlowState {
   return {
-    steps: {
-      step_fetch_rss: 'pending',
-      step_parse_episodes: 'pending',
-      step_fetch_transcript: 'pending',
-      step_detect_ads: 'pending',
-      step_prepare_player: 'pending',
-    },
+    steps: Object.fromEntries(STEP_ORDER.map((id) => [id, 'pending' as StepStatus])),
     currentStep: null,
     error: null,
   };
@@ -178,24 +232,6 @@ export function toFlowProgressSteps(state: FlowState): FlowProgressStep[] {
   }));
 }
 
-/** Build a bilko-flow FlowDefinition for canvas visualization */
-export function toFlowDefinition(podcastId: string): FlowDefinition {
-  return {
-    id: `wf_podcast_${podcastId}`,
-    name: 'NPR Podcast Pipeline',
-    description: 'Fetch, parse, transcript, detect ads, play',
-    version: '1.0.0',
-    tags: ['podcast', 'npr', 'ad-skip'],
-    steps: STEP_ORDER.map((id) => ({
-      id,
-      name: STEP_META[id].label,
-      type: STEP_META[id].type as any,
-      description: STEP_META[id].label,
-      dependsOn: id === 'step_fetch_rss' ? [] : [STEP_ORDER[STEP_ORDER.indexOf(id) - 1]],
-    })),
-  };
-}
-
 /** Get overall flow status */
 export function getFlowStatus(state: FlowState): 'idle' | 'running' | 'complete' | 'error' {
   const statuses = Object.values(state.steps);
@@ -211,3 +247,6 @@ export function getFlowActivity(state: FlowState): string {
   const meta = STEP_META[state.currentStep];
   return meta ? `${meta.label}...` : '';
 }
+
+/** Export step order for consumers */
+export { STEP_ORDER, STEP_META };

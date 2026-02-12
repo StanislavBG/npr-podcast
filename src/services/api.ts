@@ -1,3 +1,5 @@
+import type { AdDetectionResult, LLMTranscriptResult, PlaybackConfig } from './adDetector';
+
 const BASE = '/api';
 
 export interface Podcast {
@@ -16,16 +18,7 @@ export interface Episode {
   transcriptUrl: string | null;
 }
 
-export interface TranscriptSegment {
-  speaker: string;
-  text: string;
-}
-
-export interface TranscriptData {
-  segments: TranscriptSegment[];
-  fullText: string;
-  adMarkers: Array<{ type: string; pattern: string }>;
-}
+// ─── Existing endpoints ─────────────────────────────────────────────────────
 
 export async function fetchPodcasts(): Promise<Podcast[]> {
   const res = await fetch(`${BASE}/podcasts`);
@@ -41,9 +34,10 @@ export async function fetchEpisodes(
   return res.json();
 }
 
-export async function fetchTranscript(
+/** Fetch raw transcript HTML (no parsing — LLM does that now) */
+export async function fetchTranscriptHtml(
   transcriptUrl: string
-): Promise<TranscriptData> {
+): Promise<{ html: string }> {
   const res = await fetch(
     `${BASE}/transcript?url=${encodeURIComponent(transcriptUrl)}`
   );
@@ -55,10 +49,62 @@ export function getAudioProxyUrl(audioUrl: string): string {
   return `${BASE}/audio?url=${encodeURIComponent(audioUrl)}`;
 }
 
+// ─── LLM Pipeline endpoints (bilko-flow chatJSON on server) ─────────────────
+
+/** Step 4: LLM parses raw HTML into structured transcript with ad flags */
+export async function llmParseTranscript(html: string): Promise<LLMTranscriptResult> {
+  const res = await fetch(`${BASE}/llm/parse-transcript`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ html }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || 'LLM parse-transcript failed');
+  }
+  return res.json();
+}
+
+/** Step 5: LLM analyzes transcript + duration to produce ad time ranges */
+export async function llmDetectAds(
+  transcript: LLMTranscriptResult,
+  audioDurationSeconds: number,
+  episodeTitle: string,
+): Promise<AdDetectionResult> {
+  const res = await fetch(`${BASE}/llm/detect-ads`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ transcript, audioDurationSeconds, episodeTitle }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || 'LLM detect-ads failed');
+  }
+  return res.json();
+}
+
+/** Step 6: LLM summarizes episode and produces final skip map */
+export async function llmPreparePlayback(
+  transcript: LLMTranscriptResult,
+  adDetection: AdDetectionResult,
+  episodeTitle: string,
+  episodeDescription: string,
+): Promise<PlaybackConfig> {
+  const res = await fetch(`${BASE}/llm/prepare-playback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ transcript, adDetection, episodeTitle, episodeDescription }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || 'LLM prepare-playback failed');
+  }
+  return res.json();
+}
+
 /** Parse "MM:SS" or "HH:MM:SS" or raw seconds into seconds number */
 export function parseDuration(duration: string): number {
   if (!duration) return 0;
-  // Already a number (seconds)
   if (/^\d+$/.test(duration)) return parseInt(duration, 10);
   const parts = duration.split(':').map(Number);
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
