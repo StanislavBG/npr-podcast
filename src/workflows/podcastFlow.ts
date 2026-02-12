@@ -154,6 +154,9 @@ export function createInitialFlowState(): FlowState {
   };
 }
 
+/** Bilko-flow progress step status values */
+export type ProgressStepStatus = 'pending' | 'active' | 'complete' | 'error';
+
 /** Map internal status to bilko-flow FlowProgressStep status */
 function mapStatus(s: StepStatus): FlowProgressStep['status'] {
   switch (s) {
