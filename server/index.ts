@@ -1,5 +1,8 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { XMLParser } from 'fast-xml-parser';
 import {
   chatJSON,
@@ -593,8 +596,17 @@ app.get('/api/audio', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`NPR Podcast server running on http://localhost:${PORT}`);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const distPath = path.resolve(__dirname, '..', 'dist');
+if (fs.existsSync(path.join(distPath, 'index.html'))) {
+  app.use(express.static(distPath));
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+}
+const PORT = parseInt(String(process.env.PORT || '5000'), 10);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`NPR Podcast server running on http://0.0.0.0:${PORT}`);
   console.log(`LLM provider: ${LLM_PROVIDER}, model: ${LLM_MODEL}, key: ${LLM_API_KEY ? '***set***' : 'NOT SET (fallback mode)'}`);
 });
