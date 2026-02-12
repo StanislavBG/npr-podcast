@@ -99,14 +99,11 @@ export default function App() {
     load(selected);
   }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── Episode selection: run the full LLM pipeline ──────────────────────────
-
   const pick = useCallback(async (ep: Episode) => {
     setEpisode(ep);
     setAds(null);
     setPlayback(null);
 
-    // Reset per-episode flow steps
     setFlow((prev) => ({
       ...prev,
       steps: {
@@ -120,7 +117,6 @@ export default function App() {
 
     const durationSec = parseDuration(ep.duration);
 
-    // ── Step 3: Fetch raw transcript HTML ──────────────────────────────────
     let html = '';
     if (ep.transcriptUrl) {
       setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'running'));
@@ -135,7 +131,6 @@ export default function App() {
       setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
     }
 
-    // ── Step 4: LLM Parse Transcript (ai.generate-text via chatJSON) ──────
     setFlow((prev) => setStep(prev, 'step_llm_parse_transcript', 'running'));
     let transcript;
     try {
@@ -147,7 +142,6 @@ export default function App() {
       return;
     }
 
-    // ── Step 5: LLM Detect Ads (ai.generate-text via chatJSON) ────────────
     setFlow((prev) => setStep(prev, 'step_llm_detect_ads', 'running'));
     let adResult: AdDetectionResult;
     try {
@@ -160,7 +154,6 @@ export default function App() {
       return;
     }
 
-    // ── Step 6: LLM Prepare Player (ai.summarize via chatJSON) ────────────
     setFlow((prev) => setStep(prev, 'step_llm_prepare_player', 'running'));
     try {
       const config = await llmPreparePlayback(
@@ -170,7 +163,6 @@ export default function App() {
         ep.description,
       );
       setPlayback(config);
-      // Use the LLM's refined skip map if it adjusted anything
       if (config.skipMap && config.skipMap.length > 0) {
         setAds({
           segments: config.skipMap,
@@ -185,7 +177,6 @@ export default function App() {
       });
     } catch (err) {
       console.error('LLM prepare-playback failed:', err);
-      // Non-fatal: ads are already set from step 5
       setFlow((prev) => {
         const fs = setStep(prev, 'step_llm_prepare_player', 'skipped');
         return { ...fs, currentStep: null };
@@ -194,47 +185,49 @@ export default function App() {
   }, []);
 
   return (
-    <div className="phone-frame">
-      <div className="phone-notch" />
-      <div className="app">
-        <PodcastSelector
-          podcasts={podcasts}
-          selected={selected}
-          onSelect={setSelected}
-        />
+    <div className="shell">
+      <header className="header">
+        <h1 className="header-title">NPR Podcasts</h1>
+      </header>
 
-        <EpisodeList
-          episodes={episodes}
-          loading={loading}
-          selectedId={episode?.id || null}
-          onSelect={pick}
-        />
+      <PodcastSelector
+        podcasts={podcasts}
+        selected={selected}
+        onSelect={setSelected}
+      />
 
+      <main className="content">
         {error && !episodes.length ? (
           <div className="empty">{error}</div>
-        ) : episode ? (
-          <>
-            <Player episode={episode} adDetection={ads} />
-            {playback && (
-              <div className="llm-summary">
-                <p className="summary-text">{playback.summary}</p>
-                {playback.topics.length > 0 && (
-                  <div className="topic-tags">
-                    {playback.topics.map((t, i) => (
-                      <span key={i} className="topic-tag">{t}</span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </>
         ) : (
-          <div className="empty">Tap an episode</div>
+          <EpisodeList
+            episodes={episodes}
+            loading={loading}
+            selectedId={episode?.id || null}
+            onSelect={pick}
+          />
         )}
+      </main>
 
-        <FlowVisualizer flowState={flow} />
-        <div className="home-indicator" />
-      </div>
+      {episode && (
+        <div className="player-dock">
+          <Player episode={episode} adDetection={ads} />
+          {playback && (
+            <div className="llm-summary">
+              <p className="summary-text">{playback.summary}</p>
+              {playback.topics.length > 0 && (
+                <div className="topic-tags">
+                  {playback.topics.map((t, i) => (
+                    <span key={i} className="topic-tag">{t}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <FlowVisualizer flowState={flow} />
     </div>
   );
 }
