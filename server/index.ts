@@ -17,6 +17,10 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 // ─── LLM Configuration ──────────────────────────────────────────────────────
 
 const LLM_PROVIDER = (process.env.BILKO_LLM_PROVIDER || 'openai') as LLMProvider;
