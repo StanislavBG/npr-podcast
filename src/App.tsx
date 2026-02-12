@@ -136,29 +136,33 @@ export default function App() {
   }, []);
 
   return (
-    <div className="app">
-      <PodcastSelector
-        podcasts={podcasts}
-        selected={selected}
-        onSelect={setSelected}
-      />
+    <div className="phone-frame">
+      <div className="phone-notch" />
+      <div className="app">
+        <PodcastSelector
+          podcasts={podcasts}
+          selected={selected}
+          onSelect={setSelected}
+        />
 
-      <EpisodeList
-        episodes={episodes}
-        loading={loading}
-        selectedId={episode?.id || null}
-        onSelect={pick}
-      />
+        <EpisodeList
+          episodes={episodes}
+          loading={loading}
+          selectedId={episode?.id || null}
+          onSelect={pick}
+        />
 
-      {error && !episodes.length ? (
-        <div className="empty">{error}</div>
-      ) : episode ? (
-        <Player episode={episode} adDetection={ads} />
-      ) : (
-        <div className="empty">Tap an episode</div>
-      )}
+        {error && !episodes.length ? (
+          <div className="empty">{error}</div>
+        ) : episode ? (
+          <Player episode={episode} adDetection={ads} />
+        ) : (
+          <div className="empty">Tap an episode</div>
+        )}
 
-      <FlowVisualizer flowState={flow} />
+        <FlowVisualizer flowState={flow} />
+        <div className="home-indicator" />
+      </div>
     </div>
   );
 }
