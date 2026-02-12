@@ -215,8 +215,27 @@ button {
   overflow: hidden;
 }
 
+/* No audio fallback */
+.no-audio {
+  text-align: center;
+  font-size: 13px;
+  color: var(--fg3);
+  padding: 8px 0;
+}
+
+/* Skip notification */
+.skip-notification {
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #818cf8;
+  padding: 4px 0 8px;
+  animation: pulse 1s ease-in-out;
+}
+
 /* Progress */
 .bar {
+  position: relative;
   height: 4px;
   background: rgba(255, 255, 255, 0.1);
   border-radius: 2px;
@@ -234,6 +253,16 @@ button {
   transition: width 0.1s linear;
   pointer-events: none;
   margin-top: 10px;
+}
+
+/* Ad segment markers on progress bar */
+.ad-marker {
+  position: absolute;
+  top: 10px;
+  height: 4px;
+  background: rgba(239, 68, 68, 0.5);
+  border-radius: 2px;
+  pointer-events: none;
 }
 
 .times {
@@ -281,148 +310,12 @@ button {
 }
 .play:active { transform: scale(0.93); }
 
-/* ── Flow Widget (vertical mobile stack) ── */
+/* ── Flow Widget (bilko-flow FlowProgress container) ── */
 .flow-widget {
   flex-shrink: 0;
-  padding: 12px 20px;
+  padding: 12px 16px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
-}
-
-.flow-widget-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-}
-
-.flow-widget-title {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--fg3);
-}
-
-.flow-widget-badge {
-  font-size: 10px;
-  font-weight: 500;
-  padding: 2px 8px;
-  border-radius: 99px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--fg3);
-}
-
-/* ── Vertical step stack ── */
-.flow-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-}
-
-.flow-step {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 0;
-}
-
-/* Vertical connector line between steps */
-.flow-step-line {
-  position: absolute;
-  left: 11px;
-  top: 100%;
-  width: 1px;
-  height: 0;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-/* Type icon circle */
-.flow-step-type {
-  flex-shrink: 0;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--fg3);
-  transition: background 0.2s, color 0.2s;
-}
-
-.flow-step--active .flow-step-type {
-  background: rgba(99, 102, 241, 0.2);
-  color: #818cf8;
-}
-
-.flow-step--complete .flow-step-type {
-  background: rgba(34, 197, 94, 0.15);
-  color: #4ade80;
-}
-
-.flow-step--error .flow-step-type {
-  background: rgba(239, 68, 68, 0.15);
-  color: #f87171;
-}
-
-/* Step label */
-.flow-step-body {
-  flex: 1;
-  min-width: 0;
-}
-
-.flow-step-label {
-  font-size: 13px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  color: var(--fg3);
-  transition: color 0.2s;
-}
-
-.flow-step--active .flow-step-label {
-  color: var(--fg);
-}
-
-.flow-step--complete .flow-step-label {
-  color: var(--fg2);
-}
-
-.flow-step--error .flow-step-label {
-  color: #fca5a5;
-}
-
-/* Status indicator (right side) */
-.flow-step-status {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-}
-
-.flow-step-icon-done { color: #4ade80; }
-.flow-step-icon-error { color: #f87171; }
-.flow-step-icon-pending { color: rgba(255, 255, 255, 0.12); }
-
-.flow-step-icon-active {
-  color: #818cf8;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-/* Activity text */
-.flow-activity {
-  margin-top: 4px;
-  font-size: 11px;
-  font-weight: 500;
-  color: #818cf8;
-  letter-spacing: 0.01em;
-  animation: pulse 1.5s ease-in-out infinite;
+  font-size: 12px;
 }
 
 /* ══════════════════════════════════════════════
@@ -506,11 +399,7 @@ button {
   }
 
   .flow-widget {
-    padding: 10px 20px 4px;
-  }
-
-  .flow-step {
-    padding: 5px 0;
+    padding: 10px 12px 4px;
   }
 
   .home-indicator {
@@ -555,10 +444,6 @@ button {
   }
 
   .flow-widget {
-    padding: 12px 20px 6px;
-  }
-
-  .flow-step {
-    padding: 6px 0;
+    padding: 12px 16px 6px;
   }
 }
