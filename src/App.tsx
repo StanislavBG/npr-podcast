@@ -18,6 +18,7 @@ export default function App() {
   const [episode, setEpisode] = useState<Episode | null>(null);
   const [ads, setAds] = useState<AdDetectionResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const loaded = useRef<string | null>(null);
 
   useEffect(() => {
@@ -40,12 +41,13 @@ export default function App() {
       setLoading(true);
       setEpisode(null);
       setAds(null);
+      setError(null);
       try {
         const data = await fetchEpisodes(id);
         setEpisodes(data.episodes);
         loaded.current = id;
       } catch {
-        /* silent */
+        setError('Could not load episodes. Check your connection.');
       } finally {
         setLoading(false);
       }
@@ -95,7 +97,9 @@ export default function App() {
         onSelect={pick}
       />
 
-      {episode ? (
+      {error && !episodes.length ? (
+        <div className="empty">{error}</div>
+      ) : episode ? (
         <Player episode={episode} adDetection={ads} />
       ) : (
         <div className="empty">Tap an episode</div>
