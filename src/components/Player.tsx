@@ -10,146 +10,96 @@ interface Props {
 
 export function Player({ episode, adDetection }: Props) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [adSkipEnabled, setAdSkipEnabled] = useState(true);
-  const [skippedAd, setSkippedAd] = useState<string | null>(null);
-  const [adsSkipped, setAdsSkipped] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [time, setTime] = useState(0);
+  const [dur, setDur] = useState(0);
 
-  const audioUrl = getAudioProxyUrl(episode.audioUrl);
+  const src = getAudioProxyUrl(episode.audioUrl);
 
-  // Auto-skip ads
+  // Always skip ads. No toggle. It just works.
   useEffect(() => {
-    if (!adSkipEnabled || !adDetection || !audioRef.current) return;
-
+    if (!adDetection || !audioRef.current) return;
     const audio = audioRef.current;
-    const handleTimeUpdate = () => {
-      const time = audio.currentTime;
-      setCurrentTime(time);
-
-      const adSegment = isInAdSegment(time, adDetection.segments);
-      if (adSegment) {
-        const skipTo = getNextContentTime(time, adDetection.segments);
-        audio.currentTime = skipTo;
-        setAdsSkipped((n) => n + 1);
-        setSkippedAd(`Skipped ${adSegment.type}`);
-        setTimeout(() => setSkippedAd(null), 2000);
+    const onTime = () => {
+      setTime(audio.currentTime);
+      if (isInAdSegment(audio.currentTime, adDetection.segments)) {
+        audio.currentTime = getNextContentTime(audio.currentTime, adDetection.segments);
       }
     };
+    audio.addEventListener('timeupdate', onTime);
+    return () => audio.removeEventListener('timeupdate', onTime);
+  }, [adDetection]);
 
-    audio.addEventListener('timeupdate', handleTimeUpdate);
-    return () => audio.removeEventListener('timeupdate', handleTimeUpdate);
-  }, [adSkipEnabled, adDetection]);
-
-  // Track duration
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    const onLoaded = () => setDuration(audio.duration);
-    const onTimeUpdate = () => setCurrentTime(audio.currentTime);
-    const onPlay = () => setIsPlaying(true);
-    const onPause = () => setIsPlaying(false);
-
-    audio.addEventListener('loadedmetadata', onLoaded);
-    audio.addEventListener('timeupdate', onTimeUpdate);
-    audio.addEventListener('play', onPlay);
-    audio.addEventListener('pause', onPause);
-
+    const a = audioRef.current;
+    if (!a) return;
+    const h = {
+      loadedmetadata: () => setDur(a.duration),
+      timeupdate: () => setTime(a.currentTime),
+      play: () => setPlaying(true),
+      pause: () => setPlaying(false),
+    };
+    (Object.keys(h) as (keyof typeof h)[]).forEach((e) => a.addEventListener(e, h[e]));
     return () => {
-      audio.removeEventListener('loadedmetadata', onLoaded);
-      audio.removeEventListener('timeupdate', onTimeUpdate);
-      audio.removeEventListener('play', onPlay);
-      audio.removeEventListener('pause', onPause);
+      (Object.keys(h) as (keyof typeof h)[]).forEach((e) => a.removeEventListener(e, h[e]));
     };
   }, [episode]);
 
-  const togglePlay = useCallback(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    if (isPlaying) audio.pause();
-    else audio.play();
-  }, [isPlaying]);
+  const toggle = useCallback(() => {
+    const a = audioRef.current;
+    if (!a) return;
+    playing ? a.pause() : a.play();
+  }, [playing]);
 
-  const seek = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const audio = audioRef.current;
-    if (!audio || !duration) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
-    audio.currentTime = pct * duration;
-  }, [duration]);
+  const seek = useCallback(
+    (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
+      const a = audioRef.current;
+      if (!a || !dur) return;
+      const r = e.currentTarget.getBoundingClientRect();
+      const x = 'touches' in e ? e.touches[0].clientX : e.clientX;
+      a.currentTime = Math.max(0, Math.min(1, (x - r.left) / r.width)) * dur;
+    },
+    [dur]
+  );
 
-  const skip = useCallback((seconds: number) => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    audio.currentTime = Math.max(0, Math.min(audio.currentTime + seconds, duration));
-  }, [duration]);
+  const skip = useCallback(
+    (s: number) => {
+      const a = audioRef.current;
+      if (a) a.currentTime = Math.max(0, Math.min(a.currentTime + s, dur));
+    },
+    [dur]
+  );
 
-  const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const pct = dur > 0 ? (time / dur) * 100 : 0;
 
   return (
     <div className="player">
-      <audio ref={audioRef} src={audioUrl} preload="metadata" />
+      <audio ref={audioRef} src={src} preload="metadata" />
 
-      <div className="player-info">
-        <h3 className="player-title">{episode.title}</h3>
-        {adDetection && (
-          <div className="ad-info">
-            <span className={`ad-skip-toggle ${adSkipEnabled ? 'enabled' : ''}`}>
-              <button onClick={() => setAdSkipEnabled(!adSkipEnabled)}>
-                {adSkipEnabled ? 'Ad-Skip ON' : 'Ad-Skip OFF'}
-              </button>
-            </span>
-            <span className="ad-stats">
-              {adDetection.segments.length} ad segments detected
-              ({Math.round(adDetection.totalAdTime)}s)
-              {' \u00B7 '}Strategy: {adDetection.strategy}
-            </span>
-            {adsSkipped > 0 && (
-              <span className="ads-skipped">{adsSkipped} ads skipped</span>
-            )}
-          </div>
-        )}
+      <div className="now">{episode.title}</div>
+
+      <div className="bar" onClick={seek} onTouchStart={seek}>
+        <div className="fill" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="times">
+        <span>{formatTime(time)}</span>
+        <span>{formatTime(dur)}</span>
       </div>
 
-      {skippedAd && <div className="skip-notification">{skippedAd}</div>}
-
-      <div className="player-controls">
-        <button className="control-btn" onClick={() => skip(-15)}>
-          -15s
+      <div className="controls">
+        <button className="ctl" onClick={() => skip(-15)}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
         </button>
-        <button className="control-btn play-btn" onClick={togglePlay}>
-          {isPlaying ? '\u23F8' : '\u25B6'}
+        <button className="play" onClick={toggle}>
+          {playing ? (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+          ) : (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          )}
         </button>
-        <button className="control-btn" onClick={() => skip(15)}>
-          +15s
+        <button className="ctl" onClick={() => skip(15)}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"/></svg>
         </button>
-      </div>
-
-      <div className="progress-container" onClick={seek}>
-        <div className="progress-bar">
-          <div className="progress-fill" style={{ width: `${progress}%` }} />
-          {/* Render ad segment markers */}
-          {adDetection &&
-            duration > 0 &&
-            adDetection.segments.map((seg, i) => {
-              const left = (seg.startTime / duration) * 100;
-              const width = ((seg.endTime - seg.startTime) / duration) * 100;
-              return (
-                <div
-                  key={i}
-                  className="ad-marker"
-                  style={{ left: `${left}%`, width: `${width}%` }}
-                  title={`${seg.type} (${Math.round(seg.startTime)}s - ${Math.round(seg.endTime)}s) — ${Math.round(seg.confidence * 100)}% confidence`}
-                />
-              );
-            })}
-        </div>
-        <div className="time-display">
-          <span>{formatTime(currentTime)}</span>
-          <span>{formatTime(duration)}</span>
-        </div>
       </div>
     </div>
   );
