@@ -1,9 +1,3 @@
-/* ═══════════════════════════════════════════
-   NPR Podcast Player — Mobile-first CSS
-   Stack: Header → Episodes → Player → Flow → Transcript
-   ═══════════════════════════════════════════ */
-
-/* ───── Reset & Variables ───── */
 *,
 *::before,
 *::after {
@@ -13,675 +7,241 @@
 }
 
 :root {
-  --bg-primary: #0f0f17;
-  --bg-secondary: #161624;
-  --bg-card: #1c1c30;
-  --bg-hover: #24243c;
-  --text-primary: #e8e8f0;
-  --text-secondary: #9898b0;
-  --text-muted: #606080;
-  --accent: #6366f1;
-  --accent-hover: #818cf8;
-  --success: #22c55e;
-  --warning: #f59e0b;
-  --danger: #ef4444;
-  --border: #2a2a40;
-  --radius: 10px;
-  --radius-lg: 14px;
-  --safe-bottom: env(safe-area-inset-bottom, 0px);
-  --safe-top: env(safe-area-inset-top, 0px);
+  --fg: #f5f5f7;
+  --fg2: rgba(245, 245, 247, 0.5);
+  --fg3: rgba(245, 245, 247, 0.2);
+  --bg: #000;
+  --accent: #fff;
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-t: env(safe-area-inset-top, 0px);
 }
 
-html {
-  -webkit-text-size-adjust: 100%;
-}
+html { -webkit-text-size-adjust: 100%; }
 
 body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  line-height: 1.5;
+  font-family: -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  background: var(--bg);
+  color: var(--fg);
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior: none;
 }
 
 button {
-  font-family: inherit;
-  cursor: pointer;
-  border: none;
-  background: none;
+  font: inherit;
   color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
 }
 
-/* ───── App Shell ───── */
+/* ── Shell ── */
 .app {
-  min-height: 100vh;
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  padding-bottom: var(--safe-bottom);
+  padding: var(--safe-t) 0 var(--safe-b);
 }
 
-/* ───── Header ───── */
-.app-header {
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
-  padding: 10px 16px;
-  padding-top: calc(10px + var(--safe-top));
-  position: sticky;
-  top: 0;
-  z-index: 100;
-}
-
-.header-row {
+/* ── Shows (pill row) ── */
+.shows {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.header-brand h1 {
-  font-size: 1rem;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.subtitle {
-  font-size: 0.65rem;
-  color: var(--accent);
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-/* ───── Podcast Selector (Dropdown) ───── */
-.podcast-selector {
-  position: relative;
-  flex-shrink: 0;
-}
-
-.podcast-trigger {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-size: 0.8rem;
-  font-weight: 500;
-  color: var(--text-primary);
-  max-width: 200px;
-  min-height: 40px;
-}
-
-.podcast-trigger-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.podcast-chevron {
-  font-size: 0.7rem;
-  color: var(--text-muted);
-  transition: transform 0.2s;
-  flex-shrink: 0;
-}
-
-.podcast-chevron.open {
-  transform: rotate(180deg);
-}
-
-.podcast-dropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  min-width: 260px;
-  max-width: 90vw;
-  z-index: 200;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-  overflow: hidden;
-}
-
-.podcast-option {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 14px 16px;
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  text-align: left;
-  border-bottom: 1px solid var(--border);
-  transition: background 0.12s;
-}
-
-.podcast-option:last-child {
-  border-bottom: none;
-}
-
-.podcast-option:active,
-.podcast-option:hover {
-  background: var(--bg-hover);
-}
-
-.podcast-option.active {
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.podcast-option-dot {
-  font-size: 0.65rem;
-  flex-shrink: 0;
-}
-
-/* ───── Episode Section ───── */
-.section-episodes {
-  background: var(--bg-primary);
-  border-bottom: 1px solid var(--border);
-}
-
-.episode-list {
-  padding: 0;
-}
-
-.episode-list-header {
-  display: flex;
-  align-items: baseline;
   gap: 8px;
-  padding: 12px 16px 8px;
-}
-
-.episode-list-title {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.episode-count {
-  font-size: 0.7rem;
-  color: var(--text-muted);
-}
-
-.episodes-scroll {
-  display: flex;
-  gap: 10px;
+  padding: 20px 20px 0;
   overflow-x: auto;
-  scroll-snap-type: x mandatory;
-  -webkit-overflow-scrolling: touch;
-  padding: 0 16px 14px;
   scrollbar-width: none;
-}
-
-.episodes-scroll::-webkit-scrollbar {
-  display: none;
-}
-
-.episode-card {
   flex-shrink: 0;
-  width: 180px;
-  scroll-snap-align: start;
-  text-align: left;
-  padding: 12px;
-  border-radius: var(--radius);
-  background: var(--bg-card);
-  border: 1.5px solid var(--border);
-  transition: border-color 0.15s, background 0.15s;
+}
+.shows::-webkit-scrollbar { display: none; }
+
+.show {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border-radius: 99px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--fg2);
+  background: rgba(255, 255, 255, 0.06);
+  transition: all 0.2s;
 }
 
-.episode-card:active {
-  background: var(--bg-hover);
+.show.on {
+  color: var(--bg);
+  background: var(--fg);
 }
 
-.episode-card.selected {
-  border-color: var(--accent);
-  background: #1e1e3a;
-}
-
-.episode-meta {
+/* ── Episodes (horizontal scroll) ── */
+.episodes {
   display: flex;
-  gap: 8px;
-  font-size: 0.65rem;
-  color: var(--text-muted);
+  gap: 2px;
+  padding: 24px 20px 20px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+.episodes::-webkit-scrollbar { display: none; }
+
+.ep {
+  flex-shrink: 0;
+  width: 160px;
+  padding: 16px 14px;
+  text-align: left;
+  border-radius: 14px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.ep:active { background: rgba(255, 255, 255, 0.04); }
+
+.ep.on {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ep-date {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg3);
+  letter-spacing: 0.02em;
   margin-bottom: 4px;
 }
 
-.episode-title {
-  font-size: 0.78rem;
-  font-weight: 600;
-  line-height: 1.3;
+.ep-title {
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
-}
-
-.transcript-badge {
-  display: inline-block;
-  margin-top: 6px;
-  font-size: 0.6rem;
-  padding: 2px 6px;
-  border-radius: 99px;
-  background: rgba(99, 102, 241, 0.15);
-  color: var(--accent);
-  font-weight: 500;
-}
-
-.loading-spinner {
-  width: 22px;
-  height: 22px;
-  border: 2.5px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin: 16px auto;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-/* ───── Error ───── */
-.error-banner {
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid var(--danger);
-  color: #fca5a5;
-  padding: 8px 16px;
-  font-size: 0.8rem;
-  margin: 8px 16px 0;
-  border-radius: var(--radius);
-}
-
-/* ───── Player Section ───── */
-.section-player {
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
-}
-
-.player-placeholder {
-  padding: 32px 16px;
-  text-align: center;
-  color: var(--text-muted);
-  font-size: 0.85rem;
-}
-
-.player {
-  padding: 14px 16px;
-}
-
-.player-title {
-  font-size: 0.85rem;
+  font-size: 14px;
   font-weight: 600;
-  margin-bottom: 12px;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+
+.ep.on .ep-title { color: #fff; }
+
+/* ── Loading dot ── */
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg3);
+  animation: pulse 1s ease-in-out infinite;
+  margin: 4px auto;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+/* ── Empty state ── */
+.empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg3);
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+/* ── Player ── */
+.player {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 0 28px 40px;
+  min-height: 0;
+}
+
+.now {
+  font-size: 17px;
+  font-weight: 600;
   line-height: 1.3;
+  letter-spacing: -0.02em;
+  text-align: center;
+  margin-bottom: 32px;
+  color: var(--fg);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
-.skip-notification {
-  background: rgba(99, 102, 241, 0.2);
-  color: var(--accent-hover);
-  text-align: center;
-  padding: 6px;
-  border-radius: var(--radius);
-  font-size: 0.75rem;
-  font-weight: 500;
-  margin-bottom: 10px;
-  animation: fadeInOut 2s ease-in-out;
-}
-
-@keyframes fadeInOut {
-  0% { opacity: 0; transform: translateY(-4px); }
-  15% { opacity: 1; transform: translateY(0); }
-  85% { opacity: 1; }
-  100% { opacity: 0; }
-}
-
-/* ── Progress bar — tall for thumb tapping ── */
-.progress-container {
-  cursor: pointer;
-  padding: 6px 0;
-  touch-action: none;
-}
-
-.progress-bar {
-  position: relative;
-  height: 8px;
-  background: var(--bg-card);
-  border-radius: 4px;
-  overflow: visible;
-}
-
-.progress-fill {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 4px;
-  transition: width 0.1s linear;
-}
-
-.ad-marker {
-  position: absolute;
-  top: 0;
-  height: 100%;
-  background: rgba(239, 68, 68, 0.5);
+/* Progress */
+.bar {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
   border-radius: 2px;
+  cursor: pointer;
+  touch-action: none;
+  padding: 10px 0;
+  margin: -10px 0;
+  background-clip: content-box;
+}
+
+.fill {
+  height: 4px;
+  background: var(--fg);
+  border-radius: 2px;
+  transition: width 0.1s linear;
   pointer-events: none;
-  z-index: 1;
+  margin-top: 10px;
 }
 
-.time-display {
+.times {
   display: flex;
   justify-content: space-between;
-  font-size: 0.65rem;
-  color: var(--text-muted);
-  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg3);
+  margin-top: 8px;
+  letter-spacing: 0.02em;
 }
 
-/* ── Controls — large touch targets ── */
-.player-controls {
+/* Controls */
+.controls {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 20px;
-  padding: 8px 0 10px;
+  gap: 40px;
+  margin-top: 28px;
 }
 
-.control-btn {
-  min-width: 48px;
-  min-height: 48px;
+.ctl {
+  width: 48px;
+  height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 10px 16px;
-  border-radius: var(--radius);
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-}
-
-.control-btn:active {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.play-btn {
-  width: 56px;
-  height: 56px;
+  color: var(--fg2);
   border-radius: 50%;
-  font-size: 1.2rem;
-  background: var(--accent);
-  color: #fff;
-  border: none;
+  transition: color 0.15s;
 }
+.ctl:active { color: var(--fg); }
 
-.play-btn:active {
-  background: var(--accent-hover);
-}
-
-/* ── Ad info strip ── */
-.ad-strip {
+.play {
+  width: 64px;
+  height: 64px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding-top: 4px;
-  flex-wrap: wrap;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--fg);
+  color: var(--bg);
+  transition: transform 0.15s;
 }
+.play:active { transform: scale(0.93); }
 
-.ad-toggle {
-  padding: 5px 12px;
-  border-radius: 99px;
-  font-size: 0.7rem;
-  font-weight: 700;
-  min-height: 32px;
-  transition: all 0.12s;
-}
-
-.ad-toggle.on {
-  background: rgba(34, 197, 94, 0.15);
-  color: var(--success);
-  border: 1px solid rgba(34, 197, 94, 0.3);
-}
-
-.ad-toggle.off {
-  background: rgba(239, 68, 68, 0.15);
-  color: var(--danger);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-}
-
-.ad-stats {
-  font-size: 0.65rem;
-  color: var(--text-muted);
-}
-
-.ads-skipped-badge {
-  font-size: 0.65rem;
-  color: var(--success);
-  font-weight: 600;
-}
-
-/* ───── Flow Widget Section ───── */
-.section-flow {
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
-}
-
-.flow-widget {
-  padding: 12px 16px;
-}
-
-.flow-widget-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.flow-widget-title {
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-  font-weight: 600;
-}
-
-.flow-widget-badge {
-  font-size: 0.55rem;
-  padding: 1px 6px;
-  border-radius: 99px;
-  background: rgba(99, 102, 241, 0.15);
-  color: var(--accent);
-  font-weight: 600;
-}
-
-/* ───── Transcript Section (Collapsible) ───── */
-.section-transcript {
-  background: var(--bg-primary);
-}
-
-.transcript-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  padding: 14px 16px;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--text-primary);
-  border-bottom: 1px solid var(--border);
-  min-height: 48px;
-}
-
-.transcript-toggle:active {
-  background: var(--bg-hover);
-}
-
-.toggle-chevron {
-  font-size: 0.7rem;
-  color: var(--text-muted);
-  transition: transform 0.2s;
-}
-
-.toggle-chevron.open {
-  transform: rotate(180deg);
-}
-
-.transcript-view {
-  padding: 12px 16px 20px;
-}
-
-.transcript-header {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 10px;
-  flex-wrap: wrap;
-}
-
-.transcript-header h3 {
-  font-size: 0.85rem;
-  font-weight: 600;
-}
-
-.transcript-stats {
-  font-size: 0.65rem;
-  color: var(--text-muted);
-}
-
-.transcript-empty {
-  color: var(--text-muted);
-  font-size: 0.8rem;
-}
-
-.transcript-content {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.transcript-segment {
-  font-size: 0.78rem;
-  line-height: 1.5;
-  color: var(--text-secondary);
-  padding: 2px 0;
-}
-
-.transcript-segment.ad-mention {
-  background: rgba(239, 68, 68, 0.08);
-  border-left: 3px solid var(--danger);
-  padding: 6px 10px;
-  border-radius: 0 var(--radius) var(--radius) 0;
-  opacity: 0.6;
-}
-
-.transcript-speaker {
-  font-weight: 600;
-  color: var(--accent-hover);
-  margin-right: 4px;
-}
-
-/* ═══════════════════════════════════════════
-   Desktop (>= 768px) — side-by-side layout
-   ═══════════════════════════════════════════ */
+/* ── Desktop ── */
 @media (min-width: 768px) {
   .app {
-    display: grid;
-    grid-template-rows: auto auto 1fr auto;
-    grid-template-columns: 1fr 400px;
-    min-height: 100vh;
-    min-height: 100dvh;
-  }
-
-  .app-header {
-    grid-column: 1 / -1;
-  }
-
-  .header-brand h1 {
-    font-size: 1.15rem;
-  }
-
-  .podcast-trigger {
-    max-width: 280px;
-  }
-
-  /* Episodes take full width */
-  .section-episodes {
-    grid-column: 1 / -1;
-  }
-
-  .episode-card {
-    width: 200px;
-  }
-
-  /* Player and flow go side-by-side */
-  .section-player {
-    grid-column: 1;
-    grid-row: 3;
-  }
-
-  .section-flow {
-    grid-column: 2;
-    grid-row: 3;
-    border-left: 1px solid var(--border);
-    border-bottom: none;
-  }
-
-  .section-transcript {
-    grid-column: 1 / -1;
-    grid-row: 4;
-  }
-
-  .player {
-    padding: 20px 24px;
-  }
-
-  .flow-widget {
-    padding: 16px 20px;
-  }
-}
-
-/* ═══════════════════════════════════════════
-   Wide desktop (>= 1200px) — three-column
-   ═══════════════════════════════════════════ */
-@media (min-width: 1200px) {
-  .app {
-    grid-template-rows: auto auto 1fr;
-    grid-template-columns: 1fr 420px 320px;
-  }
-
-  .section-player {
-    grid-column: 1;
-    grid-row: 3;
-  }
-
-  .section-flow {
-    grid-column: 3;
-    grid-row: 2 / 4;
-    border-bottom: none;
-  }
-
-  .section-transcript {
-    grid-column: 2;
-    grid-row: 3;
-    border-left: 1px solid var(--border);
-  }
-
-  .transcript-toggle {
-    padding: 14px 20px;
-  }
-
-  .transcript-view {
-    padding: 14px 20px 24px;
-    max-height: calc(100vh - 200px);
-    overflow-y: auto;
+    max-width: 480px;
+    margin: 0 auto;
   }
 }

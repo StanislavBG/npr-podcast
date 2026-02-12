@@ -3,90 +3,48 @@ import type { Episode } from '../services/api';
 
 interface Props {
   episodes: Episode[];
-  podcastName: string;
   loading: boolean;
   selectedId: string | null;
   onSelect: (episode: Episode) => void;
 }
 
-export function EpisodeList({
-  episodes,
-  podcastName,
-  loading,
-  selectedId,
-  onSelect,
-}: Props) {
+export function EpisodeList({ episodes, loading, selectedId, onSelect }: Props) {
   const selectedRef = useRef<HTMLButtonElement>(null);
 
-  // Scroll selected card into view
   useEffect(() => {
-    if (selectedRef.current) {
-      selectedRef.current.scrollIntoView({
-        behavior: 'smooth',
-        block: 'nearest',
-        inline: 'center',
-      });
-    }
+    selectedRef.current?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'nearest',
+      inline: 'center',
+    });
   }, [selectedId]);
 
-  if (loading) {
-    return (
-      <div className="episode-list">
-        <div className="episode-list-header">
-          <span className="episode-list-title">Loading...</span>
-        </div>
-        <div className="loading-spinner" />
-      </div>
-    );
-  }
-
-  if (episodes.length === 0) {
-    return (
-      <div className="episode-list">
-        <div className="episode-list-header">
-          <span className="episode-list-title">No episodes</span>
-        </div>
-      </div>
-    );
-  }
+  if (loading) return <div className="episodes"><div className="dot" /></div>;
+  if (!episodes.length) return null;
 
   return (
-    <div className="episode-list">
-      <div className="episode-list-header">
-        <span className="episode-list-title">{podcastName}</span>
-        <span className="episode-count">{episodes.length} episodes</span>
-      </div>
-      <div className="episodes-scroll">
-        {episodes.map((ep) => {
-          const isSelected = selectedId === ep.id;
-          const date = ep.pubDate
-            ? new Date(ep.pubDate).toLocaleDateString('en-US', {
-                month: 'short',
-                day: 'numeric',
-              })
-            : '';
+    <div className="episodes">
+      {episodes.map((ep) => {
+        const on = selectedId === ep.id;
+        const date = ep.pubDate
+          ? new Date(ep.pubDate).toLocaleDateString('en-US', {
+              month: 'short',
+              day: 'numeric',
+            })
+          : '';
 
-          return (
-            <button
-              key={ep.id}
-              ref={isSelected ? selectedRef : undefined}
-              className={`episode-card ${isSelected ? 'selected' : ''}`}
-              onClick={() => onSelect(ep)}
-            >
-              <div className="episode-meta">
-                <span className="episode-date">{date}</span>
-                {ep.duration && (
-                  <span className="episode-duration">{ep.duration}</span>
-                )}
-              </div>
-              <h3 className="episode-title">{ep.title}</h3>
-              {ep.transcriptUrl && (
-                <span className="transcript-badge">Transcript</span>
-              )}
-            </button>
-          );
-        })}
-      </div>
+        return (
+          <button
+            key={ep.id}
+            ref={on ? selectedRef : undefined}
+            className={`ep ${on ? 'on' : ''}`}
+            onClick={() => onSelect(ep)}
+          >
+            <span className="ep-date">{date}</span>
+            <span className="ep-title">{ep.title}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
