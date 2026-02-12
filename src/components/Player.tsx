@@ -13,17 +13,21 @@ export function Player({ episode, adDetection }: Props) {
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
   const [dur, setDur] = useState(0);
+  const [skippedAd, setSkippedAd] = useState<string | null>(null);
 
   const src = episode.audioUrl ? getAudioProxyUrl(episode.audioUrl) : '';
 
-  // Always skip ads. No toggle. It just works.
+  // Auto-skip ads — always on, no toggle needed
   useEffect(() => {
     if (!adDetection || !audioRef.current) return;
     const audio = audioRef.current;
     const onTime = () => {
       setTime(audio.currentTime);
-      if (isInAdSegment(audio.currentTime, adDetection.segments)) {
+      const seg = isInAdSegment(audio.currentTime, adDetection.segments);
+      if (seg) {
         audio.currentTime = getNextContentTime(audio.currentTime, adDetection.segments);
+        setSkippedAd(`Skipped ${seg.type}`);
+        setTimeout(() => setSkippedAd(null), 2000);
       }
     };
     audio.addEventListener('timeupdate', onTime);
@@ -76,13 +80,32 @@ export function Player({ episode, adDetection }: Props) {
     <div className="player">
       {src && <audio ref={audioRef} src={src} preload="metadata" />}
 
+      {!src && (
+        <div className="no-audio">No audio available for this episode</div>
+      )}
+
       <div className="now">{episode.title}</div>
       {episode.description && (
         <div className="desc">{episode.description}</div>
       )}
 
+      {skippedAd && <div className="skip-notification">{skippedAd}</div>}
+
       <div className="bar" onClick={seek} onTouchStart={seek}>
         <div className="fill" style={{ width: `${pct}%` }} />
+        {/* Ad segment markers on the progress bar */}
+        {adDetection && dur > 0 && adDetection.segments.map((seg, i) => {
+          const left = (seg.startTime / dur) * 100;
+          const width = ((seg.endTime - seg.startTime) / dur) * 100;
+          return (
+            <div
+              key={i}
+              className="ad-marker"
+              style={{ left: `${left}%`, width: `${width}%` }}
+              title={`${seg.type} (${Math.round(seg.startTime)}s\u2013${Math.round(seg.endTime)}s) \u2014 ${Math.round(seg.confidence * 100)}% confidence`}
+            />
+          );
+        })}
       </div>
       <div className="times">
         <span>{formatTime(time)}</span>

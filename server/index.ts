@@ -133,11 +133,8 @@ app.get('/api/podcast/:id/episodes', async (req, res) => {
       episodes,
     });
   } catch (err: any) {
-    console.error('RSS fetch error:', err.message, '— serving sample episodes');
-    res.json({
-      podcastName: podcast.name,
-      episodes: getSampleEpisodes(req.params.id),
-    });
+    console.error('RSS fetch error:', err.message);
+    res.status(502).json({ error: 'Failed to fetch RSS feed', detail: err.message });
   }
 });
 

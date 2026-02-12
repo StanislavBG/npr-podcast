@@ -97,13 +97,33 @@ export default function App() {
     setEpisode(ep);
     setAds(null);
 
-    setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'running'));
+    // Reset per-episode flow steps
+    setFlow((prev) => ({
+      ...prev,
+      steps: {
+        ...prev.steps,
+        step_fetch_transcript: 'pending',
+        step_detect_ads: 'pending',
+        step_prepare_player: 'pending',
+      },
+    }));
 
+    // Parse duration from RSS
+    const parts = ep.duration.split(':').map(Number);
+    let durationSec = 0;
+    if (parts.length === 3) durationSec = parts[0] * 3600 + parts[1] * 60 + parts[2];
+    else if (parts.length === 2) durationSec = parts[0] * 60 + parts[1];
+    else durationSec = parseInt(ep.duration) || 600;
+
+    // Step 3: Fetch transcript
     let wordCount = 0;
+    let hasTranscript = false;
     if (ep.transcriptUrl) {
+      setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'running'));
       try {
         const t = await fetchTranscript(ep.transcriptUrl);
         wordCount = t.fullText.split(/\s+/).length;
+        hasTranscript = true;
         setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'completed'));
       } catch {
         setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
@@ -112,23 +132,15 @@ export default function App() {
       setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
     }
 
+    // Step 4: Detect ads
     setFlow((prev) => setStep(prev, 'step_detect_ads', 'running'));
-
-    const parts = ep.duration.split(':').map(Number);
-    let sec = 0;
-    if (parts.length === 3) sec = parts[0] * 3600 + parts[1] * 60 + parts[2];
-    else if (parts.length === 2) sec = parts[0] * 60 + parts[1];
-    else sec = parseInt(ep.duration) || 600;
-
-    const adResult = detectAdSegments(sec, wordCount, wordCount > 0);
+    const adResult = detectAdSegments(durationSec, wordCount, hasTranscript);
     setAds(adResult);
+    setFlow((prev) => setStep(prev, 'step_detect_ads', 'completed'));
 
-    setFlow((prev) => {
-      let fs = setStep(prev, 'step_detect_ads', 'completed');
-      fs = setStep(fs, 'step_prepare_player', 'running');
-      return fs;
-    });
-
+    // Step 5: Prepare player (brief delay so pipeline animation is visible)
+    setFlow((prev) => setStep(prev, 'step_prepare_player', 'running'));
+    await new Promise((r) => setTimeout(r, 200));
     setFlow((prev) => {
       const fs = setStep(prev, 'step_prepare_player', 'completed');
       return { ...fs, currentStep: null };
