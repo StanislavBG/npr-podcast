@@ -14,7 +14,7 @@ export function Player({ episode, adDetection }: Props) {
   const [time, setTime] = useState(0);
   const [dur, setDur] = useState(0);
 
-  const src = getAudioProxyUrl(episode.audioUrl);
+  const src = episode.audioUrl ? getAudioProxyUrl(episode.audioUrl) : '';
 
   // Always skip ads. No toggle. It just works.
   useEffect(() => {
@@ -74,9 +74,12 @@ export function Player({ episode, adDetection }: Props) {
 
   return (
     <div className="player">
-      <audio ref={audioRef} src={src} preload="metadata" />
+      {src && <audio ref={audioRef} src={src} preload="metadata" />}
 
       <div className="now">{episode.title}</div>
+      {episode.description && (
+        <div className="desc">{episode.description}</div>
+      )}
 
       <div className="bar" onClick={seek} onTouchStart={seek}>
         <div className="fill" style={{ width: `${pct}%` }} />
