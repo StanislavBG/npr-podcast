@@ -6,11 +6,15 @@ import { FlowVisualizer } from './components/FlowVisualizer';
 import {
   fetchPodcasts,
   fetchEpisodes,
-  fetchTranscript,
+  fetchTranscriptHtml,
+  llmParseTranscript,
+  llmDetectAds,
+  llmPreparePlayback,
+  parseDuration,
   type Podcast,
   type Episode,
 } from './services/api';
-import { detectAdSegments, type AdDetectionResult } from './services/adDetector';
+import type { AdDetectionResult, PlaybackConfig } from './services/adDetector';
 import {
   createInitialFlowState,
   type FlowState,
@@ -35,6 +39,7 @@ export default function App() {
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [episode, setEpisode] = useState<Episode | null>(null);
   const [ads, setAds] = useState<AdDetectionResult | null>(null);
+  const [playback, setPlayback] = useState<PlaybackConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [flow, setFlow] = useState<FlowState>(createInitialFlowState());
@@ -60,6 +65,7 @@ export default function App() {
       setLoading(true);
       setEpisode(null);
       setAds(null);
+      setPlayback(null);
       setError(null);
 
       let fs = createInitialFlowState();
@@ -93,9 +99,12 @@ export default function App() {
     load(selected);
   }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ─── Episode selection: run the full LLM pipeline ──────────────────────────
+
   const pick = useCallback(async (ep: Episode) => {
     setEpisode(ep);
     setAds(null);
+    setPlayback(null);
 
     // Reset per-episode flow steps
     setFlow((prev) => ({
@@ -103,27 +112,21 @@ export default function App() {
       steps: {
         ...prev.steps,
         step_fetch_transcript: 'pending',
-        step_detect_ads: 'pending',
-        step_prepare_player: 'pending',
+        step_llm_parse_transcript: 'pending',
+        step_llm_detect_ads: 'pending',
+        step_llm_prepare_player: 'pending',
       },
     }));
 
-    // Parse duration from RSS
-    const parts = ep.duration.split(':').map(Number);
-    let durationSec = 0;
-    if (parts.length === 3) durationSec = parts[0] * 3600 + parts[1] * 60 + parts[2];
-    else if (parts.length === 2) durationSec = parts[0] * 60 + parts[1];
-    else durationSec = parseInt(ep.duration) || 600;
+    const durationSec = parseDuration(ep.duration);
 
-    // Step 3: Fetch transcript
-    let wordCount = 0;
-    let hasTranscript = false;
+    // ── Step 3: Fetch raw transcript HTML ──────────────────────────────────
+    let html = '';
     if (ep.transcriptUrl) {
       setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'running'));
       try {
-        const t = await fetchTranscript(ep.transcriptUrl);
-        wordCount = t.fullText.split(/\s+/).length;
-        hasTranscript = true;
+        const result = await fetchTranscriptHtml(ep.transcriptUrl);
+        html = result.html;
         setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'completed'));
       } catch {
         setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
@@ -132,19 +135,62 @@ export default function App() {
       setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
     }
 
-    // Step 4: Detect ads
-    setFlow((prev) => setStep(prev, 'step_detect_ads', 'running'));
-    const adResult = detectAdSegments(durationSec, wordCount, hasTranscript);
-    setAds(adResult);
-    setFlow((prev) => setStep(prev, 'step_detect_ads', 'completed'));
+    // ── Step 4: LLM Parse Transcript (ai.generate-text via chatJSON) ──────
+    setFlow((prev) => setStep(prev, 'step_llm_parse_transcript', 'running'));
+    let transcript;
+    try {
+      transcript = await llmParseTranscript(html || `<p>${ep.description}</p>`);
+      setFlow((prev) => setStep(prev, 'step_llm_parse_transcript', 'completed'));
+    } catch (err) {
+      console.error('LLM parse failed:', err);
+      setFlow((prev) => setStep(prev, 'step_llm_parse_transcript', 'failed'));
+      return;
+    }
 
-    // Step 5: Prepare player (brief delay so pipeline animation is visible)
-    setFlow((prev) => setStep(prev, 'step_prepare_player', 'running'));
-    await new Promise((r) => setTimeout(r, 200));
-    setFlow((prev) => {
-      const fs = setStep(prev, 'step_prepare_player', 'completed');
-      return { ...fs, currentStep: null };
-    });
+    // ── Step 5: LLM Detect Ads (ai.generate-text via chatJSON) ────────────
+    setFlow((prev) => setStep(prev, 'step_llm_detect_ads', 'running'));
+    let adResult: AdDetectionResult;
+    try {
+      adResult = await llmDetectAds(transcript, durationSec, ep.title);
+      setAds(adResult);
+      setFlow((prev) => setStep(prev, 'step_llm_detect_ads', 'completed'));
+    } catch (err) {
+      console.error('LLM ad detection failed:', err);
+      setFlow((prev) => setStep(prev, 'step_llm_detect_ads', 'failed'));
+      return;
+    }
+
+    // ── Step 6: LLM Prepare Player (ai.summarize via chatJSON) ────────────
+    setFlow((prev) => setStep(prev, 'step_llm_prepare_player', 'running'));
+    try {
+      const config = await llmPreparePlayback(
+        transcript,
+        adResult,
+        ep.title,
+        ep.description,
+      );
+      setPlayback(config);
+      // Use the LLM's refined skip map if it adjusted anything
+      if (config.skipMap && config.skipMap.length > 0) {
+        setAds({
+          segments: config.skipMap,
+          totalAdTime: config.totalAdTime,
+          contentDuration: config.contentDuration,
+          strategy: 'llm-verified',
+        });
+      }
+      setFlow((prev) => {
+        const fs = setStep(prev, 'step_llm_prepare_player', 'completed');
+        return { ...fs, currentStep: null };
+      });
+    } catch (err) {
+      console.error('LLM prepare-playback failed:', err);
+      // Non-fatal: ads are already set from step 5
+      setFlow((prev) => {
+        const fs = setStep(prev, 'step_llm_prepare_player', 'skipped');
+        return { ...fs, currentStep: null };
+      });
+    }
   }, []);
 
   return (
@@ -167,7 +213,21 @@ export default function App() {
         {error && !episodes.length ? (
           <div className="empty">{error}</div>
         ) : episode ? (
-          <Player episode={episode} adDetection={ads} />
+          <>
+            <Player episode={episode} adDetection={ads} />
+            {playback && (
+              <div className="llm-summary">
+                <p className="summary-text">{playback.summary}</p>
+                {playback.topics.length > 0 && (
+                  <div className="topic-tags">
+                    {playback.topics.map((t, i) => (
+                      <span key={i} className="topic-tag">{t}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         ) : (
           <div className="empty">Tap an episode</div>
         )}

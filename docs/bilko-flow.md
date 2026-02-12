@@ -1,203 +1,163 @@
-# Bilko Flow: Post-Episode-Selection Pipeline
+# Bilko Flow: LLM-Powered Ad Detection Pipeline
 
-The bilko flow is a 5-step linear pipeline defined in `src/workflows/podcastFlow.ts`.
-Steps 1–2 run at podcast load time. Steps 3–5 fire when the user selects an episode,
-orchestrated by the `pick` callback in `src/App.tsx:96-148`.
+Every post-episode-selection step uses bilko-flow LLM components (`chatJSON`).
+No regex. No word-count heuristics. Three chained LLM calls that actually
+understand podcast content.
 
 ## Pipeline Overview
 
 ```
-Step 1: Fetch RSS Feed        (podcast load)
-Step 2: Parse Episodes         (podcast load)
+Step 1: Fetch RSS Feed             (http.request)
+Step 2: Parse Episodes             (http.request)
   ── user selects episode ──
-Step 3: Fetch Transcript       (episode-level)
-Step 4: Detect Ad Segments     (episode-level)
-Step 5: Prepare Player         (episode-level, handoff)
+Step 3: Fetch Transcript HTML      (http.request)
+Step 4: LLM Parse Transcript       (ai.generate-text  →  chatJSON)
+Step 5: LLM Detect Ad Segments     (ai.generate-text  →  chatJSON)
+Step 6: LLM Prepare Player         (ai.summarize      →  chatJSON)
 ```
 
 ---
 
-## Step 3 — Fetch Transcript
+## The Ad-Detection Core (Steps 4–6)
 
-**Goal:** Retrieve the NPR transcript HTML for the selected episode and extract
-structured text with ad-pattern annotations.
+### Step 4 — LLM Parse Transcript (`ai.generate-text`)
 
-**Trigger:** `App.tsx:121-130` — calls `fetchTranscript(ep.transcriptUrl)` when a
-transcript URL exists. If no URL is available the step is marked `skipped`.
+**Server:** `POST /api/llm/parse-transcript` → `server/index.ts:294-362`
+**bilko-flow call:** `chatJSON<LLMTranscriptResult>()`
 
-**Server-side handler:** `server/index.ts:142-166` — proxies the request to
-`npr.org/transcripts/{storyId}` with a browser User-Agent.
+The raw transcript HTML goes directly to the LLM. No regex extraction.
+The LLM is prompted to:
 
-### Transcript Parsing (`server/index.ts:211-294`)
+- Extract every paragraph as a `{ speaker, text, isAd, adType }` segment
+- Classify each segment: is it editorial content or an ad read / sponsor mention / funding credit / NPR promo?
+- Identify all ad mentions with an `adMentions[]` array explaining *why* each was flagged (e.g. "contains sponsor mention for Squarespace", "NPR funding credit")
+- Count the number of editorial (non-ad) words as `estimatedContentWords`
 
-Three phases:
-
-1. **HTML extraction** (lines 224–234)
-   Searches for content inside `<div class="storytext">`, then
-   `<article class="transcript">`, then any `<article>` tag, in priority order.
-
-2. **Paragraph extraction** (lines 237–250)
-   Iterates `<p>` tags, strips HTML tags, decodes entities (`&amp;`, `&lt;`,
-   `&nbsp;`, etc.) to produce clean text paragraphs.
-
-3. **Speaker parsing** (lines 253–264)
-   Each paragraph is matched against `/^([A-Z][A-Z\s.'-]+):(.*)/` — the standard
-   NPR transcript convention of `SPEAKER NAME: spoken text`. Produces
-   `{ speaker, text }` segment objects.
-
-### Ad-Text Pattern Detection (lines 267–287)
-
-Every transcript segment is tested against seven regex patterns that identify
-sponsor/funding language:
-
-```
-/\b(support|supported|sponsor|sponsored)\s+(by|for|comes?\s+from)\b/i
-/\bnpr\.org\b/i
-/\bthis is npr\b/i
-/\bthis message comes from\b/i
-/\bsupport for (this|the) (podcast|show|program)\b/i
-/\bfunding for\b/i
-/\bnpr\+?\s*(plus)?\b.*\bsponsor.?free\b/i
-```
-
-Matches produce `adMarker` entries of type `sponsor_mention` keyed to the segment
-index. The function returns:
-
-```typescript
-{ segments, fullText, adMarkers }
-```
-
-The `fullText` (joined paragraphs) feeds downstream — specifically its **word count**
-(`App.tsx:125`).
-
----
-
-## Step 4 — Detect Ad Segments
-
-**Goal:** Compare transcript word count against audio duration to estimate where
-dynamically-injected ads sit, and produce time-range boundaries for skipping.
-
-**Trigger:** `App.tsx:136-139` — calls `detectAdSegments(durationSec, wordCount, hasTranscript)`.
-
-**Core algorithm:** `src/services/adDetector.ts:37-111`
-
-### Key Insight
-
-NPR transcripts contain **only editorial content** — no ad copy. Megaphone
-dynamically injects ads into the audio file. The transcript word count therefore
-represents content-only time, while the audio duration includes content + ads.
-
-### Primary Path (transcript available)
-
-1. **Expected content duration** (line 50):
-   ```
-   expectedContentSeconds = (wordCount / 155) * 60
-   ```
-   155 WPM is the calibrated NPR host speaking rate.
-
-2. **Estimate total ad time** (line 51):
-   ```
-   adTimeEstimate = max(0, audioDuration - expectedContentSeconds)
-   ```
-
-3. **If difference < 15 seconds** (line 54): No meaningful ads — return empty segments.
-
-4. **Distribute ad time across NPR's known structure** (lines 68–101):
-
-   | Segment    | Duration                          | Position                      | Confidence |
-   |------------|-----------------------------------|-------------------------------|------------|
-   | Pre-roll   | `min(45s, 30% of adTimeEstimate)` | `0s`                          | 0.85       |
-   | Mid-roll   | `min(90s, 50% of adTimeEstimate)` | `48%` of episode duration     | 0.75       |
-   | Post-roll  | `min(20s, 20% of adTimeEstimate)` | `duration - postRollDuration` | 0.70       |
-
-### Fallback Path (no transcript) — `adDetector.ts:113-153`
-
-Fixed heuristic values:
-
-| Segment    | Duration | Position           | Confidence |
-|------------|----------|--------------------|------------|
-| Pre-roll   | 30s      | `0s`               | 0.6        |
-| Mid-roll   | 60s      | `48%` of duration  | 0.5        |
-| Post-roll  | 15s      | `duration - 15s`   | 0.5        |
-
-### Output (`AdDetectionResult`)
-
+**Output:** `LLMTranscriptResult`
 ```typescript
 {
-  segments: AdSegment[],      // [{startTime, endTime, type, confidence}]
+  segments: [{ speaker, text, isAd, adType }],
+  fullText: string,
+  adMentions: [{ segmentIndex, reason }],
+  estimatedContentWords: number
+}
+```
+
+### Step 5 — LLM Detect Ad Segments (`ai.generate-text`)
+
+**Server:** `POST /api/llm/detect-ads` → `server/index.ts:381-465`
+**bilko-flow call:** `chatJSON<LLMAdDetectionResult>()`
+
+The LLM receives:
+- Episode title
+- Total audio duration (seconds)
+- Transcript editorial word count (from Step 4)
+- Number of transcript segments
+- The ad mentions array with reasons
+
+The prompt gives the LLM context about NPR's ad insertion model:
+- Megaphone dynamically inserts ads not present in the transcript
+- The transcript-to-audio duration gap indicates total injected ad time
+- NPR uses pre-roll / mid-roll / post-roll structure
+
+The LLM produces ad segments with:
+- Precise `startTime` / `endTime` in seconds
+- `type`: pre-roll, mid-roll, post-roll, or sponsor-mention
+- `confidence`: 0.0–1.0
+- `reason`: natural-language explanation of why this is an ad
+
+**Output:** `AdDetectionResult`
+```typescript
+{
+  segments: [{ startTime, endTime, type, confidence, reason }],
   totalAdTime: number,
-  contentDuration: number,    // audioDuration - totalAdTime
-  strategy: string            // 'transcript-duration-analysis' | 'heuristic-only' | 'transcript-match-clean'
+  contentDuration: number,
+  strategy: "llm-transcript-analysis"
+}
+```
+
+### Step 6 — LLM Prepare Player (`ai.summarize`)
+
+**Server:** `POST /api/llm/prepare-playback` → `server/index.ts:478-551`
+**bilko-flow call:** `chatJSON<PlaybackConfig>()`
+
+The LLM receives the full transcript + ad detection results and produces:
+- 1–2 sentence episode summary
+- 3–5 topic tags
+- **Validated skip map** — the LLM can adjust confidence scores or remove false positives from Step 5
+- A one-line listener recommendation
+
+This step acts as a quality gate: the LLM reviews its own ad detection
+and can correct mistakes before handing off to the player.
+
+**Output:** `PlaybackConfig`
+```typescript
+{
+  summary: string,
+  topics: [string],
+  skipMap: [{ startTime, endTime, type, confidence, reason }],
+  contentDuration: number,
+  totalAdTime: number,
+  recommendation: string
 }
 ```
 
 ---
 
-## Step 5 — Prepare Player (Handoff)
+## chatJSON 3-Layer Defense
 
-**Goal:** Pass the ad detection result to the Player component for real-time
-auto-skipping.
+All three LLM steps use `chatJSON<T>()` from `bilko-flow/src/llm/index.ts`,
+which guarantees valid typed JSON output through three layers:
 
-**Trigger:** `App.tsx:141-147` — marks the flow as completed, clears `currentStep`.
+1. **API-level constraint** — For OpenAI/Gemini, sets `response_format: { type: "json_object" }` to constrain the model at the decoding layer
+2. **Parse-level repair** — `cleanLLMResponse()` strips markdown fences, finds the outermost JSON, and `repairJSON()` fixes trailing commas and unescaped control chars
+3. **Retry-level correction** — On parse failure, appends a corrective instruction and retries with exponential backoff (up to 3 attempts)
 
-**The handoff** is a React prop at `App.tsx:170`:
+---
+
+## Player Handoff
+
+**App.tsx:174-181** — If Step 6 refines the skip map, the player receives
+the LLM-verified segments. Otherwise it uses the Step 5 output.
 
 ```tsx
-<Player episode={episode} adDetection={ads} />
+if (config.skipMap && config.skipMap.length > 0) {
+  setAds({
+    segments: config.skipMap,
+    totalAdTime: config.totalAdTime,
+    contentDuration: config.contentDuration,
+    strategy: 'llm-verified',
+  });
+}
 ```
 
-The `ads` state variable (set at line 138) carries the full `AdDetectionResult`
-directly into the Player.
+**Player.tsx:20-35** — The `timeupdate` listener checks every tick against
+the ad segments. If playback enters an ad range, it jumps to `seg.endTime`
+and shows a "Skipped pre-roll" toast.
 
 ---
 
-## Player Auto-Skip
+## Configuration
 
-**Implementation:** `src/components/Player.tsx:20-35`
+Set via environment variables on the server:
 
-The Player registers a `timeupdate` listener on the `<audio>` element. On every tick:
-
-1. **Check** if `audio.currentTime` falls inside any ad segment via
-   `isInAdSegment()` (`adDetector.ts:156-166`) — linear scan of the segments array.
-
-2. **If inside an ad:** Set `audio.currentTime = seg.endTime` via
-   `getNextContentTime()` (`adDetector.ts:169-179`), jumping playback past the ad.
-
-3. **Notify** the user with a 2-second toast: `"Skipped pre-roll"`,
-   `"Skipped mid-roll"`, etc. (`Player.tsx:29-30`).
-
-### Visual Markers (`Player.tsx:97-108`)
-
-Each ad segment renders as a colored overlay on the progress bar, positioned by
-`startTime / duration` and sized by `(endTime - startTime) / duration`, with a
-tooltip showing type, time range, and confidence percentage.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BILKO_LLM_PROVIDER` | `openai` | LLM provider: `openai`, `claude`, `ollama`, etc. |
+| `BILKO_LLM_MODEL` | `gpt-4o-mini` | Model ID |
+| `BILKO_LLM_API_KEY` | *(none)* | API key. Without this, the pipeline falls back to basic heuristics. |
+| `BILKO_LLM_BASE_URL` | *(provider default)* | Override API endpoint URL |
 
 ---
 
-## Complete Data Flow
+## Key Files
 
-```
-Episode selected
-  │
-  ├─ App.tsx:pick()
-  │    ├─ parse duration string → durationSec
-  │    │
-  │    ├─ Step 3: fetchTranscript(url)
-  │    │    └─ server: fetch HTML → parseTranscript()
-  │    │         ├─ extract <p> tags from storytext/article
-  │    │         ├─ parse "SPEAKER: text" segments
-  │    │         ├─ test 7 ad-text regexes → adMarkers[]
-  │    │         └─ return { segments, fullText, adMarkers }
-  │    │    └─ wordCount = fullText.split(/\s+/).length
-  │    │
-  │    ├─ Step 4: detectAdSegments(durationSec, wordCount, hasTranscript)
-  │    │    ├─ expectedContent = (wordCount / 155) * 60
-  │    │    ├─ adTime = audioDuration - expectedContent
-  │    │    └─ distribute into pre/mid/post-roll with time ranges
-  │    │
-  │    └─ Step 5: setAds(adResult) → props to <Player>
-  │
-  └─ Player.tsx
-       ├─ timeupdate listener: isInAdSegment(time) → jump to endTime
-       └─ progress bar: render ad-marker divs at segment positions
-```
+| File | What changed |
+|------|-------------|
+| `server/index.ts` | Removed regex `parseTranscript()`. Added 3 LLM endpoints using `chatJSON` with registered Claude + OpenAI adapters. |
+| `src/workflows/podcastFlow.ts` | Steps 4–6 now use `ai.generate-text` and `ai.summarize` types. |
+| `src/services/adDetector.ts` | Removed `detectAdSegments()`, `heuristicDetection()`, `WORDS_PER_MINUTE`. Kept `isInAdSegment()` and `getNextContentTime()` for the player. Added LLM result types. |
+| `src/services/api.ts` | Added `llmParseTranscript()`, `llmDetectAds()`, `llmPreparePlayback()`. Renamed `fetchTranscript` to `fetchTranscriptHtml` (raw HTML only). |
+| `src/App.tsx` | `pick()` now runs the 3-step LLM pipeline sequentially. Step 6 can refine Step 5's skip map. |
+| `src/components/FlowVisualizer.tsx` | Theme updated with `ai.generate-text` and `ai.summarize` step colors. |
+| `src/components/TranscriptView.tsx` | Updated to use `LLMTranscriptResult` types with `isAd` flags and `adMention` reasons. |

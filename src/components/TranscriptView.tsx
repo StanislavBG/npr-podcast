@@ -1,8 +1,7 @@
-import type { TranscriptData } from '../services/api';
-import type { AdDetectionResult } from '../services/adDetector';
+import type { LLMTranscriptResult, AdDetectionResult } from '../services/adDetector';
 
 interface Props {
-  transcript: TranscriptData;
+  transcript: LLMTranscriptResult;
   adDetection: AdDetectionResult | null;
 }
 
@@ -26,26 +25,31 @@ export function TranscriptView({ transcript, adDetection }: Props) {
           <span className="transcript-stats">
             {transcript.segments.length} segments
             {' \u00B7 '}
-            {transcript.fullText.split(/\s+/).length} words
-            {transcript.adMarkers.length > 0 &&
-              ` \u00B7 ${transcript.adMarkers.length} sponsor mentions detected`}
+            {transcript.estimatedContentWords} words
+            {transcript.adMentions.length > 0 &&
+              ` \u00B7 ${transcript.adMentions.length} ad mentions detected by LLM`}
           </span>
         )}
       </div>
       <div className="transcript-content">
         {transcript.segments.map((seg, i) => {
-          const isAdMention = transcript.adMarkers.some(
-            (m) => m.pattern === `segment_${i}`
+          const adMention = transcript.adMentions.find(
+            (m) => m.segmentIndex === i
           );
           return (
             <div
               key={i}
-              className={`transcript-segment ${isAdMention ? 'ad-mention' : ''}`}
+              className={`transcript-segment ${seg.isAd ? 'ad-mention' : ''}`}
             >
               {seg.speaker && (
                 <span className="transcript-speaker">{seg.speaker}:</span>
               )}
               <span className="transcript-text">{seg.text}</span>
+              {adMention && (
+                <span className="ad-reason" title={adMention.reason}>
+                  [{adMention.reason}]
+                </span>
+              )}
             </div>
           );
         })}
