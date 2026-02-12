@@ -1,3 +1,7 @@
+/* ══════════════════════════════════════════════
+   NPR Podcast Player — Glassmorphic Design System
+   ══════════════════════════════════════════════ */
+
 *,
 *::before,
 *::after {
@@ -7,22 +11,44 @@
 }
 
 :root {
-  --fg: #f5f5f7;
-  --fg2: rgba(245, 245, 247, 0.5);
-  --fg3: rgba(245, 245, 247, 0.2);
-  --bg: #000;
-  --accent: #fff;
+  /* Layered depth backgrounds */
+  --bg:          #0A0A0F;
+  --bg-surface:  #111118;
+  --bg-elevated: #1A1A24;
+  --bg-hover:    #222230;
+
+  /* Text hierarchy */
+  --fg:   #F0F0F5;
+  --fg2:  rgba(240, 240, 245, 0.55);
+  --fg3:  rgba(240, 240, 245, 0.25);
+  --fg4:  rgba(240, 240, 245, 0.08);
+
+  /* Accents */
+  --accent:      #818CF8;
+  --accent-glow: rgba(129, 140, 248, 0.15);
+  --danger:      #EF4444;
+  --success:     #34D399;
+
+  /* Glass surfaces */
+  --glass-bg:     rgba(255, 255, 255, 0.06);
+  --glass-border: rgba(255, 255, 255, 0.09);
+
+  /* Safe areas & phone dimensions */
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
   --phone-w: 393px;
   --phone-h: 852px;
+
+  /* Motion */
+  --ease-spring:   cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 html { -webkit-text-size-adjust: 100%; }
 
 body {
   font-family: 'Inter', -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
-  background: var(--bg);
+  background: var(--bg-surface);
   color: var(--fg);
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
@@ -39,17 +65,15 @@ button {
   touch-action: manipulation;
 }
 
-/* ── Phone Frame (desktop only) ── */
+/* ── Phone Frame ── */
 .phone-frame {
   position: relative;
   width: 100%;
   min-height: 100dvh;
 }
 
-/* ── Phone notch (hidden on mobile) ── */
 .phone-notch { display: none; }
 
-/* ── Home indicator (iPhone-style bar at bottom) ── */
 .home-indicator {
   flex-shrink: 0;
   width: 134px;
@@ -59,17 +83,19 @@ button {
   margin: 8px auto 8px;
 }
 
-/* ── Shell ── */
+/* ── App Shell ── */
 .app {
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
   padding: var(--safe-t) 0 var(--safe-b);
-  background: var(--bg);
+  background: var(--bg-surface);
   overflow: hidden;
 }
 
-/* ── Shows (pill row) ── */
+/* ══════════════════════════════════════════════
+   1. PODCAST SELECTOR — Glassmorphic pill row
+   ══════════════════════════════════════════════ */
 .shows {
   display: flex;
   gap: 8px;
@@ -77,74 +103,130 @@ button {
   overflow-x: auto;
   scrollbar-width: none;
   flex-shrink: 0;
+  /* Fade edges to hint scrollability */
+  mask-image: linear-gradient(
+    to right, transparent 0%, black 20px, black calc(100% - 20px), transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to right, transparent 0%, black 20px, black calc(100% - 20px), transparent 100%
+  );
 }
 .shows::-webkit-scrollbar { display: none; }
 
 .show {
   flex-shrink: 0;
-  padding: 8px 16px;
+  padding: 8px 18px;
   border-radius: 99px;
   font-size: 13px;
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--fg2);
-  background: rgba(255, 255, 255, 0.08);
-  transition: all 0.2s;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all 0.25s var(--ease-standard);
   white-space: nowrap;
 }
 
 .show.on {
-  color: var(--bg);
-  background: var(--fg);
+  color: #fff;
+  background: linear-gradient(135deg, #818CF8, #C084FC);
+  border-color: transparent;
+  box-shadow: 0 2px 16px var(--accent-glow);
 }
 
 .show:active {
-  transform: scale(0.96);
+  transform: scale(0.95);
 }
 
-/* ── Episodes (horizontal scroll) ── */
+/* ══════════════════════════════════════════════
+   2. EPISODE LIST — Cards with gradient thumbs
+   ══════════════════════════════════════════════ */
 .episodes {
   display: flex;
-  gap: 2px;
+  gap: 12px;
   padding: 20px 20px 16px;
   overflow-x: auto;
   scrollbar-width: none;
   flex-shrink: 0;
+  scroll-snap-type: x mandatory;
 }
 .episodes::-webkit-scrollbar { display: none; }
 
 .ep {
   flex-shrink: 0;
-  width: 148px;
-  padding: 14px 12px;
+  width: 152px;
+  padding: 0;
   text-align: left;
-  border-radius: 14px;
-  background: transparent;
-  transition: background 0.15s;
+  border-radius: 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--fg4);
+  overflow: hidden;
+  transition: all 0.25s var(--ease-standard);
+  scroll-snap-align: start;
 }
 
-.ep:active { background: rgba(255, 255, 255, 0.04); }
+.ep:active {
+  transform: scale(0.97);
+}
 
 .ep.on {
-  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(129, 140, 248, 0.3);
+  box-shadow:
+    0 0 0 1px rgba(129, 140, 248, 0.15),
+    0 4px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* Gradient thumbnail placeholder */
+.ep-thumb {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  background: linear-gradient(
+    135deg,
+    rgba(129, 140, 248, 0.18) 0%,
+    rgba(192, 132, 252, 0.08) 100%
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Waveform icon inside thumbnail */
+.ep-thumb-icon {
+  color: rgba(129, 140, 248, 0.3);
+}
+
+.ep.on .ep-thumb {
+  background: linear-gradient(
+    135deg,
+    rgba(129, 140, 248, 0.28) 0%,
+    rgba(192, 132, 252, 0.15) 100%
+  );
+}
+
+.ep-body {
+  padding: 10px 12px 12px;
 }
 
 .ep-date {
   display: block;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--fg3);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 6px;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
 }
 
 .ep-title {
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 1.35;
   letter-spacing: -0.01em;
@@ -153,12 +235,19 @@ button {
 
 .ep.on .ep-title { color: #fff; }
 
+.ep-duration {
+  font-size: 11px;
+  color: var(--fg3);
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── Loading dot ── */
 .dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--fg3);
+  background: var(--accent);
   animation: pulse 1s ease-in-out infinite;
   margin: 4px auto;
 }
@@ -179,7 +268,9 @@ button {
   letter-spacing: -0.01em;
 }
 
-/* ── Player ── */
+/* ══════════════════════════════════════════════
+   3. PLAYER — Ambient gradient, ad markers, controls
+   ══════════════════════════════════════════════ */
 .player {
   flex: 1;
   display: flex;
@@ -187,15 +278,21 @@ button {
   justify-content: flex-end;
   padding: 0 28px 24px;
   min-height: 0;
+  /* Ambient glow behind player */
+  background: radial-gradient(
+    ellipse at 50% 40%,
+    rgba(129, 140, 248, 0.06) 0%,
+    transparent 70%
+  );
 }
 
 .now {
-  font-size: 17px;
-  font-weight: 600;
-  line-height: 1.3;
-  letter-spacing: -0.02em;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.025em;
   text-align: center;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   color: var(--fg);
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -204,13 +301,14 @@ button {
 }
 
 .desc {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.4;
-  color: var(--fg2);
+  color: var(--accent);
+  font-weight: 500;
   text-align: center;
   margin-bottom: 28px;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -220,25 +318,37 @@ button {
   text-align: center;
   font-size: 13px;
   color: var(--fg3);
-  padding: 8px 0;
+  padding: 8px 0 16px;
 }
 
-/* Skip notification */
+/* Skip notification — glassmorphic toast */
 .skip-notification {
   text-align: center;
   font-size: 12px;
   font-weight: 600;
-  color: #818cf8;
-  padding: 4px 0 8px;
-  animation: pulse 1s ease-in-out;
+  color: var(--accent);
+  padding: 6px 16px;
+  margin: 0 auto 12px;
+  width: fit-content;
+  border-radius: 99px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  animation: toast-in 0.3s var(--ease-standard);
 }
 
-/* Progress */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Progress bar ── */
 .bar {
   position: relative;
   height: 4px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 99px;
   cursor: pointer;
   touch-action: none;
   padding: 10px 0;
@@ -249,20 +359,27 @@ button {
 .fill {
   height: 4px;
   background: var(--fg);
-  border-radius: 2px;
+  border-radius: 99px;
   transition: width 0.1s linear;
   pointer-events: none;
   margin-top: 10px;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.12);
 }
 
-/* Ad segment markers on progress bar */
+/* Ad segment markers — pulsing red zones */
 .ad-marker {
   position: absolute;
   top: 10px;
   height: 4px;
-  background: rgba(239, 68, 68, 0.5);
-  border-radius: 2px;
+  background: rgba(239, 68, 68, 0.45);
+  border-radius: 99px;
   pointer-events: none;
+  animation: ad-pulse 2s ease-in-out infinite;
+}
+
+@keyframes ad-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.75; }
 }
 
 .times {
@@ -276,13 +393,13 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-/* Controls */
+/* ── Controls ── */
 .controls {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 40px;
-  margin-top: 24px;
+  margin-top: 28px;
 }
 
 .ctl {
@@ -293,45 +410,53 @@ button {
   justify-content: center;
   color: var(--fg2);
   border-radius: 50%;
-  transition: color 0.15s;
+  transition: all 0.2s var(--ease-standard);
 }
-.ctl:active { color: var(--fg); }
+
+.ctl:active {
+  color: var(--fg);
+  transform: scale(0.9);
+}
 
 .play {
-  width: 64px;
-  height: 64px;
+  width: 68px;
+  height: 68px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
   background: var(--fg);
-  color: var(--bg);
-  transition: transform 0.15s;
+  color: var(--bg-surface);
+  transition: all 0.2s var(--ease-spring);
+  box-shadow: 0 4px 20px rgba(255, 255, 255, 0.1);
 }
-.play:active { transform: scale(0.93); }
 
-/* ── Flow Widget (bilko-flow FlowProgress container) ── */
+.play:active {
+  transform: scale(0.92);
+}
+
+/* ══════════════════════════════════════════════
+   4. BILKO-FLOW WIDGET — container for FlowProgress
+   ══════════════════════════════════════════════ */
 .flow-widget {
   flex-shrink: 0;
   padding: 12px 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--fg4);
   font-size: 12px;
 }
 
 /* ══════════════════════════════════════════════
-   Desktop: Phone frame simulation
+   DESKTOP: Phone frame simulation
    ══════════════════════════════════════════════ */
 @media (min-width: 768px) {
   body {
-    background: #0a0a0f;
     display: flex;
     align-items: center;
     justify-content: center;
     min-height: 100vh;
-    /* Subtle radial gradient background */
     background:
       radial-gradient(ellipse at 50% 0%, rgba(88, 28, 135, 0.15) 0%, transparent 60%),
-      #0a0a0f;
+      var(--bg);
   }
 
   .phone-frame {
@@ -350,7 +475,6 @@ button {
     flex-shrink: 0;
   }
 
-  /* Phone notch / dynamic island */
   .phone-notch {
     display: block;
     position: absolute;
@@ -376,47 +500,28 @@ button {
   }
   .app::-webkit-scrollbar { display: none; }
 
-  .shows {
-    padding: 8px 20px 0;
-  }
+  .shows { padding: 8px 20px 0; }
+  .episodes { padding: 16px 20px 12px; }
 
-  .episodes {
-    padding: 16px 20px 12px;
-  }
+  .ep { width: 140px; }
 
-  .ep {
-    width: 140px;
-    padding: 12px 10px;
-  }
+  .player { padding: 0 24px 16px; }
 
-  .player {
-    padding: 0 24px 16px;
-  }
+  .controls { gap: 36px; margin-top: 20px; }
 
-  .controls {
-    gap: 36px;
-    margin-top: 20px;
-  }
+  .flow-widget { padding: 10px 12px 4px; }
 
-  .flow-widget {
-    padding: 10px 12px 4px;
-  }
-
-  .home-indicator {
-    margin: 6px auto 4px;
-  }
+  .home-indicator { margin: 6px auto 4px; }
 }
 
-/* Large desktop: slightly bigger phone */
+/* Large desktop: bigger phone */
 @media (min-width: 1200px) {
   :root {
     --phone-w: 430px;
     --phone-h: 932px;
   }
 
-  .phone-frame {
-    border-radius: 55px;
-  }
+  .phone-frame { border-radius: 55px; }
 
   .app {
     border-radius: 52px;
@@ -429,21 +534,9 @@ button {
     top: 14px;
   }
 
-  .ep {
-    width: 148px;
-    padding: 14px 12px;
-  }
+  .ep { width: 152px; }
 
-  .player {
-    padding: 0 28px 24px;
-  }
-
-  .controls {
-    gap: 40px;
-    margin-top: 24px;
-  }
-
-  .flow-widget {
-    padding: 12px 16px 6px;
-  }
+  .player { padding: 0 28px 24px; }
+  .controls { gap: 40px; margin-top: 24px; }
+  .flow-widget { padding: 12px 16px 6px; }
 }

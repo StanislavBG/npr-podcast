@@ -40,8 +40,16 @@ export function EpisodeList({ episodes, loading, selectedId, onSelect }: Props) 
             className={`ep ${on ? 'on' : ''}`}
             onClick={() => onSelect(ep)}
           >
-            <span className="ep-date">{date}</span>
-            <span className="ep-title">{ep.title}</span>
+            <div className="ep-thumb">
+              <svg className="ep-thumb-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M2 12h2l3-7 4 14 4-10 3 6h4" />
+              </svg>
+            </div>
+            <div className="ep-body">
+              <span className="ep-date">{date}</span>
+              <span className="ep-title">{ep.title}</span>
+              {ep.duration && <div className="ep-duration">{ep.duration}</div>}
+            </div>
           </button>
         );
       })}
