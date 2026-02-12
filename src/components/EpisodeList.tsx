@@ -15,7 +15,6 @@ export function EpisodeList({ episodes, loading, selectedId, onSelect }: Props) 
     selectedRef.current?.scrollIntoView({
       behavior: 'smooth',
       block: 'nearest',
-      inline: 'center',
     });
   }, [selectedId]);
 
@@ -40,23 +39,13 @@ export function EpisodeList({ episodes, loading, selectedId, onSelect }: Props) 
             className={`ep ${on ? 'on' : ''}`}
             onClick={() => onSelect(ep)}
           >
-            <span className="ep-date">{date}</span>
+            <div className="ep-meta">
+              {date && <span className="ep-date">{date}</span>}
+              {ep.duration && <span className="ep-duration">{ep.duration}</span>}
+            </div>
             <span className="ep-title">{ep.title}</span>
-            {ep.link && (
-              <a
-                className="ep-link-icon"
-                href={ep.link}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={ep.link}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                  <polyline points="15 3 21 3 21 9" />
-                  <line x1="10" y1="14" x2="21" y2="3" />
-                </svg>
-              </a>
+            {ep.description && (
+              <span className="ep-desc">{ep.description}</span>
             )}
           </button>
         );

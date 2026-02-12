@@ -1,3 +1,4 @@
+/* ── Reset ── */
 *,
 *::before,
 *::after {
@@ -8,17 +9,18 @@
 
 :root {
   --fg: #f5f5f7;
-  --fg2: rgba(245, 245, 247, 0.5);
-  --fg3: rgba(245, 245, 247, 0.2);
-  --bg: #000;
-  --accent: #fff;
+  --fg2: rgba(245, 245, 247, 0.6);
+  --fg3: rgba(245, 245, 247, 0.25);
+  --bg: #0a0a0f;
+  --surface: rgba(255, 255, 255, 0.06);
+  --surface-hover: rgba(255, 255, 255, 0.1);
+  --accent: #818cf8;
   --safe-b: env(safe-area-inset-bottom, 0px);
-  --safe-t: env(safe-area-inset-top, 0px);
-  --phone-w: 393px;
-  --phone-h: 852px;
 }
 
-html { -webkit-text-size-adjust: 100%; }
+html {
+  -webkit-text-size-adjust: 100%;
+}
 
 body {
   font-family: 'Inter', -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
@@ -39,41 +41,34 @@ button {
   touch-action: manipulation;
 }
 
-/* ── Phone Frame (desktop only) ── */
-.phone-frame {
-  position: relative;
-  width: 100%;
-  min-height: 100dvh;
-}
-
-/* ── Phone notch (hidden on mobile) ── */
-.phone-notch { display: none; }
-
-/* ── Home indicator (iPhone-style bar at bottom) ── */
-.home-indicator {
-  flex-shrink: 0;
-  width: 134px;
-  height: 5px;
-  border-radius: 100px;
-  background: rgba(255, 255, 255, 0.2);
-  margin: 8px auto 8px;
-}
-
 /* ── Shell ── */
-.app {
-  min-height: 100dvh;
+.shell {
   display: flex;
   flex-direction: column;
-  padding: var(--safe-t) 0 var(--safe-b);
-  background: var(--bg);
-  overflow: hidden;
+  min-height: 100dvh;
+  max-width: 480px;
+  margin: 0 auto;
+  padding-bottom: var(--safe-b);
 }
 
-/* ── Shows (pill row) ── */
+/* ── Header ── */
+.header {
+  flex-shrink: 0;
+  padding: 16px 20px 8px;
+}
+
+.header-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--fg);
+}
+
+/* ── Podcast Selector (pill row) ── */
 .shows {
   display: flex;
   gap: 8px;
-  padding: 16px 20px 0;
+  padding: 8px 20px 12px;
   overflow-x: auto;
   scrollbar-width: none;
   flex-shrink: 0;
@@ -88,8 +83,8 @@ button {
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--fg2);
-  background: rgba(255, 255, 255, 0.08);
-  transition: all 0.2s;
+  background: var(--surface);
+  transition: all 0.15s;
   white-space: nowrap;
 }
 
@@ -102,68 +97,94 @@ button {
   transform: scale(0.96);
 }
 
-/* ── Episodes (horizontal scroll) ── */
+/* ── Content area (scrollable) ── */
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 16px 16px;
+  scrollbar-width: none;
+}
+.content::-webkit-scrollbar { display: none; }
+
+/* ── Episodes (vertical card list) ── */
 .episodes {
   display: flex;
-  gap: 2px;
-  padding: 20px 20px 16px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  flex-shrink: 0;
+  flex-direction: column;
+  gap: 8px;
 }
-.episodes::-webkit-scrollbar { display: none; }
 
 .ep {
-  flex-shrink: 0;
-  width: 148px;
-  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
   text-align: left;
   border-radius: 14px;
-  background: transparent;
+  background: var(--surface);
   transition: background 0.15s;
 }
 
-.ep:active { background: rgba(255, 255, 255, 0.04); }
+.ep:active { background: var(--surface-hover); }
 
 .ep.on {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-hover);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.ep-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .ep-date {
-  display: block;
   font-size: 11px;
   font-weight: 600;
   color: var(--fg3);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  margin-bottom: 6px;
+}
+
+.ep-duration {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg3);
 }
 
 .ep-title {
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   line-height: 1.35;
   letter-spacing: -0.01em;
   color: var(--fg);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .ep.on .ep-title { color: #fff; }
 
-/* Episode external link icon */
+.ep-desc {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--fg2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .ep-link-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-top: 6px;
   padding: 4px;
   border-radius: 6px;
   color: var(--fg3);
   transition: color 0.15s, background 0.15s;
   text-decoration: none;
+  align-self: flex-start;
 }
 .ep-link-icon:hover,
 .ep-link-icon:active {
@@ -178,7 +199,7 @@ button {
   border-radius: 50%;
   background: var(--fg3);
   animation: dot-pulse 1s ease-in-out infinite;
-  margin: 4px auto;
+  margin: 40px auto;
 }
 @keyframes dot-pulse {
   0%, 100% { opacity: 0.3; }
@@ -187,48 +208,46 @@ button {
 
 /* ── Empty state ── */
 .empty {
-  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
+  min-height: 200px;
   color: var(--fg3);
   font-size: 15px;
   font-weight: 500;
-  letter-spacing: -0.01em;
 }
 
-/* ── Player ── */
+/* ── Player dock (sticky bottom) ── */
+.player-dock {
+  flex-shrink: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--bg);
+}
+
 .player {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  padding: 0 28px 24px;
-  min-height: 0;
+  padding: 16px 20px 12px;
 }
 
 .now {
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 600;
   line-height: 1.3;
   letter-spacing: -0.02em;
-  text-align: center;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
   color: var(--fg);
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
 .desc {
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.4;
   color: var(--fg2);
-  text-align: center;
-  margin-bottom: 28px;
+  margin-bottom: 12px;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -237,9 +256,8 @@ button {
 .episode-link-row {
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
-  margin-bottom: 20px;
+  margin-bottom: 12px;
   max-width: 100%;
   overflow: hidden;
 }
@@ -252,7 +270,6 @@ button {
   text-decoration: none;
   font-size: 11px;
   font-weight: 500;
-  letter-spacing: 0.01em;
   padding: 4px 8px;
   border-radius: 8px;
   transition: color 0.15s, background 0.15s;
@@ -307,12 +324,12 @@ button {
   text-align: center;
   font-size: 12px;
   font-weight: 600;
-  color: #818cf8;
+  color: var(--accent);
   padding: 4px 0 8px;
   animation: dot-pulse 1s ease-in-out;
 }
 
-/* Progress */
+/* ── Progress bar ── */
 .bar {
   position: relative;
   height: 4px;
@@ -334,7 +351,6 @@ button {
   margin-top: 10px;
 }
 
-/* Ad segment markers on progress bar */
 .ad-marker {
   position: absolute;
   top: 10px;
@@ -351,22 +367,21 @@ button {
   font-weight: 500;
   color: var(--fg3);
   margin-top: 8px;
-  letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
 }
 
-/* Controls */
+/* ── Controls ── */
 .controls {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 40px;
-  margin-top: 24px;
+  gap: 32px;
+  margin-top: 12px;
 }
 
 .ctl {
-  width: 48px;
-  height: 48px;
+  width: 44px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -377,8 +392,8 @@ button {
 .ctl:active { color: var(--fg); }
 
 .play {
-  width: 64px;
-  height: 64px;
+  width: 52px;
+  height: 52px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -391,15 +406,14 @@ button {
 
 /* ── LLM Summary ── */
 .llm-summary {
-  padding: 0 28px 16px;
-  flex-shrink: 0;
+  padding: 0 20px 12px;
 }
 
 .summary-text {
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--fg2);
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .topic-tags {
@@ -411,150 +425,17 @@ button {
 .topic-tag {
   font-size: 11px;
   font-weight: 600;
-  padding: 4px 10px;
+  padding: 3px 10px;
   border-radius: 99px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface);
   color: var(--fg2);
 }
 
-/* ── Flow Widget (bilko-flow FlowProgress container) ── */
+/* ── Flow Widget ── */
 .flow-widget {
   flex-shrink: 0;
-  padding: 12px 16px;
+  padding: 8px 16px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   font-size: 12px;
   overflow: hidden;
-}
-
-/* ══════════════════════════════════════════════
-   Desktop: Phone frame simulation
-   ══════════════════════════════════════════════ */
-@media (min-width: 768px) {
-  body {
-    background:
-      radial-gradient(ellipse at 50% 0%, rgba(88, 28, 135, 0.15) 0%, transparent 60%),
-      #0a0a0f;
-    min-height: 100vh;
-  }
-
-  #root {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
-  }
-
-  .phone-frame {
-    position: relative;
-    width: var(--phone-w);
-    height: var(--phone-h);
-    min-height: auto;
-    margin: auto;
-    border-radius: 50px;
-    border: 3px solid rgba(255, 255, 255, 0.12);
-    overflow: hidden;
-    box-shadow:
-      0 0 0 1px rgba(255, 255, 255, 0.06),
-      0 25px 80px rgba(0, 0, 0, 0.6),
-      0 8px 32px rgba(0, 0, 0, 0.4),
-      inset 0 0 0 1px rgba(255, 255, 255, 0.04);
-    flex-shrink: 0;
-  }
-
-  /* Phone notch / dynamic island */
-  .phone-notch {
-    display: block;
-    position: absolute;
-    top: 12px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 126px;
-    height: 36px;
-    border-radius: 20px;
-    background: #000;
-    z-index: 10;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .app {
-    min-height: 100%;
-    height: var(--phone-h);
-    overflow-y: auto;
-    overflow-x: hidden;
-    border-radius: 47px;
-    padding-top: 56px;
-    scrollbar-width: none;
-  }
-  .app::-webkit-scrollbar { display: none; }
-
-  .shows {
-    padding: 8px 20px 0;
-  }
-
-  .episodes {
-    padding: 16px 20px 12px;
-  }
-
-  .ep {
-    width: 140px;
-    padding: 12px 10px;
-  }
-
-  .player {
-    padding: 0 24px 16px;
-  }
-
-  .controls {
-    gap: 36px;
-    margin-top: 20px;
-  }
-
-  .flow-widget {
-    padding: 10px 12px 4px;
-  }
-
-  .home-indicator {
-    margin: 6px auto 4px;
-  }
-}
-
-/* Large desktop: slightly bigger phone */
-@media (min-width: 1200px) {
-  :root {
-    --phone-w: 430px;
-    --phone-h: 932px;
-  }
-
-  .phone-frame {
-    border-radius: 55px;
-  }
-
-  .app {
-    border-radius: 52px;
-    padding-top: 60px;
-  }
-
-  .phone-notch {
-    width: 126px;
-    height: 37px;
-    top: 14px;
-  }
-
-  .ep {
-    width: 148px;
-    padding: 14px 12px;
-  }
-
-  .player {
-    padding: 0 28px 24px;
-  }
-
-  .controls {
-    gap: 40px;
-    margin-top: 24px;
-  }
-
-  .flow-widget {
-    padding: 12px 16px 6px;
-  }
 }
