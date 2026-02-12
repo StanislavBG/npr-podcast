@@ -1,0 +1,16 @@
+modules = ["nodejs-20:v8-20230920-bd784b9"]
+run = "npx concurrently \"npx tsx server/index.ts\" \"npx vite --host 0.0.0.0 --port 5000\""
+
+[nix]
+channel = "stable-23_05"
+
+[deployment]
+run = ["sh", "-c", "npx concurrently \"npx tsx server/index.ts\" \"npx vite --host 0.0.0.0 --port 5000\""]
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 3001
+externalPort = 3001
