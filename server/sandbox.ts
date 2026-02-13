@@ -78,7 +78,7 @@ const LLM_MODEL    = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const LLM_API_KEY  = process.env.OPENAI_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY || '';
 const LLM_BASE_URL = process.env.OPENAI_BASE_URL || process.env.AI_INTEGRATIONS_OPENAI_BASE_URL || undefined;
 
-// ─── JSON repair (inlined from bilko-flow) ──────────────────────────────────
+// ─── JSON repair ────────────────────────────────────────────────────────────
 
 function repairJSON(raw: string): string {
   let r = raw.replace(/,\s*([}\]])/g, '$1');

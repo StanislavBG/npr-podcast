@@ -1,18 +1,11 @@
 /**
- * Ad segment detection for NPR podcasts — LLM-powered via bilko-flow chatJSON.
+ * Ad segment detection for NPR podcasts — LLM-powered (OpenAI).
  *
- * The old approach: regex patterns + word-count-divided-by-155-WPM heuristics.
- * The new approach: three chained chatJSON calls that actually understand content.
- *
- * Pipeline:
- *   1. chatJSON parses raw transcript HTML → structured segments with ad flags
- *   2. chatJSON analyzes transcript + duration → ad time ranges with reasoning
- *   3. chatJSON summarizes + validates → final skip map
- *
- * All three calls go through bilko-flow's chatJSON with its 3-layer defense:
- *   Layer 1: response_format JSON constraint (OpenAI/Gemini)
- *   Layer 2: cleanLLMResponse + repairJSON
- *   Layer 3: Retry with corrective re-prompt
+ * v2 pipeline (same logic as sandbox):
+ *   1. Server-side HTML parsing → numbered transcript lines
+ *   2. Single LLM call: "which line ranges are ad blocks?"
+ *   3. Map line ranges → audio timestamps via proportional word position
+ *   4. LLM summarizes + validates → final skip map
  */
 
 // ─── Types (kept for Player compatibility) ──────────────────────────────────

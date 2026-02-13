@@ -143,10 +143,9 @@ Set via environment variables on the server:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BILKO_LLM_PROVIDER` | `openai` | LLM provider: `openai`, `claude`, `ollama`, etc. |
-| `BILKO_LLM_MODEL` | `gpt-4o-mini` | Model ID |
-| `BILKO_LLM_API_KEY` | *(none)* | API key. Without this, the pipeline falls back to basic heuristics. |
-| `BILKO_LLM_BASE_URL` | *(provider default)* | Override API endpoint URL |
+| `OPENAI_API_KEY` | *(none)* | OpenAI API key. Without this, the pipeline falls back to basic heuristics. |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Model ID |
+| `OPENAI_BASE_URL` | *(provider default)* | Override API endpoint URL |
 
 ---
 

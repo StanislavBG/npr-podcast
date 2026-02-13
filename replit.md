@@ -35,7 +35,7 @@ An ad-free NPR podcast player with automatic ad-skipping, transcript viewing, an
 The app uses Replit AI Integrations as fallback for LLM calls. Environment variables:
 - `AI_INTEGRATIONS_OPENAI_API_KEY` - Auto-set by Replit
 - `AI_INTEGRATIONS_OPENAI_BASE_URL` - Auto-set by Replit
-- Can be overridden with `BILKO_LLM_PROVIDER`, `BILKO_LLM_MODEL`, `BILKO_LLM_API_KEY`, `BILKO_LLM_BASE_URL`
+- Can be overridden with `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`
 
 ## Recent Changes
 - Wired LLM configuration to use Replit AI Integrations as fallback (no separate API key required)
