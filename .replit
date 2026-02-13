@@ -16,3 +16,6 @@ deploymentTarget = "cloudrun"
 [[deployment.healthChecks]]
 name = "web"
 path = "/health"
+
+[agent]
+integrations = ["javascript_openai_ai_integrations:2.0.0"]
