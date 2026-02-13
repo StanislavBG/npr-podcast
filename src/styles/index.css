@@ -352,7 +352,7 @@ button {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 18px 6px;
+  padding: 6px 18px 6px;
 }
 
 .player-info {
@@ -421,9 +421,86 @@ button {
 }
 .play:active { transform: scale(0.93); }
 
-/* ── Bottom progress bar (flush to screen bottom) ── */
-.player-bottom-bar {
-  padding: 0 18px 2px;
+/* ── Video Timeline (above controls) ── */
+.video-timeline {
+  padding: 8px 18px 0;
+}
+
+.timeline-track {
+  position: relative;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  cursor: pointer;
+  touch-action: none;
+  padding: 10px 0;
+  margin: -10px 0;
+  background-clip: content-box;
+}
+
+.timeline-track.dragging {
+  cursor: grabbing;
+}
+
+/* Ad segment highlights on timeline */
+.timeline-ad {
+  position: absolute;
+  top: 10px;
+  height: 6px;
+  background: rgba(239, 68, 68, 0.55);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Hatched pattern overlay on ad segments */
+.timeline-ad::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 3px;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 2px,
+    rgba(255, 255, 255, 0.12) 2px,
+    rgba(255, 255, 255, 0.12) 4px
+  );
+}
+
+/* Progress fill */
+.timeline-progress {
+  position: absolute;
+  top: 10px;
+  left: 0;
+  height: 6px;
+  background: var(--fg);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 2;
+  transition: width 0.08s linear;
+}
+.timeline-track.dragging .timeline-progress {
+  transition: none;
+}
+
+/* Scrubber thumb */
+.timeline-thumb {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 3;
+  transition: left 0.08s linear, transform 0.15s;
+}
+.timeline-track.dragging .timeline-thumb {
+  transition: none;
+  transform: translate(-50%, -50%) scale(1.25);
 }
 
 .times {
@@ -432,38 +509,8 @@ button {
   font-size: 10px;
   font-weight: 500;
   color: var(--fg3);
-  margin-bottom: 4px;
+  margin-top: 6px;
   font-variant-numeric: tabular-nums;
-}
-
-.bar {
-  position: relative;
-  height: 4px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 2px;
-  cursor: pointer;
-  touch-action: none;
-  padding: 8px 0;
-  margin: -8px 0;
-  background-clip: content-box;
-}
-
-.fill {
-  height: 4px;
-  background: var(--fg);
-  border-radius: 2px;
-  transition: width 0.1s linear;
-  pointer-events: none;
-  margin-top: 8px;
-}
-
-.ad-marker {
-  position: absolute;
-  top: 8px;
-  height: 4px;
-  background: rgba(239, 68, 68, 0.5);
-  border-radius: 2px;
-  pointer-events: none;
 }
 
 /* ── LLM Summary ── */
