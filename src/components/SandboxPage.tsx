@@ -73,6 +73,7 @@ function StepFetchTranscript({ result }: { result: SandboxResult }) {
     'vtt': 'VTT subtitle file',
     'json': 'JSON transcript',
     'html': 'HTML page scraping',
+    'fallback': 'Fallback (description only)',
   };
 
   const { lines } = transcript;
@@ -436,8 +437,12 @@ export function SandboxPage({ onBack }: Props) {
         const data = await fetchEpisodes(podcastId);
         if (cancelled) return;
 
-        // Pick first episode with transcript
-        const ep = data.episodes.find(e => e.transcriptUrl || (e.podcastTranscripts && e.podcastTranscripts.length > 0));
+        // Pick first episode with any transcript source (audio, text, or HTML)
+        const ep = data.episodes.find(e =>
+          e.transcriptUrl ||
+          e.audioUrl ||
+          (e.podcastTranscripts && e.podcastTranscripts.length > 0)
+        );
         if (!ep) {
           setError('No episodes with transcripts found.');
           setLoading(false);
@@ -448,7 +453,7 @@ export function SandboxPage({ onBack }: Props) {
 
         // 3. Run analysis (prefer audio transcription when audioUrl available)
         const res = await sandboxAnalyze(
-          ep.transcriptUrl!,
+          ep.transcriptUrl || '',
           ep.title,
           parseDuration(ep.duration),
           ep.podcastTranscripts,
