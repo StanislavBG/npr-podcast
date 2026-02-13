@@ -339,6 +339,7 @@ button {
   flex-shrink: 0;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   background: var(--bg);
+  padding: 4px 6px 12px;
 }
 
 .player {
@@ -351,7 +352,7 @@ button {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 16px 6px;
+  padding: 10px 18px 6px;
 }
 
 .player-info {
@@ -422,7 +423,7 @@ button {
 
 /* ── Bottom progress bar (flush to screen bottom) ── */
 .player-bottom-bar {
-  padding: 0 16px 8px;
+  padding: 0 18px 2px;
 }
 
 .times {
