@@ -478,7 +478,7 @@ export function SandboxPage({ onBack }: Props) {
         if (cancelled) return;
 
         // Pick first episode with transcript
-        const ep = data.episodes.find(e => e.transcriptUrl);
+        const ep = data.episodes.find(e => e.transcriptUrl || (e.podcastTranscripts && e.podcastTranscripts.length > 0));
         if (!ep) {
           setError('No episodes with transcripts found.');
           setLoading(false);
@@ -492,6 +492,7 @@ export function SandboxPage({ onBack }: Props) {
           ep.transcriptUrl!,
           ep.title,
           parseDuration(ep.duration),
+          ep.podcastTranscripts,
         );
         if (cancelled) return;
 

@@ -259,33 +259,100 @@ async function fetchEpisode(podcastId: string, idx: number): Promise<Episode> {
 
 // ─── Step 1: Fetch transcript HTML → numbered lines ─────────────────────────
 
+/**
+ * Extract the transcript-specific section from NPR HTML pages.
+ * NPR transcript pages embed the actual transcript inside specific containers.
+ * This function tries multiple strategies to isolate the transcript from page chrome.
+ */
+function extractTranscriptSection(html: string): string {
+  // Strategy 1: Look for known transcript container patterns
+  const containerPatterns = [
+    /<div[^>]*\bclass="[^"]*\btranscript\b[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?:<\/div>|<div[^>]*\bclass="[^"]*\b(?:footer|related|sidebar)\b)/i,
+    /<div[^>]*\bclass="[^"]*\bstorytext\b[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/i,
+    /<article[^>]*>([\s\S]*?)<\/article>/i,
+    /<(?:div|section)[^>]*\bid=["'](?:transcript|storytext)["'][^>]*>([\s\S]*?)<\/(?:div|section)>/i,
+  ];
+
+  for (const pattern of containerPatterns) {
+    const match = html.match(pattern);
+    if (match && match[1]) {
+      const section = match[1];
+      const pCount = (section.match(/<p[^>]*>/gi) || []).length;
+      if (pCount >= 5) return section;
+    }
+  }
+
+  // Strategy 2: Find the largest cluster of <p> tags containing speaker patterns
+  const speakerPattern = /<p[^>]*>[\s\S]*?(?:<b>|<strong>)[A-Z][A-Z\s'.,-]+:[\s\S]*?<\/p>/gi;
+  const speakerParagraphs = html.match(speakerPattern) || [];
+
+  if (speakerParagraphs.length >= 3) {
+    const firstIdx = html.indexOf(speakerParagraphs[0]);
+    const lastParagraph = speakerParagraphs[speakerParagraphs.length - 1];
+    const lastIdx = html.lastIndexOf(lastParagraph) + lastParagraph.length;
+    if (firstIdx !== -1 && lastIdx > firstIdx) return html.slice(firstIdx, lastIdx);
+  }
+
+  // Strategy 3: No container found — return full HTML
+  return html;
+}
+
+/**
+ * Clean HTML entity references and tags from a text block.
+ */
+function cleanHtmlText(block: string): string {
+  return block
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Detect if a text line is page chrome (navigation, metadata, JS) rather than transcript content.
+ */
+function isPageChrome(text: string): boolean {
+  if (text.length < 10) return true;
+  if (/^(?:var |function |window\.|document\.|if\s*\(|for\s*\()/.test(text)) return true;
+  if (text.includes('createElement') || text.includes('getElementsBy') || text.includes('addEventListener')) return true;
+  if (text.includes('"@type"') || text.includes('"@context"') || text.includes('ImageObject')) return true;
+  if (/^(?:Skip to|Keyboard shortcuts|Open Navigation|Close Navigation|Expand\/collapse)/i.test(text)) return true;
+  if (/^(?:Home|News|Music|Culture|Podcasts & Shows|Search|Newsletters|NPR Shop)\s*$/i.test(text)) return true;
+  if (/^(?:About NPR|Diversity|Support|Careers|Press|Ethics)\s*$/i.test(text)) return true;
+  if (/^(?:LISTEN & FOLLOW|NPR App|Apple Podcasts|Spotify|Amazon Music|iHeart Radio|YouTube Music)\s*$/i.test(text)) return true;
+  if (/^(?:Sponsor Message|Become an NPR sponsor)\s*$/i.test(text)) return true;
+  const urlCount = (text.match(/https?:\/\//g) || []).length;
+  if (urlCount > 2) return true;
+  if (text.length > 2000) return true;
+  if (/\bhide caption\b/i.test(text)) return true;
+  if (/\(Photo by [^)]+\)/i.test(text) && text.length < 300) return true;
+  return false;
+}
+
 function parseTranscriptHtml(html: string): TranscriptLine[] {
-  // NPR transcripts use <p> tags inside a transcript container.
-  // Each <p> may start with <b>SPEAKER NAME:</b> followed by text.
-  // We extract these into lines.
+  // First, try to extract just the transcript section from the full page
+  const transcriptSection = extractTranscriptSection(html);
 
   const lines: TranscriptLine[] = [];
-  // Match <p> blocks inside the transcript area
-  const pBlocks = html.match(/<p[^>]*>[\s\S]*?<\/p>/gi) || [];
+  const pBlocks = transcriptSection.match(/<p[^>]*>[\s\S]*?<\/p>/gi) || [];
 
   let cumulative = 0;
   let lineNum = 0;
 
   for (const block of pBlocks) {
-    // Strip tags to get text
-    const text = block
-      .replace(/<br\s*\/?>/gi, ' ')
-      .replace(/<[^>]*>/g, '')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#x27;/g, "'")
-      .replace(/&nbsp;/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const text = cleanHtmlText(block);
 
     if (!text || text.length < 3) continue;
+
+    // Filter out page chrome
+    if (isPageChrome(text)) continue;
 
     // Detect speaker: "SPEAKER NAME:" at the start
     let speaker = '';
@@ -314,7 +381,30 @@ function parseTranscriptHtml(html: string): TranscriptLine[] {
   return lines;
 }
 
-async function fetchAndParseTranscript(url: string): Promise<{ html: string; lines: TranscriptLine[] }> {
+/**
+ * Validate that parsed transcript lines look like an actual podcast transcript.
+ */
+function validateTranscript(lines: TranscriptLine[], durationSec: number): {
+  isValid: boolean;
+  reason: string;
+} {
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+  const expectedMinWords = durationSec > 0 ? Math.floor((durationSec / 60) * 155 * 0.3) : 100;
+  const avgWordsPerLine = lines.length > 0 ? totalWords / lines.length : 0;
+
+  if (lines.length < 5) {
+    return { isValid: false, reason: `Only ${lines.length} lines parsed — too few for a real transcript` };
+  }
+  if (totalWords < expectedMinWords) {
+    return { isValid: false, reason: `Only ${totalWords} words (expected ≥${expectedMinWords} for ${Math.round(durationSec / 60)}min episode)` };
+  }
+  if (lines.length > 5 && avgWordsPerLine > 500) {
+    return { isValid: false, reason: `Avg ${Math.round(avgWordsPerLine)} words/line — likely page content, not transcript` };
+  }
+  return { isValid: true, reason: 'Transcript looks valid' };
+}
+
+async function fetchAndParseTranscript(url: string, durationSec: number): Promise<{ html: string; lines: TranscriptLine[] }> {
   section('Fetching transcript HTML');
   const res = await fetch(url, {
     headers: {
@@ -326,9 +416,22 @@ async function fetchAndParseTranscript(url: string): Promise<{ html: string; lin
   const html = await res.text();
   console.log(`${C.green}HTML size:${C.reset} ${html.length} chars`);
 
+  const allPTags = (html.match(/<p[^>]*>/gi) || []).length;
+  console.log(`${C.green}Total <p> tags on page:${C.reset} ${allPTags}`);
+
   const lines = parseTranscriptHtml(html);
   const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
   console.log(`${C.green}Parsed:${C.reset}    ${lines.length} lines, ${totalWords} words`);
+
+  // Validate transcript quality
+  const validation = validateTranscript(lines, durationSec);
+  if (validation.isValid) {
+    console.log(`${C.green}Validation:${C.reset} ${C.green}PASS${C.reset} — ${validation.reason}`);
+  } else {
+    console.log(`${C.red}Validation:${C.reset} ${C.red}FAIL${C.reset} — ${validation.reason}`);
+    console.log(`${C.yellow}The transcript page may not contain actual spoken dialogue.${C.reset}`);
+    console.log(`${C.yellow}This can happen if the episode is too new (transcripts take 10-48 hours to publish).${C.reset}`);
+  }
 
   return { html, lines };
 }
@@ -619,7 +722,7 @@ async function main() {
   }
 
   // Step 1: Fetch + parse transcript into numbered lines
-  const { lines } = await fetchAndParseTranscript(episode.transcriptUrl);
+  const { lines } = await fetchAndParseTranscript(episode.transcriptUrl, audioDurationSec);
   if (lines.length === 0) {
     console.log(`\n${C.red}ERROR: Parsed 0 lines from transcript. The HTML may not contain <p> tags.${C.reset}`);
     process.exit(1);

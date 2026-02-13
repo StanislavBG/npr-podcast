@@ -160,6 +160,11 @@ const PODCASTS: Record<string, { name: string; feedUrl: string }> = {
   },
 };
 
+interface PodcastTranscript {
+  url: string;
+  type: string; // e.g. "application/x-subrip", "text/vtt", "text/html", "application/json"
+}
+
 interface Episode {
   id: string;
   title: string;
@@ -169,6 +174,7 @@ interface Episode {
   audioUrl: string;
   link: string;
   transcriptUrl: string | null;
+  podcastTranscripts: PodcastTranscript[];
 }
 
 // ─── Sample fallback episodes ───────────────────────────────────────────────
@@ -176,17 +182,17 @@ interface Episode {
 function getSampleEpisodes(podcastId: string): Episode[] {
   const samples: Record<string, Episode[]> = {
     '510325': [
-      { id: 'sample-1', title: 'Why Egg Prices Are So High', description: 'Bird flu has devastated chicken flocks, driving egg prices to record highs.', pubDate: 'Mon, 10 Feb 2025 20:00:00 GMT', duration: '9:32', audioUrl: '', link: '', transcriptUrl: null },
-      { id: 'sample-2', title: 'The Rise of Buy Now, Pay Later', description: 'How installment payments are changing the way consumers shop.', pubDate: 'Fri, 07 Feb 2025 20:00:00 GMT', duration: '10:15', audioUrl: '', link: '', transcriptUrl: null },
-      { id: 'sample-3', title: 'What Tariffs Actually Do', description: 'A look at how tariffs affect prices, businesses, and trade.', pubDate: 'Thu, 06 Feb 2025 20:00:00 GMT', duration: '8:47', audioUrl: '', link: '', transcriptUrl: null },
+      { id: 'sample-1', title: 'Why Egg Prices Are So High', description: 'Bird flu has devastated chicken flocks, driving egg prices to record highs.', pubDate: 'Mon, 10 Feb 2025 20:00:00 GMT', duration: '9:32', audioUrl: '', link: '', transcriptUrl: null, podcastTranscripts: [] },
+      { id: 'sample-2', title: 'The Rise of Buy Now, Pay Later', description: 'How installment payments are changing the way consumers shop.', pubDate: 'Fri, 07 Feb 2025 20:00:00 GMT', duration: '10:15', audioUrl: '', link: '', transcriptUrl: null, podcastTranscripts: [] },
+      { id: 'sample-3', title: 'What Tariffs Actually Do', description: 'A look at how tariffs affect prices, businesses, and trade.', pubDate: 'Thu, 06 Feb 2025 20:00:00 GMT', duration: '8:47', audioUrl: '', link: '', transcriptUrl: null, podcastTranscripts: [] },
     ],
     '510289': [
-      { id: 'sample-6', title: 'The Invention of Money', description: 'The story of how money was invented — twice.', pubDate: 'Fri, 07 Feb 2025 20:00:00 GMT', duration: '22:14', audioUrl: '', link: '', transcriptUrl: null },
-      { id: 'sample-7', title: 'The Great Inflation', description: 'How Paul Volcker broke the back of inflation in the early 1980s.', pubDate: 'Wed, 05 Feb 2025 20:00:00 GMT', duration: '24:30', audioUrl: '', link: '', transcriptUrl: null },
+      { id: 'sample-6', title: 'The Invention of Money', description: 'The story of how money was invented — twice.', pubDate: 'Fri, 07 Feb 2025 20:00:00 GMT', duration: '22:14', audioUrl: '', link: '', transcriptUrl: null, podcastTranscripts: [] },
+      { id: 'sample-7', title: 'The Great Inflation', description: 'How Paul Volcker broke the back of inflation in the early 1980s.', pubDate: 'Wed, 05 Feb 2025 20:00:00 GMT', duration: '24:30', audioUrl: '', link: '', transcriptUrl: null, podcastTranscripts: [] },
     ],
   };
   return samples[podcastId] || [
-    { id: 'sample-default', title: 'Sample Episode', description: 'A sample episode for demonstration.', pubDate: 'Mon, 10 Feb 2025 20:00:00 GMT', duration: '10:00', audioUrl: '', link: '', transcriptUrl: null },
+    { id: 'sample-default', title: 'Sample Episode', description: 'A sample episode for demonstration.', pubDate: 'Mon, 10 Feb 2025 20:00:00 GMT', duration: '10:00', audioUrl: '', link: '', transcriptUrl: null, podcastTranscripts: [] },
   ];
 }
 
@@ -229,6 +235,20 @@ app.get('/api/podcast/:id/episodes', async (req, res) => {
         ? `https://www.npr.org/transcripts/${storyId}`
         : null;
 
+      // Extract <podcast:transcript> tags (Podcast 2.0 namespace)
+      const podcastTranscripts: PodcastTranscript[] = [];
+      const transcriptTags = item['podcast:transcript'];
+      if (transcriptTags) {
+        const tagList = Array.isArray(transcriptTags) ? transcriptTags : [transcriptTags];
+        for (const tag of tagList) {
+          const url = tag?.['@_url'] || tag?.url || (typeof tag === 'string' ? tag : '');
+          const type = tag?.['@_type'] || tag?.type || '';
+          if (url) {
+            podcastTranscripts.push({ url, type });
+          }
+        }
+      }
+
       return {
         id: `ep-${i}-${Date.now()}`,
         title: item.title || 'Untitled',
@@ -241,6 +261,7 @@ app.get('/api/podcast/:id/episodes', async (req, res) => {
         audioUrl,
         link,
         transcriptUrl,
+        podcastTranscripts,
       };
     });
 
@@ -254,28 +275,45 @@ app.get('/api/podcast/:id/episodes', async (req, res) => {
   }
 });
 
-// ─── Transcript Fetch (raw HTML only — no regex parsing) ────────────────────
+// ─── Transcript Fetch (supports HTML, SRT, VTT) ─────────────────────────────
 
 app.get('/api/transcript', async (req, res) => {
   const url = req.query.url as string;
-  if (!url || !url.includes('npr.org')) {
-    res.status(400).json({ error: 'Invalid transcript URL' });
+  const format = (req.query.format as string) || 'html'; // 'html', 'srt', 'vtt', 'json'
+  if (!url) {
+    res.status(400).json({ error: 'Missing transcript URL' });
     return;
   }
 
   try {
+    const acceptHeader = format === 'html' ? 'text/html' : '*/*';
     const response = await fetch(url, {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        Accept: 'text/html',
+        Accept: acceptHeader,
       },
     });
     if (!response.ok) throw new Error(`Transcript fetch failed: ${response.status}`);
 
-    const html = await response.text();
-    // Return raw HTML — LLM will parse it
-    res.json({ html });
+    const content = await response.text();
+
+    if (format === 'srt' || format === 'vtt' || format === 'json') {
+      // Return pre-parsed lines for non-HTML formats
+      let lines: SandboxLine[];
+      if (format === 'srt') {
+        lines = parseSrtToLines(content);
+      } else if (format === 'vtt') {
+        lines = parseVttToLines(content);
+      } else {
+        lines = parseJsonTranscriptToLines(content);
+      }
+      res.json({ format, lines, raw: content.slice(0, 2000) });
+    } else {
+      // HTML — return raw HTML for LLM parsing, but also provide pre-parsed lines
+      const lines = parseTranscriptToLines(content);
+      res.json({ html: content, lines, format: 'html' });
+    }
   } catch (err: any) {
     console.error('Transcript fetch error:', err.message);
     res.status(502).json({ error: 'Failed to fetch transcript', detail: err.message });
@@ -308,22 +346,60 @@ app.post('/api/llm/parse-transcript', async (req, res) => {
     return;
   }
 
+  // Pre-parse HTML using our improved extraction before sending to LLM
+  const preParsedLines = parseTranscriptToLines(html);
+  const preParseValid = preParsedLines.length >= 5;
+
   if (!LLM_API_KEY) {
-    // Fallback: extract text minimally so the pipeline still runs without a key
-    const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 5000);
+    // Fallback: use our pre-parsed lines instead of raw HTML stripping
+    let segments: LLMTranscriptSegment[];
+    let fullText: string;
+    let estimatedContentWords: number;
+
+    if (preParseValid) {
+      segments = preParsedLines.map(l => ({
+        speaker: l.speaker,
+        text: l.text,
+        isAd: false,
+        adType: null,
+      }));
+      fullText = preParsedLines.map(l => {
+        const spk = l.speaker ? `${l.speaker}: ` : '';
+        return `${spk}${l.text}`;
+      }).join('\n');
+      estimatedContentWords = preParsedLines[preParsedLines.length - 1].cumulativeWords;
+    } else {
+      const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 5000);
+      segments = [{ speaker: '', text, isAd: false, adType: null }];
+      fullText = text;
+      estimatedContentWords = text.split(/\s+/).length;
+    }
+
     res.json({
-      segments: [{ speaker: '', text, isAd: false, adType: null }],
-      fullText: text,
+      segments,
+      fullText,
       adMentions: [],
-      estimatedContentWords: text.split(/\s+/).length,
+      estimatedContentWords,
     } as LLMTranscriptResult);
     return;
   }
 
-  // Truncate HTML to fit context window
-  const truncatedHtml = html.slice(0, 60000);
+  // If we have good pre-parsed lines, send clean text to LLM instead of raw HTML
+  // This saves tokens and avoids the LLM being confused by page chrome
+  let llmInput: string;
+  if (preParseValid) {
+    llmInput = preParsedLines.map(l => {
+      const spk = l.speaker ? `${l.speaker}: ` : '';
+      return `${spk}${l.text}`;
+    }).join('\n\n');
+  } else {
+    // Fall back to raw HTML, but extract transcript section first
+    const transcriptSection = extractTranscriptSection(html);
+    llmInput = transcriptSection.slice(0, 60000);
+  }
 
   try {
+    const inputLabel = preParseValid ? 'TRANSCRIPT TEXT' : 'HTML';
     const result = await chatJSON<LLMTranscriptResult>({
       provider: LLM_PROVIDER,
       model: LLM_MODEL,
@@ -332,11 +408,11 @@ app.post('/api/llm/parse-transcript', async (req, res) => {
       temperature: 0,
       maxTokens: 4096,
       maxRetries: 2,
-      systemPrompt: `You are a podcast transcript parser. You receive raw HTML from an NPR transcript page and extract structured data. Return ONLY valid JSON.`,
+      systemPrompt: `You are a podcast transcript parser. You receive ${preParseValid ? 'pre-extracted transcript text' : 'raw HTML from an NPR transcript page'} and extract structured data. Return ONLY valid JSON.`,
       messages: [
         {
           role: 'user',
-          content: `Parse this NPR podcast transcript HTML into structured segments.
+          content: `Parse this NPR podcast transcript into structured segments.
 
 For each paragraph of spoken content, extract:
 - speaker: the speaker name (uppercase, e.g. "DARIAN WOODS") or empty string if unknown
@@ -358,8 +434,8 @@ Return JSON matching this schema:
   "estimatedContentWords": number
 }
 
-HTML:
-${truncatedHtml}`,
+${inputLabel}:
+${llmInput}`,
         },
       ],
     });
@@ -581,27 +657,134 @@ interface SandboxAdBlock {
   endTimeSec: number;
 }
 
+// ─── Transcript Extraction Utilities ─────────────────────────────────────────
+
+/**
+ * Extract the transcript-specific section from NPR HTML pages.
+ * NPR transcript pages embed the actual transcript inside specific containers.
+ * This function tries multiple strategies to isolate the transcript from page chrome.
+ */
+function extractTranscriptSection(html: string): string {
+  // Strategy 1: Look for known transcript container patterns
+  // NPR uses various containers depending on the page version
+  const containerPatterns = [
+    // Modern NPR transcript pages
+    /<div[^>]*\bclass="[^"]*\btranscript\b[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?:<\/div>|<div[^>]*\bclass="[^"]*\b(?:footer|related|sidebar)\b)/i,
+    // Older NPR transcript pages with storytext class
+    /<div[^>]*\bclass="[^"]*\bstorytext\b[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/i,
+    // Article body container
+    /<article[^>]*>([\s\S]*?)<\/article>/i,
+    // Look for a section with id="transcript" or id="storytext"
+    /<(?:div|section)[^>]*\bid=["'](?:transcript|storytext)["'][^>]*>([\s\S]*?)<\/(?:div|section)>/i,
+  ];
+
+  for (const pattern of containerPatterns) {
+    const match = html.match(pattern);
+    if (match && match[1]) {
+      // Verify this section actually has transcript-like content
+      const section = match[1];
+      const pCount = (section.match(/<p[^>]*>/gi) || []).length;
+      if (pCount >= 5) {
+        return section;
+      }
+    }
+  }
+
+  // Strategy 2: Find the largest cluster of <p> tags that contain speaker patterns.
+  // NPR transcripts have patterns like "<b>SPEAKER NAME:</b> text"
+  // or "<p><strong>SPEAKER:</strong> text</p>"
+  const speakerPattern = /<p[^>]*>[\s\S]*?(?:<b>|<strong>)[A-Z][A-Z\s'.,-]+:[\s\S]*?<\/p>/gi;
+  const speakerParagraphs = html.match(speakerPattern) || [];
+
+  if (speakerParagraphs.length >= 3) {
+    // Find the region of HTML that contains these speaker paragraphs
+    const firstIdx = html.indexOf(speakerParagraphs[0]);
+    const lastParagraph = speakerParagraphs[speakerParagraphs.length - 1];
+    const lastIdx = html.lastIndexOf(lastParagraph) + lastParagraph.length;
+    if (firstIdx !== -1 && lastIdx > firstIdx) {
+      return html.slice(firstIdx, lastIdx);
+    }
+  }
+
+  // Strategy 3: No container found — return the full HTML
+  // (the p-tag extraction will still filter, but results may be noisy)
+  return html;
+}
+
+/**
+ * Clean HTML entity references and tags from a text block.
+ */
+function cleanHtmlText(block: string): string {
+  return block
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Detect if a text line is page chrome (navigation, metadata, JS) rather than transcript content.
+ */
+function isPageChrome(text: string): boolean {
+  // Skip very short lines that are likely nav items
+  if (text.length < 10) return true;
+
+  // Skip lines that look like JavaScript
+  if (/^(?:var |function |window\.|document\.|if\s*\(|for\s*\()/.test(text)) return true;
+  if (text.includes('createElement') || text.includes('getElementsBy') || text.includes('addEventListener')) return true;
+
+  // Skip lines that contain JSON-LD or structured data
+  if (text.includes('"@type"') || text.includes('"@context"') || text.includes('ImageObject')) return true;
+
+  // Skip navigation-like content
+  if (/^(?:Skip to|Keyboard shortcuts|Open Navigation|Close Navigation|Expand\/collapse)/i.test(text)) return true;
+  if (/^(?:Home|News|Music|Culture|Podcasts & Shows|Search|Newsletters|NPR Shop)\s*$/i.test(text)) return true;
+
+  // Skip NPR page footer/header elements
+  if (/^(?:About NPR|Diversity|Support|Careers|Press|Ethics)\s*$/i.test(text)) return true;
+  if (/^(?:LISTEN & FOLLOW|NPR App|Apple Podcasts|Spotify|Amazon Music|iHeart Radio|YouTube Music)\s*$/i.test(text)) return true;
+
+  // Skip "Sponsor Message" / "Become an NPR sponsor" page elements (not transcript content)
+  if (/^(?:Sponsor Message|Become an NPR sponsor)\s*$/i.test(text)) return true;
+
+  // Skip lines with excessive URLs or technical content
+  const urlCount = (text.match(/https?:\/\//g) || []).length;
+  if (urlCount > 2) return true;
+
+  // Skip very long lines (>2000 chars) — real transcript paragraphs are rarely this long
+  if (text.length > 2000) return true;
+
+  // Skip lines that are just image captions (contain "hide caption" or photo credit patterns)
+  if (/\bhide caption\b/i.test(text)) return true;
+  if (/\(Photo by [^)]+\)/i.test(text) && text.length < 300) return true;
+
+  return false;
+}
+
 function parseTranscriptToLines(html: string): SandboxLine[] {
+  // First, try to extract just the transcript section from the full page
+  const transcriptSection = extractTranscriptSection(html);
+
   const lines: SandboxLine[] = [];
-  const pBlocks = html.match(/<p[^>]*>[\s\S]*?<\/p>/gi) || [];
+  const pBlocks = transcriptSection.match(/<p[^>]*>[\s\S]*?<\/p>/gi) || [];
 
   let cumulative = 0;
   let lineNum = 0;
 
   for (const block of pBlocks) {
-    const text = block
-      .replace(/<br\s*\/?>/gi, ' ')
-      .replace(/<[^>]*>/g, '')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#x27;/g, "'")
-      .replace(/&nbsp;/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const text = cleanHtmlText(block);
 
     if (!text || text.length < 3) continue;
+
+    // Filter out page chrome
+    if (isPageChrome(text)) continue;
 
     let speaker = '';
     let content = text;
@@ -621,6 +804,193 @@ function parseTranscriptToLines(html: string): SandboxLine[] {
   }
 
   return lines;
+}
+
+/**
+ * Parse SRT (SubRip) transcript format into lines.
+ * SRT format:
+ *   1
+ *   00:00:01,000 --> 00:00:04,000
+ *   Speaker: Text here
+ */
+function parseSrtToLines(srt: string): SandboxLine[] {
+  const lines: SandboxLine[] = [];
+  // Split into subtitle blocks (separated by blank lines)
+  const blocks = srt.trim().split(/\n\s*\n/);
+  let cumulative = 0;
+  let lineNum = 0;
+
+  for (const block of blocks) {
+    const blockLines = block.trim().split('\n');
+    // SRT blocks have: index, timestamp, text (1+ lines)
+    if (blockLines.length < 3) continue;
+
+    // Skip the index line and timestamp line, get text
+    const textLines = blockLines.slice(2);
+    const fullText = textLines.join(' ').trim();
+    if (!fullText) continue;
+
+    let speaker = '';
+    let content = fullText;
+
+    // Check for speaker pattern: "<v Speaker Name>text" (WebVTT voice tag in SRT)
+    const voiceMatch = fullText.match(/^<v\s+([^>]+)>\s*/);
+    if (voiceMatch) {
+      speaker = voiceMatch[1].trim();
+      content = fullText.slice(voiceMatch[0].length).replace(/<\/v>/g, '').trim();
+    } else {
+      // Check for "SPEAKER:" pattern
+      const speakerMatch = fullText.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+      if (speakerMatch) {
+        speaker = speakerMatch[1].trim();
+        content = fullText.slice(speakerMatch[0].length).trim();
+      }
+    }
+
+    if (!content) continue;
+
+    lineNum++;
+    const wc = content.split(/\s+/).filter(Boolean).length;
+    cumulative += wc;
+
+    lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative });
+  }
+
+  return lines;
+}
+
+/**
+ * Parse WebVTT transcript format into lines.
+ * VTT format:
+ *   WEBVTT
+ *
+ *   00:00:01.000 --> 00:00:04.000
+ *   <v Speaker>Text here</v>
+ */
+function parseVttToLines(vtt: string): SandboxLine[] {
+  const lines: SandboxLine[] = [];
+  // Remove WEBVTT header and metadata
+  const content = vtt.replace(/^WEBVTT[^\n]*\n(?:[\w-]+:[^\n]*\n)*/i, '').trim();
+  // Split into cue blocks
+  const blocks = content.split(/\n\s*\n/);
+  let cumulative = 0;
+  let lineNum = 0;
+
+  for (const block of blocks) {
+    const blockLines = block.trim().split('\n');
+    // Find the timestamp line
+    let textStart = 0;
+    for (let i = 0; i < blockLines.length; i++) {
+      if (blockLines[i].includes('-->')) {
+        textStart = i + 1;
+        break;
+      }
+    }
+    if (textStart === 0 || textStart >= blockLines.length) continue;
+
+    const textLines = blockLines.slice(textStart);
+    const fullText = textLines.join(' ').trim();
+    if (!fullText) continue;
+
+    let speaker = '';
+    let cueText = fullText;
+
+    // WebVTT voice tags: <v Speaker Name>text</v>
+    const voiceMatch = fullText.match(/^<v\s+([^>]+)>\s*/);
+    if (voiceMatch) {
+      speaker = voiceMatch[1].trim();
+      cueText = fullText.slice(voiceMatch[0].length).replace(/<\/v>/g, '').trim();
+    } else {
+      const speakerMatch = fullText.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+      if (speakerMatch) {
+        speaker = speakerMatch[1].trim();
+        cueText = fullText.slice(speakerMatch[0].length).trim();
+      }
+    }
+
+    // Strip any remaining VTT tags
+    cueText = cueText.replace(/<[^>]*>/g, '').trim();
+    if (!cueText) continue;
+
+    lineNum++;
+    const wc = cueText.split(/\s+/).filter(Boolean).length;
+    cumulative += wc;
+
+    lines.push({ lineNum, speaker, text: cueText, wordCount: wc, cumulativeWords: cumulative });
+  }
+
+  return lines;
+}
+
+/**
+ * Parse JSON transcript format (Podcast 2.0 JSON format) into lines.
+ */
+function parseJsonTranscriptToLines(json: string): SandboxLine[] {
+  const lines: SandboxLine[] = [];
+  let cumulative = 0;
+  let lineNum = 0;
+
+  try {
+    const data = JSON.parse(json);
+    // Podcast 2.0 JSON transcript format has a "segments" array
+    const segments = data.segments || data.cues || data.transcript || (Array.isArray(data) ? data : []);
+
+    for (const seg of segments) {
+      const text = (seg.body || seg.text || seg.content || '').trim();
+      if (!text) continue;
+
+      const speaker = seg.speaker || seg.voice || '';
+
+      lineNum++;
+      const wc = text.split(/\s+/).filter(Boolean).length;
+      cumulative += wc;
+
+      lines.push({ lineNum, speaker, text, wordCount: wc, cumulativeWords: cumulative });
+    }
+  } catch {
+    // Invalid JSON — return empty
+  }
+
+  return lines;
+}
+
+/**
+ * Validate that parsed transcript lines look like an actual podcast transcript.
+ * Returns a diagnostic object.
+ */
+function validateTranscript(lines: SandboxLine[], durationSec: number): {
+  isValid: boolean;
+  reason: string;
+  details: {
+    lineCount: number;
+    totalWords: number;
+    linesWithSpeaker: number;
+    expectedMinWords: number;
+    avgWordsPerLine: number;
+  };
+} {
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+  const linesWithSpeaker = lines.filter(l => l.speaker).length;
+  // At ~155 words/minute, a 10-min episode should have ~1550 words
+  // Use a generous minimum: 30% of expected as threshold
+  const expectedMinWords = durationSec > 0 ? Math.floor((durationSec / 60) * 155 * 0.3) : 100;
+  const avgWordsPerLine = lines.length > 0 ? totalWords / lines.length : 0;
+
+  const details = { lineCount: lines.length, totalWords, linesWithSpeaker, expectedMinWords, avgWordsPerLine };
+
+  if (lines.length < 5) {
+    return { isValid: false, reason: `Only ${lines.length} lines parsed — too few for a real transcript`, details };
+  }
+
+  if (totalWords < expectedMinWords) {
+    return { isValid: false, reason: `Only ${totalWords} words parsed (expected at least ${expectedMinWords} for ${Math.round(durationSec / 60)}min episode)`, details };
+  }
+
+  if (lines.length > 5 && avgWordsPerLine > 500) {
+    return { isValid: false, reason: `Average ${Math.round(avgWordsPerLine)} words/line — likely extracted page content, not transcript`, details };
+  }
+
+  return { isValid: true, reason: 'Transcript looks valid', details };
 }
 
 function mapAdBlocksToTimestamps(
@@ -649,33 +1019,94 @@ function mapAdBlocksToTimestamps(
 }
 
 app.post('/api/sandbox/analyze', async (req, res) => {
-  const { transcriptUrl, episodeTitle, durationSec } = req.body as {
+  const { transcriptUrl, episodeTitle, durationSec, podcastTranscripts } = req.body as {
     transcriptUrl: string;
     episodeTitle: string;
     durationSec: number;
+    podcastTranscripts?: PodcastTranscript[];
   };
 
-  if (!transcriptUrl) {
-    res.status(400).json({ error: 'Missing transcriptUrl' });
+  if (!transcriptUrl && (!podcastTranscripts || podcastTranscripts.length === 0)) {
+    res.status(400).json({ error: 'Missing transcriptUrl or podcastTranscripts' });
     return;
   }
 
   try {
-    // Step 1: Fetch transcript HTML
-    const htmlRes = await fetch(transcriptUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        Accept: 'text/html',
-      },
-    });
-    if (!htmlRes.ok) throw new Error(`Transcript fetch failed: ${htmlRes.status}`);
-    const html = await htmlRes.text();
-    const rawHtmlLength = html.length;
-    const pTagCount = (html.match(/<p[^>]*>/gi) || []).length;
+    let html = '';
+    let rawHtmlLength = 0;
+    let pTagCount = 0;
+    let lines: SandboxLine[] = [];
+    let transcriptSource = 'html';
 
-    // Step 2: Parse into numbered lines
-    const lines = parseTranscriptToLines(html);
+    // Step 1a: Try direct podcast transcript files first (SRT, VTT, JSON)
+    if (podcastTranscripts && podcastTranscripts.length > 0) {
+      // Prefer SRT/VTT over HTML or JSON
+      const preferred = [...podcastTranscripts].sort((a, b) => {
+        const priority: Record<string, number> = {
+          'application/x-subrip': 1, 'application/srt': 1,
+          'text/vtt': 2,
+          'application/json': 3,
+          'text/html': 4, 'text/plain': 5,
+        };
+        return (priority[a.type] || 6) - (priority[b.type] || 6);
+      });
+
+      for (const transcript of preferred) {
+        try {
+          const tRes = await fetch(transcript.url, {
+            headers: { 'User-Agent': 'NPR-Podcast-Player/1.0', Accept: '*/*' },
+          });
+          if (!tRes.ok) continue;
+          const content = await tRes.text();
+
+          if (transcript.type.includes('subrip') || transcript.type.includes('srt')) {
+            lines = parseSrtToLines(content);
+            transcriptSource = 'srt';
+          } else if (transcript.type.includes('vtt')) {
+            lines = parseVttToLines(content);
+            transcriptSource = 'vtt';
+          } else if (transcript.type.includes('json')) {
+            lines = parseJsonTranscriptToLines(content);
+            transcriptSource = 'json';
+          }
+
+          if (lines.length >= 5) {
+            html = content;
+            rawHtmlLength = content.length;
+            break; // Success — use this transcript
+          }
+          lines = []; // Reset and try next format
+        } catch {
+          continue; // Try next transcript
+        }
+      }
+    }
+
+    // Step 1b: Fall back to transcript HTML page if direct files didn't work
+    if (lines.length === 0 && transcriptUrl) {
+      const htmlRes = await fetch(transcriptUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          Accept: 'text/html',
+        },
+      });
+      if (!htmlRes.ok) throw new Error(`Transcript fetch failed: ${htmlRes.status}`);
+      html = await htmlRes.text();
+      rawHtmlLength = html.length;
+      pTagCount = (html.match(/<p[^>]*>/gi) || []).length;
+      transcriptSource = 'html';
+
+      // Step 2: Parse into numbered lines using improved extraction
+      lines = parseTranscriptToLines(html);
+    }
+
     const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+
+    // Step 2b: Validate transcript quality
+    const validation = validateTranscript(lines, durationSec || 0);
+    if (!validation.isValid) {
+      console.warn(`Transcript validation failed for "${episodeTitle}": ${validation.reason}`);
+    }
 
     // Step 3: Build numbered transcript for LLM
     const numberedText = lines.map(l => {
@@ -799,6 +1230,12 @@ Return JSON:
         snippet: html.slice(0, 2000),
       },
       transcript: { lineCount: lines.length, totalWords, lines },
+      transcriptSource,
+      validation: {
+        isValid: validation.isValid,
+        reason: validation.reason,
+        details: validation.details,
+      },
       adBlocks,
       summary: {
         totalAdBlocks: adBlocks.length,
