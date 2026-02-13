@@ -111,6 +111,12 @@ export function Player({ episode, adDetection }: Props) {
         <div className="no-audio">No audio available for this episode</div>
       )}
 
+      {/* Episode title above timeline */}
+      <div className="player-info">
+        <div className="now">{episode.title}</div>
+        {skippedAd && <div className="skip-notification">{skippedAd}</div>}
+      </div>
+
       {/* Video-style timeline above controls */}
       <div className="video-timeline">
         <div
@@ -145,27 +151,21 @@ export function Player({ episode, adDetection }: Props) {
         </div>
       </div>
 
-      {/* Title row + controls */}
-      <div className="player-row">
-        <div className="player-info">
-          <div className="now">{episode.title}</div>
-          {skippedAd && <div className="skip-notification">{skippedAd}</div>}
-        </div>
-        <div className="controls">
-          <button className="ctl" onClick={() => skip(-15)}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-          </button>
-          <button className="play" onClick={toggle}>
-            {playing ? (
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
-            ) : (
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-            )}
-          </button>
-          <button className="ctl" onClick={() => skip(15)}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"/></svg>
-          </button>
-        </div>
+      {/* Controls centered below */}
+      <div className="controls controls-centered">
+        <button className="ctl" onClick={() => skip(-15)}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+        </button>
+        <button className="play" onClick={toggle}>
+          {playing ? (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+          ) : (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          )}
+        </button>
+        <button className="ctl" onClick={() => skip(15)}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"/></svg>
+        </button>
       </div>
     </div>
   );

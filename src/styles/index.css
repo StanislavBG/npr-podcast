@@ -337,26 +337,19 @@ button {
 /* ── Player dock (pinned to bottom of shell) ── */
 .player-dock {
   flex-shrink: 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
   background: var(--bg);
-  padding: 4px 6px 12px;
+  padding: 8px 6px 12px;
 }
 
 .player {
   display: flex;
   flex-direction: column;
-}
-
-/* Title row + controls inline */
-.player-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 6px 18px 6px;
+  gap: 4px;
 }
 
 .player-info {
-  flex: 1;
+  padding: 4px 18px 0;
   min-width: 0;
 }
 
@@ -394,6 +387,11 @@ button {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.controls-centered {
+  justify-content: center;
+  padding: 4px 0 2px;
 }
 
 .ctl {
