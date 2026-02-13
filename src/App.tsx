@@ -3,6 +3,7 @@ import { PodcastSelector } from './components/PodcastSelector';
 import { EpisodeList } from './components/EpisodeList';
 import { Player } from './components/Player';
 import { FlowVisualizer } from './components/FlowVisualizer';
+import { SandboxPage } from './components/SandboxPage';
 import {
   fetchPodcasts,
   fetchEpisodes,
@@ -33,7 +34,12 @@ function setStep(
   };
 }
 
+function getInitialPage(): 'app' | 'sandbox' {
+  return window.location.pathname === '/sandbox' ? 'sandbox' : 'app';
+}
+
 export default function App() {
+  const [page, setPage] = useState<'app' | 'sandbox'>(getInitialPage);
   const [podcasts, setPodcasts] = useState<Podcast[]>([]);
   const [selected, setSelected] = useState('510325');
   const [episodes, setEpisodes] = useState<Episode[]>([]);
@@ -184,12 +190,36 @@ export default function App() {
     }
   }, []);
 
+  const goToSandbox = useCallback(() => {
+    window.history.pushState(null, '', '/sandbox');
+    setPage('sandbox');
+  }, []);
+
+  const goToApp = useCallback(() => {
+    window.history.pushState(null, '', '/');
+    setPage('app');
+  }, []);
+
+  // Handle browser back/forward
+  useEffect(() => {
+    const handler = () => setPage(getInitialPage());
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, []);
+
+  if (page === 'sandbox') {
+    return <SandboxPage onBack={goToApp} />;
+  }
+
   return (
     <div className="phone-frame">
       <div className="phone-notch" />
       <div className="shell">
         <header className="header">
           <h1 className="header-title">NPR Podcasts</h1>
+          <button className="header-sandbox-link" onClick={goToSandbox}>
+            Sandbox
+          </button>
         </header>
 
         <PodcastSelector

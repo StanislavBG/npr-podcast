@@ -102,6 +102,67 @@ export async function llmPreparePlayback(
   return res.json();
 }
 
+// ─── Sandbox endpoint ────────────────────────────────────────────────────────
+
+export interface SandboxLine {
+  lineNum: number;
+  speaker: string;
+  text: string;
+  wordCount: number;
+  cumulativeWords: number;
+}
+
+export interface SandboxAdBlock {
+  startLine: number;
+  endLine: number;
+  reason: string;
+  textPreview: string;
+  startWord: number;
+  endWord: number;
+  startTimeSec: number;
+  endTimeSec: number;
+}
+
+export interface SandboxResult {
+  episode: { title: string; durationSec: number; transcriptUrl: string };
+  transcript: { lineCount: number; totalWords: number; lines: SandboxLine[] };
+  adBlocks: SandboxAdBlock[];
+  summary: {
+    totalAdBlocks: number;
+    totalAdWords: number;
+    totalAdTimeSec: number;
+    contentTimeSec: number;
+    adWordPercent: number;
+    strategy: string;
+  };
+  prompts: { system: string; user: string };
+  llmResponse: string;
+  skipMap: Array<{
+    startTime: number;
+    endTime: number;
+    type: string;
+    confidence: number;
+    reason: string;
+  }>;
+}
+
+export async function sandboxAnalyze(
+  transcriptUrl: string,
+  episodeTitle: string,
+  durationSec: number,
+): Promise<SandboxResult> {
+  const res = await fetch(`${BASE}/sandbox/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ transcriptUrl, episodeTitle, durationSec }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || 'Sandbox analysis failed');
+  }
+  return res.json();
+}
+
 /** Parse "MM:SS" or "HH:MM:SS" or raw seconds into seconds number */
 export function parseDuration(duration: string): number {
   if (!duration) return 0;
