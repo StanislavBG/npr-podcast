@@ -7,6 +7,11 @@ export interface Podcast {
   name: string;
 }
 
+export interface PodcastTranscript {
+  url: string;
+  type: string;
+}
+
 export interface Episode {
   id: string;
   title: string;
@@ -16,6 +21,7 @@ export interface Episode {
   audioUrl: string;
   link: string;
   transcriptUrl: string | null;
+  podcastTranscripts: PodcastTranscript[];
 }
 
 // ─── Existing endpoints ─────────────────────────────────────────────────────
@@ -160,11 +166,12 @@ export async function sandboxAnalyze(
   transcriptUrl: string,
   episodeTitle: string,
   durationSec: number,
+  podcastTranscripts?: PodcastTranscript[],
 ): Promise<SandboxResult> {
   const res = await fetch(`${BASE}/sandbox/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ transcriptUrl, episodeTitle, durationSec }),
+    body: JSON.stringify({ transcriptUrl, episodeTitle, durationSec, podcastTranscripts }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Unknown error' }));
