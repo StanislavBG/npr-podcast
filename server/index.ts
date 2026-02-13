@@ -522,31 +522,115 @@ app.post('/api/llm/parse-transcript', async (req, res) => {
     return;
   }
 
-  // If we have good pre-parsed lines, send clean text to LLM instead of raw HTML
-  // This saves tokens and avoids the LLM being confused by page chrome
-  let llmInput: string;
+  // ── Pre-parsed path: build segments server-side, ask LLM only for ad flags ──
+  // This dramatically reduces output token requirements and avoids truncation
+  // on long transcripts (the main cause of 500 errors).
   if (preParseValid) {
-    llmInput = preParsedLines.map(l => {
+    // Build segments and fullText server-side from pre-parsed lines
+    const segments: LLMTranscriptSegment[] = preParsedLines.map(l => ({
+      speaker: l.speaker,
+      text: l.text,
+      isAd: false,
+      adType: null,
+    }));
+    const fullText = preParsedLines.map(l => {
       const spk = l.speaker ? `${l.speaker}: ` : '';
       return `${spk}${l.text}`;
-    }).join('\n\n');
-  } else {
-    // Fall back to raw HTML, but extract transcript section first
-    const transcriptSection = extractTranscriptSection(html);
-    llmInput = transcriptSection.slice(0, 60000);
+    }).join('\n');
+    const totalWords = preParsedLines[preParsedLines.length - 1].cumulativeWords;
+
+    // Build a compact numbered version of the transcript for the LLM.
+    // Cap at ~50,000 chars to stay well within context window limits.
+    let compactInput = '';
+    for (let i = 0; i < preParsedLines.length; i++) {
+      const l = preParsedLines[i];
+      const spk = l.speaker ? `${l.speaker}: ` : '';
+      const line = `[${i}] ${spk}${l.text}\n`;
+      if (compactInput.length + line.length > 50000) break;
+      compactInput += line;
+    }
+
+    try {
+      // Lightweight LLM call: only ask for ad classification by segment index
+      const adResult = await chatJSON<{
+        adSegments: Array<{ index: number; adType: string; reason: string }>;
+        estimatedContentWords: number;
+      }>({
+        provider: LLM_PROVIDER,
+        model: LLM_MODEL,
+        apiKey: LLM_API_KEY,
+        baseUrl: LLM_BASE_URL,
+        temperature: 0,
+        maxTokens: 4096,
+        maxRetries: 2,
+        systemPrompt: `You are a podcast ad detector. You receive a numbered transcript and identify which segments are ads, sponsor reads, funding credits, or promotional content. Return ONLY valid JSON.`,
+        messages: [
+          {
+            role: 'user',
+            content: `Analyze this NPR podcast transcript. Each line is numbered [index].
+
+Identify which segments are ad reads, sponsor mentions, funding credits, or NPR promotional content.
+
+Return JSON matching this schema:
+{
+  "adSegments": [{ "index": number, "adType": "sponsor_read"|"funding_credit"|"npr_promo"|"show_promo", "reason": string }],
+  "estimatedContentWords": number
+}
+
+- "index" is the segment number from the transcript
+- "adType" classifies the ad
+- "reason" explains why (e.g. "contains sponsor mention for Squarespace")
+- "estimatedContentWords" is the total word count of non-ad segments (total is ~${totalWords} words)
+
+TRANSCRIPT:
+${compactInput}`,
+          },
+        ],
+      });
+
+      // Merge ad flags into pre-built segments
+      const adMentions: LLMTranscriptResult['adMentions'] = [];
+      for (const ad of adResult.adSegments || []) {
+        if (ad.index >= 0 && ad.index < segments.length) {
+          segments[ad.index].isAd = true;
+          segments[ad.index].adType = ad.adType || null;
+          adMentions.push({ segmentIndex: ad.index, reason: ad.reason });
+        }
+      }
+
+      res.json({
+        segments,
+        fullText,
+        adMentions,
+        estimatedContentWords: adResult.estimatedContentWords || totalWords,
+      } as LLMTranscriptResult);
+    } catch (err: any) {
+      // Graceful fallback: return pre-parsed data without ad flags rather than 500
+      console.error('LLM ad-classification failed, using fallback:', err.message);
+      res.json({
+        segments,
+        fullText,
+        adMentions: [],
+        estimatedContentWords: totalWords,
+      } as LLMTranscriptResult);
+    }
+    return;
   }
 
+  // ── Fallback path: raw HTML when pre-parse fails (< 5 lines) ──────────────
+  const transcriptSection = extractTranscriptSection(html);
+  const llmInput = transcriptSection.slice(0, 60000);
+
   try {
-    const inputLabel = preParseValid ? 'TRANSCRIPT TEXT' : 'HTML';
     const result = await chatJSON<LLMTranscriptResult>({
       provider: LLM_PROVIDER,
       model: LLM_MODEL,
       apiKey: LLM_API_KEY,
       baseUrl: LLM_BASE_URL,
       temperature: 0,
-      maxTokens: 4096,
+      maxTokens: 16384,
       maxRetries: 2,
-      systemPrompt: `You are a podcast transcript parser. You receive ${preParseValid ? 'pre-extracted transcript text' : 'raw HTML from an NPR transcript page'} and extract structured data. Return ONLY valid JSON.`,
+      systemPrompt: `You are a podcast transcript parser. You receive raw HTML from an NPR transcript page and extract structured data. Return ONLY valid JSON.`,
       messages: [
         {
           role: 'user',
@@ -572,7 +656,7 @@ Return JSON matching this schema:
   "estimatedContentWords": number
 }
 
-${inputLabel}:
+HTML:
 ${llmInput}`,
         },
       ],
