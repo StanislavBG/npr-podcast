@@ -167,11 +167,12 @@ export async function sandboxAnalyze(
   episodeTitle: string,
   durationSec: number,
   podcastTranscripts?: PodcastTranscript[],
+  audioUrl?: string,
 ): Promise<SandboxResult> {
   const res = await fetch(`${BASE}/sandbox/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ transcriptUrl, episodeTitle, durationSec, podcastTranscripts }),
+    body: JSON.stringify({ transcriptUrl, episodeTitle, durationSec, podcastTranscripts, audioUrl }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Unknown error' }));

@@ -1,32 +1,33 @@
 #!/usr/bin/env tsx
 /**
- * sandbox.ts — Debug harness for ad-detection pipeline (v2).
+ * sandbox.ts — Debug harness for ad-detection pipeline (v3).
  *
- * NEW APPROACH: The transcript IS the ground truth. Ad blocks are VISIBLE
- * in the text — "support for this podcast comes from...", "this message
- * comes from...", funding credits, etc. A human reading it would spot them
- * instantly. So we:
+ * PRIMARY APPROACH: Transcribe the actual audio file using speech-to-text.
+ * This captures dynamically inserted ads (Megaphone) that never appear in
+ * NPR's text transcripts. Falls back to HTML transcript parsing if STT
+ * is unavailable.
  *
- *   1. Parse HTML → numbered transcript lines (show ALL of them)
- *   2. Send transcript text (or chunks) to LLM: "which line ranges are ad blocks?"
- *   3. Map line ranges → audio timestamps via proportional word position
- *   4. Display full transcript with ad blocks highlighted inline
- *
- * This replaces the old approach of asking the LLM to *guess* timestamps
- * from word-count-vs-duration math, which never worked.
+ *   1. Fetch audio MP3 → transcribe via OpenAI gpt-4o-mini-transcribe
+ *   2. Parse into numbered transcript lines
+ *   3. Send transcript to LLM: "which line ranges are ad blocks?"
+ *   4. Map line ranges → audio timestamps
+ *   5. Display full transcript with ad blocks highlighted inline
  *
  * Usage:
  *   npx tsx server/sandbox.ts                     # The Indicator (default)
  *   npx tsx server/sandbox.ts 510289              # Planet Money
  *   npx tsx server/sandbox.ts 510325 3            # 4th episode (0-indexed)
+ *   npx tsx server/sandbox.ts 510325 0 --html     # Force HTML transcript (skip STT)
  *
  * Env vars:
- *   OPENAI_API_KEY      — required for LLM calls
- *   OPENAI_MODEL        — e.g. gpt-4o-mini (default)
- *   OPENAI_BASE_URL     — optional base URL override
+ *   OPENAI_API_KEY                    — required for LLM calls
+ *   AI_INTEGRATIONS_OPENAI_API_KEY    — Replit's auto-provided key (for STT)
+ *   OPENAI_MODEL                      — e.g. gpt-4o-mini (default)
+ *   OPENAI_BASE_URL                   — optional base URL override
  */
 
 import { XMLParser } from 'fast-xml-parser';
+import { speechToText, ensureCompatibleFormat, openai as sttOpenai } from './replit_integrations/audio/client';
 
 // ─── Terminal colours ───────────────────────────────────────────────────────
 const C = {
@@ -404,6 +405,96 @@ function validateTranscript(lines: TranscriptLine[], durationSec: number): {
   return { isValid: true, reason: 'Transcript looks valid' };
 }
 
+async function transcribeAudio(audioUrl: string): Promise<{ lines: TranscriptLine[]; text: string }> {
+  section('Transcribing audio (speech-to-text)');
+  console.log(`${C.green}Audio URL:${C.reset} ${audioUrl.slice(0, 80)}...`);
+
+  // Step 1: Download audio
+  const audioRes = await fetch(audioUrl, {
+    headers: { 'User-Agent': 'NPR-Podcast-Player/1.0' },
+    redirect: 'follow',
+  });
+  if (!audioRes.ok) throw new Error(`Audio fetch failed: ${audioRes.status}`);
+
+  const arrayBuf = await audioRes.arrayBuffer();
+  const audioBuffer = Buffer.from(arrayBuf);
+  console.log(`${C.green}Audio size:${C.reset} ${(audioBuffer.length / 1024 / 1024).toFixed(1)} MB`);
+
+  // Step 2: Ensure compatible format
+  const { buffer, format } = await ensureCompatibleFormat(audioBuffer);
+
+  // Step 3: Transcribe with verbose_json for timestamps
+  let fullText = '';
+  let segments: Array<{ start: number; end: number; text: string }> = [];
+
+  try {
+    const { toFile } = await import('openai');
+    const file = await toFile(buffer, `audio.${format}`);
+    const verboseResult = await sttOpenai.audio.transcriptions.create({
+      file,
+      model: 'gpt-4o-mini-transcribe',
+      response_format: 'verbose_json',
+    }) as any;
+
+    fullText = verboseResult.text || '';
+    segments = (verboseResult.segments || []).map((s: any) => ({
+      start: s.start || 0,
+      end: s.end || 0,
+      text: (s.text || '').trim(),
+    }));
+    console.log(`${C.green}Segments:${C.reset}  ${segments.length} (verbose_json)`);
+  } catch (err: any) {
+    console.log(`${C.yellow}verbose_json failed (${err.message}), trying plain text...${C.reset}`);
+    fullText = await speechToText(buffer, format);
+  }
+
+  console.log(`${C.green}Text:${C.reset}      ${fullText.length} chars, ${fullText.split(/\s+/).length} words`);
+
+  // Step 4: Convert to TranscriptLine format
+  const lines: TranscriptLine[] = [];
+  let cumulative = 0;
+  let lineNum = 0;
+
+  if (segments.length > 0) {
+    for (const seg of segments) {
+      if (!seg.text) continue;
+      let speaker = '';
+      let content = seg.text;
+      const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+      if (speakerMatch) {
+        speaker = speakerMatch[1].trim();
+        content = content.slice(speakerMatch[0].length).trim();
+      }
+      if (!content) continue;
+      lineNum++;
+      const wc = content.split(/\s+/).filter(Boolean).length;
+      cumulative += wc;
+      lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative });
+    }
+  } else {
+    const sentences = fullText.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
+    for (const sentence of sentences) {
+      let speaker = '';
+      let content = sentence.trim();
+      const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+      if (speakerMatch) {
+        speaker = speakerMatch[1].trim();
+        content = content.slice(speakerMatch[0].length).trim();
+      }
+      if (!content) continue;
+      lineNum++;
+      const wc = content.split(/\s+/).filter(Boolean).length;
+      cumulative += wc;
+      lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative });
+    }
+  }
+
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+  console.log(`${C.green}Parsed:${C.reset}    ${lines.length} lines, ${totalWords} words`);
+
+  return { lines, text: fullText };
+}
+
 async function fetchAndParseTranscript(url: string, durationSec: number): Promise<{ html: string; lines: TranscriptLine[] }> {
   section('Fetching transcript HTML');
   const res = await fetch(url, {
@@ -700,33 +791,60 @@ function printDebugDump(ep: Episode, lines: TranscriptLine[], blocks: AdBlock[],
 async function main() {
   const podcastId = process.argv[2] || '510325';
   const episodeIndex = parseInt(process.argv[3] || '0', 10);
+  const forceHtml = process.argv.includes('--html');
 
-  banner('NPR Ad Detection Sandbox v2');
+  banner('NPR Ad Detection Sandbox v3');
+
+  const sttKeyAvailable = !!(process.env.AI_INTEGRATIONS_OPENAI_API_KEY || process.env.OPENAI_API_KEY);
 
   console.log(`${C.bold}Configuration:${C.reset}`);
   console.log(`  OpenAI Model:  ${LLM_MODEL}`);
-  console.log(`  OpenAI Key:    ${LLM_API_KEY ? '***set***' : `${C.red}NOT SET${C.reset}`}`);
+  console.log(`  LLM Key:       ${LLM_API_KEY ? '***set***' : `${C.red}NOT SET${C.reset}`}`);
+  console.log(`  STT Key:       ${sttKeyAvailable ? '***set***' : `${C.red}NOT SET${C.reset}`}`);
   console.log(`  Podcast ID:    ${podcastId}`);
   console.log(`  Episode Index: ${episodeIndex}`);
+  console.log(`  Mode:          ${forceHtml ? 'HTML transcript (forced)' : 'Audio transcription (preferred)'}`);
   console.log('');
-  console.log(`${C.bold}Approach:${C.reset} Read full transcript → LLM finds ad blocks by LINE NUMBER → map to timestamps`);
+  console.log(`${C.bold}Approach:${C.reset} ${forceHtml ? 'Parse HTML transcript' : 'Transcribe audio file (captures dynamic ads)'} → LLM finds ad blocks → map to timestamps`);
 
   // Step 0: Fetch episode metadata
   const episode = await fetchEpisode(podcastId, episodeIndex);
   const audioDurationSec = parseDuration(episode.duration);
 
-  if (!episode.transcriptUrl) {
-    console.log(`\n${C.red}ERROR: No transcript URL for this episode.${C.reset}`);
-    console.log(`Link: ${episode.link}`);
+  // Step 1: Get transcript — prefer audio transcription unless --html flag
+  let lines: TranscriptLine[] = [];
+  let transcriptSource = '';
+
+  if (!forceHtml && episode.audioUrl && sttKeyAvailable) {
+    // Try audio transcription first
+    try {
+      const result = await transcribeAudio(episode.audioUrl);
+      lines = result.lines;
+      transcriptSource = 'audio-transcription';
+    } catch (err: any) {
+      console.log(`\n${C.yellow}Audio transcription failed: ${err.message}${C.reset}`);
+      console.log(`${C.yellow}Falling back to HTML transcript...${C.reset}`);
+    }
+  }
+
+  if (lines.length === 0) {
+    // Fall back to HTML transcript
+    if (!episode.transcriptUrl) {
+      console.log(`\n${C.red}ERROR: No transcript URL and audio transcription unavailable.${C.reset}`);
+      console.log(`Link: ${episode.link}`);
+      process.exit(1);
+    }
+    const result = await fetchAndParseTranscript(episode.transcriptUrl, audioDurationSec);
+    lines = result.lines;
+    transcriptSource = 'html';
+  }
+
+  if (lines.length === 0) {
+    console.log(`\n${C.red}ERROR: Parsed 0 lines from transcript.${C.reset}`);
     process.exit(1);
   }
 
-  // Step 1: Fetch + parse transcript into numbered lines
-  const { lines } = await fetchAndParseTranscript(episode.transcriptUrl, audioDurationSec);
-  if (lines.length === 0) {
-    console.log(`\n${C.red}ERROR: Parsed 0 lines from transcript. The HTML may not contain <p> tags.${C.reset}`);
-    process.exit(1);
-  }
+  console.log(`\n${C.green}Transcript source:${C.reset} ${transcriptSource}`);
 
   // Step 2: Print the FULL transcript (this is your starting point for debugging)
   printFullTranscript(lines);

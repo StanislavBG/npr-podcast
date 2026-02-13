@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { XMLParser } from 'fast-xml-parser';
+import { speechToText, ensureCompatibleFormat, openai as sttOpenai } from './replit_integrations/audio/client';
 import {
   chatJSON,
   registerLLMAdapter,
@@ -321,6 +322,143 @@ app.get('/api/transcript', async (req, res) => {
 });
 
 // ─── LLM Step: Parse Transcript (ai.generate-text) ─────────────────────────
+
+// ─── Audio Transcription (speech-to-text via OpenAI) ─────────────────────────
+
+/**
+ * Fetch audio from URL and transcribe it using OpenAI's gpt-4o-mini-transcribe.
+ * Returns structured transcript with timestamps when available.
+ */
+async function transcribeAudioFromUrl(audioUrl: string): Promise<{
+  text: string;
+  segments: Array<{ start: number; end: number; text: string }>;
+  lines: SandboxLine[];
+  durationSec: number;
+}> {
+  // Step 1: Download the audio file
+  console.log(`[transcribe] Fetching audio: ${audioUrl.slice(0, 80)}...`);
+  const audioRes = await fetch(audioUrl, {
+    headers: { 'User-Agent': 'NPR-Podcast-Player/1.0' },
+    redirect: 'follow',
+  });
+  if (!audioRes.ok) throw new Error(`Audio fetch failed: ${audioRes.status}`);
+
+  const arrayBuf = await audioRes.arrayBuffer();
+  const audioBuffer = Buffer.from(arrayBuf);
+  console.log(`[transcribe] Audio downloaded: ${(audioBuffer.length / 1024 / 1024).toFixed(1)} MB`);
+
+  // Step 2: Ensure compatible format (MP3 passes through, others get converted)
+  const { buffer, format } = await ensureCompatibleFormat(audioBuffer);
+
+  // Step 3: Transcribe with verbose_json for timestamps
+  // Try verbose_json first for segment timestamps, fall back to plain text
+  let fullText = '';
+  let segments: Array<{ start: number; end: number; text: string }> = [];
+  let audioDuration = 0;
+
+  try {
+    // Use the OpenAI client directly for verbose_json response format
+    const { toFile } = await import('openai');
+    const file = await toFile(buffer, `audio.${format}`);
+    const verboseResult = await sttOpenai.audio.transcriptions.create({
+      file,
+      model: 'gpt-4o-mini-transcribe',
+      response_format: 'verbose_json',
+    }) as any;
+
+    fullText = verboseResult.text || '';
+    audioDuration = verboseResult.duration || 0;
+    segments = (verboseResult.segments || []).map((s: any) => ({
+      start: s.start || 0,
+      end: s.end || 0,
+      text: (s.text || '').trim(),
+    }));
+    console.log(`[transcribe] Got ${segments.length} segments, duration=${audioDuration}s`);
+  } catch (verboseErr: any) {
+    // Fall back to plain text transcription
+    console.warn(`[transcribe] verbose_json failed (${verboseErr.message}), falling back to plain text`);
+    fullText = await speechToText(buffer, format);
+    console.log(`[transcribe] Got plain text: ${fullText.length} chars`);
+  }
+
+  // Step 4: Convert to SandboxLine format
+  const lines: SandboxLine[] = [];
+  let cumulative = 0;
+  let lineNum = 0;
+
+  if (segments.length > 0) {
+    // We have timestamped segments — use them directly
+    for (const seg of segments) {
+      if (!seg.text) continue;
+
+      let speaker = '';
+      let content = seg.text;
+
+      // Detect speaker pattern: "SPEAKER NAME:" at start
+      const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+      if (speakerMatch) {
+        speaker = speakerMatch[1].trim();
+        content = content.slice(speakerMatch[0].length).trim();
+      }
+
+      if (!content) continue;
+
+      lineNum++;
+      const wc = content.split(/\s+/).filter(Boolean).length;
+      cumulative += wc;
+
+      lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative });
+    }
+  } else {
+    // Plain text — split into sentences/paragraphs
+    const sentences = fullText.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
+    for (const sentence of sentences) {
+      let speaker = '';
+      let content = sentence.trim();
+
+      const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+      if (speakerMatch) {
+        speaker = speakerMatch[1].trim();
+        content = content.slice(speakerMatch[0].length).trim();
+      }
+
+      if (!content) continue;
+
+      lineNum++;
+      const wc = content.split(/\s+/).filter(Boolean).length;
+      cumulative += wc;
+
+      lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative });
+    }
+  }
+
+  return { text: fullText, segments, lines, durationSec: audioDuration };
+}
+
+app.post('/api/transcribe', async (req, res) => {
+  const { audioUrl } = req.body as { audioUrl: string };
+  if (!audioUrl) {
+    res.status(400).json({ error: 'Missing audioUrl' });
+    return;
+  }
+
+  try {
+    const result = await transcribeAudioFromUrl(audioUrl);
+    res.json({
+      text: result.text,
+      segments: result.segments,
+      lines: result.lines,
+      totalWords: result.lines.length > 0 ? result.lines[result.lines.length - 1].cumulativeWords : 0,
+      durationSec: result.durationSec,
+      source: 'audio-transcription',
+    });
+  } catch (err: any) {
+    console.error('Transcription error:', err.message);
+    res.status(500).json({ error: 'Transcription failed', detail: err.message });
+  }
+});
+
+// ─── LLM Pipeline ────────────────────────────────────────────────────────────
 
 interface LLMTranscriptSegment {
   speaker: string;
@@ -1019,15 +1157,16 @@ function mapAdBlocksToTimestamps(
 }
 
 app.post('/api/sandbox/analyze', async (req, res) => {
-  const { transcriptUrl, episodeTitle, durationSec, podcastTranscripts } = req.body as {
+  const { transcriptUrl, episodeTitle, durationSec, podcastTranscripts, audioUrl } = req.body as {
     transcriptUrl: string;
     episodeTitle: string;
     durationSec: number;
     podcastTranscripts?: PodcastTranscript[];
+    audioUrl?: string;
   };
 
-  if (!transcriptUrl && (!podcastTranscripts || podcastTranscripts.length === 0)) {
-    res.status(400).json({ error: 'Missing transcriptUrl or podcastTranscripts' });
+  if (!transcriptUrl && !audioUrl && (!podcastTranscripts || podcastTranscripts.length === 0)) {
+    res.status(400).json({ error: 'Missing transcriptUrl, audioUrl, or podcastTranscripts' });
     return;
   }
 
@@ -1038,9 +1177,23 @@ app.post('/api/sandbox/analyze', async (req, res) => {
     let lines: SandboxLine[] = [];
     let transcriptSource = 'html';
 
-    // Step 1a: Try direct podcast transcript files first (SRT, VTT, JSON)
-    if (podcastTranscripts && podcastTranscripts.length > 0) {
-      // Prefer SRT/VTT over HTML or JSON
+    // Step 1: PREFERRED — Transcribe the actual audio file (captures dynamic ads)
+    if (audioUrl && lines.length === 0) {
+      try {
+        console.log(`[sandbox] Transcribing audio for "${episodeTitle}"...`);
+        const transcription = await transcribeAudioFromUrl(audioUrl);
+        lines = transcription.lines;
+        transcriptSource = 'audio-transcription';
+        html = transcription.text; // Store raw text for reference
+        rawHtmlLength = transcription.text.length;
+        console.log(`[sandbox] Audio transcription: ${lines.length} lines, ${transcription.lines.length > 0 ? transcription.lines[transcription.lines.length - 1].cumulativeWords : 0} words`);
+      } catch (sttErr: any) {
+        console.warn(`[sandbox] Audio transcription failed: ${sttErr.message} — falling back to text transcript`);
+      }
+    }
+
+    // Step 2: Try direct podcast transcript files (SRT, VTT, JSON from RSS)
+    if (lines.length === 0 && podcastTranscripts && podcastTranscripts.length > 0) {
       const preferred = [...podcastTranscripts].sort((a, b) => {
         const priority: Record<string, number> = {
           'application/x-subrip': 1, 'application/srt': 1,
@@ -1073,16 +1226,16 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           if (lines.length >= 5) {
             html = content;
             rawHtmlLength = content.length;
-            break; // Success — use this transcript
+            break;
           }
-          lines = []; // Reset and try next format
+          lines = [];
         } catch {
-          continue; // Try next transcript
+          continue;
         }
       }
     }
 
-    // Step 1b: Fall back to transcript HTML page if direct files didn't work
+    // Step 3: Fall back to NPR transcript HTML page
     if (lines.length === 0 && transcriptUrl) {
       const htmlRes = await fetch(transcriptUrl, {
         headers: {
@@ -1095,14 +1248,12 @@ app.post('/api/sandbox/analyze', async (req, res) => {
       rawHtmlLength = html.length;
       pTagCount = (html.match(/<p[^>]*>/gi) || []).length;
       transcriptSource = 'html';
-
-      // Step 2: Parse into numbered lines using improved extraction
       lines = parseTranscriptToLines(html);
     }
 
     const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
 
-    // Step 2b: Validate transcript quality
+    // Validate transcript quality
     const validation = validateTranscript(lines, durationSec || 0);
     if (!validation.isValid) {
       console.warn(`Transcript validation failed for "${episodeTitle}": ${validation.reason}`);
