@@ -21,9 +21,9 @@
  *   npx tsx server/sandbox.ts 510325 3            # 4th episode (0-indexed)
  *
  * Env vars:
- *   BILKO_LLM_PROVIDER  — openai | claude  (default: openai)
- *   BILKO_LLM_MODEL     — e.g. gpt-4o-mini (default)
- *   BILKO_LLM_API_KEY   — required for LLM calls
+ *   OPENAI_API_KEY      — required for LLM calls
+ *   OPENAI_MODEL        — e.g. gpt-4o-mini (default)
+ *   OPENAI_BASE_URL     — optional base URL override
  */
 
 import { XMLParser } from 'fast-xml-parser';
@@ -72,14 +72,11 @@ function rawBox(label: string, content: string, maxLines = 100) {
   console.log(`${C.blue}└${'─'.repeat(77)}┘${C.reset}`);
 }
 
-// ─── LLM config ─────────────────────────────────────────────────────────────
+// ─── LLM config (OpenAI) ────────────────────────────────────────────────────
 
-type LLMProvider = 'openai' | 'claude';
-
-const LLM_PROVIDER = (process.env.BILKO_LLM_PROVIDER || 'openai') as LLMProvider;
-const LLM_MODEL    = process.env.BILKO_LLM_MODEL || 'gpt-4o-mini';
-const LLM_API_KEY  = process.env.BILKO_LLM_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY || '';
-const LLM_BASE_URL = process.env.BILKO_LLM_BASE_URL || process.env.AI_INTEGRATIONS_OPENAI_BASE_URL || undefined;
+const LLM_MODEL    = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const LLM_API_KEY  = process.env.OPENAI_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY || '';
+const LLM_BASE_URL = process.env.OPENAI_BASE_URL || process.env.AI_INTEGRATIONS_OPENAI_BASE_URL || undefined;
 
 // ─── JSON repair (inlined from bilko-flow) ──────────────────────────────────
 
@@ -143,23 +140,11 @@ function parseJSON(raw: string): unknown {
   }
 }
 
-// ─── LLM call (self-contained) ──────────────────────────────────────────────
+// ─── LLM call (OpenAI) ──────────────────────────────────────────────────────
 
 interface LLMResult { rawText: string; parsed: unknown; tokens?: { prompt: number; completion: number } }
 
 async function callLLM(system: string, user: string, temp = 0, maxTokens = 4096): Promise<LLMResult> {
-  if (LLM_PROVIDER === 'claude') {
-    const res = await fetch(LLM_BASE_URL || 'https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': LLM_API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: LLM_MODEL, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }], temperature: temp }),
-    });
-    if (!res.ok) throw new Error(`Claude API ${res.status}: ${await res.text()}`);
-    const d = await res.json() as any;
-    const raw = d.content?.[0]?.text || '';
-    return { rawText: raw, parsed: parseJSON(raw), tokens: { prompt: d.usage?.input_tokens, completion: d.usage?.output_tokens } };
-  }
-  // OpenAI
   const baseUrl = LLM_BASE_URL
     ? (LLM_BASE_URL.endsWith('/chat/completions') ? LLM_BASE_URL : `${LLM_BASE_URL}/chat/completions`)
     : 'https://api.openai.com/v1/chat/completions';
@@ -416,11 +401,11 @@ Return JSON:
   promptBox('User', userPrompt.slice(0, previewCutoff) + transcriptPreview + '\n\n' + userPrompt.slice(userPrompt.indexOf('\nReturn JSON:')));
 
   if (!LLM_API_KEY) {
-    console.log(`\n${C.red}NO LLM KEY — cannot detect ad blocks. Set BILKO_LLM_API_KEY.${C.reset}`);
+    console.log(`\n${C.red}NO LLM KEY — cannot detect ad blocks. Set OPENAI_API_KEY.${C.reset}`);
     return [];
   }
 
-  console.log(`\n${C.blue}Calling LLM (${LLM_PROVIDER}/${LLM_MODEL})...${C.reset}`);
+  console.log(`\n${C.blue}Calling OpenAI (${LLM_MODEL})...${C.reset}`);
   const { rawText, parsed, tokens } = await callLLM(systemPrompt, userPrompt, 0, 2048);
   console.log(`${C.green}Tokens:${C.reset} prompt=${tokens?.prompt} completion=${tokens?.completion}`);
   rawBox('RAW LLM RESPONSE', rawText);
@@ -616,9 +601,8 @@ async function main() {
   banner('NPR Ad Detection Sandbox v2');
 
   console.log(`${C.bold}Configuration:${C.reset}`);
-  console.log(`  LLM Provider:  ${LLM_PROVIDER}`);
-  console.log(`  LLM Model:     ${LLM_MODEL}`);
-  console.log(`  LLM Key:       ${LLM_API_KEY ? '***set***' : `${C.red}NOT SET${C.reset}`}`);
+  console.log(`  OpenAI Model:  ${LLM_MODEL}`);
+  console.log(`  OpenAI Key:    ${LLM_API_KEY ? '***set***' : `${C.red}NOT SET${C.reset}`}`);
   console.log(`  Podcast ID:    ${podcastId}`);
   console.log(`  Episode Index: ${episodeIndex}`);
   console.log('');

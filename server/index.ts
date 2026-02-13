@@ -23,10 +23,10 @@ app.get('/health', (_req, res) => {
 
 // ─── LLM Configuration ──────────────────────────────────────────────────────
 
-const LLM_PROVIDER = (process.env.BILKO_LLM_PROVIDER || 'openai') as LLMProvider;
-const LLM_MODEL = process.env.BILKO_LLM_MODEL || 'gpt-4o-mini';
-const LLM_API_KEY = process.env.BILKO_LLM_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY || '';
-const LLM_BASE_URL = process.env.BILKO_LLM_BASE_URL || process.env.AI_INTEGRATIONS_OPENAI_BASE_URL || undefined;
+const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'openai') as LLMProvider;
+const LLM_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const LLM_API_KEY = process.env.OPENAI_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY || '';
+const LLM_BASE_URL = process.env.OPENAI_BASE_URL || process.env.AI_INTEGRATIONS_OPENAI_BASE_URL || undefined;
 
 // Register a Claude adapter (handles Anthropic API format)
 function createClaudeAdapter() {
