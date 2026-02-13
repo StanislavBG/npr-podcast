@@ -476,11 +476,10 @@ button {
   color: var(--fg2);
 }
 
-/* ── Flow Widget ── */
+/* ── Flow Widget (vertical timeline layout) ── */
 .flow-widget {
-  flex-shrink: 0;
-  padding: 8px 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 12px 16px;
   font-size: 12px;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }

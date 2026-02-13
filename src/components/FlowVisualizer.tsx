@@ -18,7 +18,7 @@ export function FlowVisualizer({ flowState }: Props) {
   return (
     <div className="flow-widget">
       <FlowProgress
-        mode="compact"
+        mode="vertical"
         steps={steps}
         label="NPR Podcast Pipeline"
         status={status}
