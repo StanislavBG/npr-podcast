@@ -4,85 +4,6 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { XMLParser } from 'fast-xml-parser';
-import { speechToText, ensureCompatibleFormat, openai as sttOpenai } from './replit_integrations/audio/client';
-
-// ─── LLM types & helpers (inlined to avoid bilko-flow ESM/CJS mismatch) ─────
-
-type LLMProvider = 'openai' | 'claude' | 'gemini' | 'ollama' | 'vllm' | 'tgi' | 'local-ai' | 'custom';
-
-interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-}
-
-interface LLMCallOptions {
-  provider: LLMProvider;
-  model: string;
-  messages: ChatMessage[];
-  systemPrompt?: string;
-  apiKey: string;
-  baseUrl?: string;
-  maxTokens?: number;
-  temperature?: number;
-  responseFormat?: { type: 'json_object' | 'text' };
-}
-
-interface LLMRawResponse {
-  content: string;
-  finishReason?: string;
-  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
-}
-
-type LLMAdapter = (options: LLMCallOptions) => Promise<LLMRawResponse>;
-
-const llmAdapters = new Map<LLMProvider, LLMAdapter>();
-
-function registerLLMAdapter(provider: LLMProvider, adapter: LLMAdapter): void {
-  llmAdapters.set(provider, adapter);
-}
-
-const JSON_MODE_PROVIDERS = new Set<LLMProvider>(['openai', 'gemini', 'ollama', 'vllm', 'tgi', 'local-ai']);
-
-async function chatJSON<T>(options: {
-  provider: LLMProvider;
-  model: string;
-  messages: ChatMessage[];
-  systemPrompt?: string;
-  apiKey: string;
-  baseUrl?: string;
-  maxTokens?: number;
-  temperature?: number;
-  maxRetries?: number;
-}): Promise<T> {
-  if (!options.apiKey) {
-    throw new Error(`API key is required for provider "${options.provider}".`);
-  }
-
-  const adapter = llmAdapters.get(options.provider);
-  if (!adapter) {
-    throw new Error(`No adapter registered for LLM provider: ${options.provider}.`);
-  }
-
-  const useJsonMode = JSON_MODE_PROVIDERS.has(options.provider);
-  const response = await adapter({
-    provider: options.provider,
-    model: options.model,
-    messages: options.messages,
-    systemPrompt: options.systemPrompt,
-    apiKey: options.apiKey,
-    baseUrl: options.baseUrl,
-    maxTokens: options.maxTokens,
-    temperature: options.temperature,
-    responseFormat: useJsonMode ? { type: 'json_object' } : undefined,
-  });
-
-  const trimmed = response.content.trim();
-  try {
-    return JSON.parse(trimmed) as T;
-  } catch (err) {
-    throw new Error(`LLM response is not valid JSON: ${err instanceof Error ? err.message : 'unknown'}\nRaw: ${trimmed.slice(0, 500)}`);
-  }
-}
 
 const app = express();
 app.use(cors());
@@ -92,119 +13,164 @@ app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok' });
 });
 
-// ─── LLM Configuration ──────────────────────────────────────────────────────
+// ─── LLM Configuration (OpenAI) ─────────────────────────────────────────────
 
-const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'openai') as LLMProvider;
 const LLM_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const LLM_API_KEY = process.env.OPENAI_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY || '';
 const LLM_BASE_URL = process.env.OPENAI_BASE_URL || process.env.AI_INTEGRATIONS_OPENAI_BASE_URL || undefined;
 
-// Register a Claude adapter (handles Anthropic API format)
-function createClaudeAdapter() {
-  return async (options: LLMCallOptions): Promise<LLMRawResponse> => {
-    const messages = options.messages.map((m) => ({
-      role: m.role === 'system' ? 'user' as const : m.role,
-      content: m.content,
-    }));
+// ─── JSON repair utilities ──────────────────────────────────────────────────
 
-    const body: Record<string, unknown> = {
-      model: options.model,
-      max_tokens: options.maxTokens || 4096,
-      messages,
-    };
-    if (options.systemPrompt) {
-      body.system = options.systemPrompt;
+function repairJSON(raw: string): string {
+  let r = raw.replace(/,\s*([}\]])/g, '$1');
+  const chars: string[] = [];
+  let inStr = false, esc = false;
+  for (let i = 0; i < r.length; i++) {
+    const ch = r[i];
+    if (esc) { chars.push(ch); esc = false; continue; }
+    if (ch === '\\' && inStr) { chars.push(ch); esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; chars.push(ch); continue; }
+    if (inStr && ch.charCodeAt(0) < 0x20) {
+      const map: Record<string, string> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+      chars.push(map[ch] || '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'));
+      continue;
     }
-    if (options.temperature !== undefined) {
-      body.temperature = options.temperature;
-    }
-
-    const res = await fetch(options.baseUrl || 'https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': options.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Claude API error ${res.status}: ${text}`);
-    }
-
-    const data = await res.json() as any;
-    const content = data.content?.[0]?.text || '';
-    return {
-      content,
-      finishReason: data.stop_reason,
-      usage: {
-        promptTokens: data.usage?.input_tokens,
-        completionTokens: data.usage?.output_tokens,
-        totalTokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0),
-      },
-    };
-  };
+    chars.push(ch);
+  }
+  return chars.join('');
 }
 
-// Register an OpenAI-compatible adapter
-function createOpenAIAdapter() {
-  return async (options: LLMCallOptions): Promise<LLMRawResponse> => {
-    const messages: Array<{ role: string; content: string }> = [];
-    if (options.systemPrompt) {
-      messages.push({ role: 'system', content: options.systemPrompt });
-    }
-    for (const m of options.messages) {
-      messages.push({ role: m.role, content: m.content });
-    }
+function extractOutermostJSON(text: string): string | null {
+  const objIdx = text.indexOf('{');
+  const arrIdx = text.indexOf('[');
+  const tries: Array<[string, string]> = [];
+  if (objIdx !== -1 && arrIdx !== -1) {
+    tries.push(arrIdx < objIdx ? ['[', ']'] : ['{', '}']);
+    tries.push(arrIdx < objIdx ? ['{', '}'] : ['[', ']']);
+  } else if (objIdx !== -1) tries.push(['{', '}']);
+  else if (arrIdx !== -1) tries.push(['[', ']']);
 
-    const body: Record<string, unknown> = {
-      model: options.model,
-      messages,
-      max_tokens: options.maxTokens || 4096,
-    };
-    if (options.temperature !== undefined) {
-      body.temperature = options.temperature;
+  for (const [open, close] of tries) {
+    const start = text.indexOf(open);
+    if (start === -1) continue;
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (esc) { esc = false; continue; }
+      if (ch === '\\' && inStr) { esc = true; continue; }
+      if (ch === '"') { inStr = !inStr; continue; }
+      if (!inStr) {
+        if (ch === open) depth++;
+        else if (ch === close) { depth--; if (depth === 0) return text.slice(start, i + 1); }
+      }
     }
-    if (options.responseFormat) {
-      body.response_format = options.responseFormat;
-    }
-
-    const baseUrl = options.baseUrl
-      ? (options.baseUrl.endsWith('/chat/completions') ? options.baseUrl : `${options.baseUrl}/chat/completions`)
-      : 'https://api.openai.com/v1/chat/completions';
-    const res = await fetch(baseUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${options.apiKey}`,
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`OpenAI API error ${res.status}: ${text}`);
-    }
-
-    const data = await res.json() as any;
-    const choice = data.choices?.[0];
-    return {
-      content: choice?.message?.content || '',
-      finishReason: choice?.finish_reason,
-      usage: {
-        promptTokens: data.usage?.prompt_tokens,
-        completionTokens: data.usage?.completion_tokens,
-        totalTokens: data.usage?.total_tokens,
-      },
-    };
-  };
+  }
+  return null;
 }
 
-// Register adapters
-registerLLMAdapter('claude', createClaudeAdapter());
-registerLLMAdapter('openai', createOpenAIAdapter());
+function parseJSON(raw: string): unknown {
+  let cleaned = raw.trim();
+  const fence = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fence) cleaned = fence[1].trim();
+  try { return JSON.parse(cleaned); } catch {}
+  const json = extractOutermostJSON(cleaned);
+  if (!json) throw new Error('No JSON found in LLM response');
+  try { return JSON.parse(json); } catch {}
+  try { return JSON.parse(repairJSON(json)); } catch (e) {
+    throw new Error(`JSON parse failed: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+// ─── LLM call (OpenAI) ─────────────────────────────────────────────────────
+
+interface LLMResult { rawText: string; parsed: unknown; tokens?: { prompt: number; completion: number } }
+
+async function callLLM(system: string, user: string, temp = 0, maxTokens = 4096): Promise<LLMResult> {
+  const baseUrl = LLM_BASE_URL
+    ? (LLM_BASE_URL.endsWith('/chat/completions') ? LLM_BASE_URL : `${LLM_BASE_URL}/chat/completions`)
+    : 'https://api.openai.com/v1/chat/completions';
+  const res = await fetch(baseUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
+    body: JSON.stringify({
+      model: LLM_MODEL,
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      max_tokens: maxTokens, temperature: temp,
+      response_format: { type: 'json_object' },
+    }),
+  });
+  if (!res.ok) throw new Error(`OpenAI API ${res.status}: ${await res.text()}`);
+  const d = await res.json() as any;
+  const raw = d.choices?.[0]?.message?.content || '';
+  return { rawText: raw, parsed: parseJSON(raw), tokens: { prompt: d.usage?.prompt_tokens, completion: d.usage?.completion_tokens } };
+}
+
+// ─── Transcript parsing (same as sandbox v2) ────────────────────────────────
+
+interface TranscriptLine {
+  lineNum: number;
+  speaker: string;
+  text: string;
+  wordCount: number;
+  cumulativeWords: number;
+}
+
+function parseTranscriptHtml(html: string): TranscriptLine[] {
+  const lines: TranscriptLine[] = [];
+  const pBlocks = html.match(/<p[^>]*>[\s\S]*?<\/p>/gi) || [];
+
+  let cumulative = 0;
+  let lineNum = 0;
+
+  for (const block of pBlocks) {
+    const text = block
+      .replace(/<br\s*\/?>/gi, ' ')
+      .replace(/<[^>]*>/g, '')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#x27;/g, "'")
+      .replace(/&nbsp;/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!text || text.length < 3) continue;
+
+    let speaker = '';
+    let content = text;
+    const speakerMatch = text.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+    if (speakerMatch) {
+      speaker = speakerMatch[1].trim();
+      content = text.slice(speakerMatch[0].length).trim();
+    }
+
+    if (!content) continue;
+
+    lineNum++;
+    const wc = content.split(/\s+/).filter(Boolean).length;
+    cumulative += wc;
+
+    lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative });
+  }
+
+  return lines;
+}
+
+function buildNumberedTranscriptText(lines: TranscriptLine[]): string {
+  return lines.map(l => {
+    const spk = l.speaker ? `${l.speaker}: ` : '';
+    return `[${l.lineNum}] ${spk}${l.text}`;
+  }).join('\n');
+}
+
+function parseDuration(dur: string): number {
+  if (!dur) return 0;
+  const p = dur.split(':').map(Number);
+  if (p.length === 3) return p[0] * 3600 + p[1] * 60 + p[2];
+  if (p.length === 2) return p[0] * 60 + p[1];
+  return p[0] || 0;
+}
 
 // ─── Podcast feed data ──────────────────────────────────────────────────────
 
@@ -350,7 +316,7 @@ app.get('/api/podcast/:id/episodes', async (req, res) => {
   }
 });
 
-// ─── Transcript Fetch (supports HTML, SRT, VTT) ─────────────────────────────
+// ─── Transcript Fetch ────────────────────────────────────────────────────────
 
 app.get('/api/transcript', async (req, res) => {
   const url = req.query.url as string;
@@ -371,31 +337,18 @@ app.get('/api/transcript', async (req, res) => {
     });
     if (!response.ok) throw new Error(`Transcript fetch failed: ${response.status}`);
 
-    const content = await response.text();
-
-    if (format === 'srt' || format === 'vtt' || format === 'json') {
-      // Return pre-parsed lines for non-HTML formats
-      let lines: SandboxLine[];
-      if (format === 'srt') {
-        lines = parseSrtToLines(content);
-      } else if (format === 'vtt') {
-        lines = parseVttToLines(content);
-      } else {
-        lines = parseJsonTranscriptToLines(content);
-      }
-      res.json({ format, lines, raw: content.slice(0, 2000) });
-    } else {
-      // HTML — return raw HTML for LLM parsing, but also provide pre-parsed lines
-      const lines = parseTranscriptToLines(content);
-      res.json({ html: content, lines, format: 'html' });
-    }
+    const html = await response.text();
+    res.json({ html });
   } catch (err: any) {
     console.error('Transcript fetch error:', err.message);
     res.status(502).json({ error: 'Failed to fetch transcript', detail: err.message });
   }
 });
 
-// ─── LLM Step: Parse Transcript (ai.generate-text) ─────────────────────────
+// ─── LLM Step 1: Parse Transcript (v2 — server-side HTML parsing) ──────────
+//
+// The v2 approach parses HTML into numbered lines server-side. No LLM needed
+// for this step — it's deterministic HTML parsing, same as the sandbox.
 
 // ─── Audio Transcription (speech-to-text via OpenAI) ─────────────────────────
 
@@ -544,11 +497,10 @@ interface LLMTranscriptSegment {
 interface LLMTranscriptResult {
   segments: LLMTranscriptSegment[];
   fullText: string;
-  adMentions: Array<{
-    segmentIndex: number;
-    reason: string;
-  }>;
+  adMentions: Array<{ segmentIndex: number; reason: string }>;
   estimatedContentWords: number;
+  // v2 extras — the numbered lines for the detect-ads step
+  _lines?: TranscriptLine[];
 }
 
 app.post('/api/llm/parse-transcript', async (req, res) => {
@@ -558,192 +510,38 @@ app.post('/api/llm/parse-transcript', async (req, res) => {
     return;
   }
 
-  // Pre-parse HTML using our improved extraction before sending to LLM
-  const preParsedLines = parseTranscriptToLines(html);
-  const preParseValid = preParsedLines.length >= 5;
+  // v2: Parse HTML into structured lines server-side (no LLM call needed)
+  const lines = parseTranscriptHtml(html);
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
 
-  if (!LLM_API_KEY) {
-    // Fallback: use our pre-parsed lines instead of raw HTML stripping
-    let segments: LLMTranscriptSegment[];
-    let fullText: string;
-    let estimatedContentWords: number;
+  // Map to the frontend's expected format
+  const segments: LLMTranscriptSegment[] = lines.map(l => ({
+    speaker: l.speaker,
+    text: l.text,
+    isAd: false,   // ad detection happens in the next step
+    adType: null,
+  }));
 
-    if (preParseValid) {
-      segments = preParsedLines.map(l => ({
-        speaker: l.speaker,
-        text: l.text,
-        isAd: false,
-        adType: null,
-      }));
-      fullText = preParsedLines.map(l => {
-        const spk = l.speaker ? `${l.speaker}: ` : '';
-        return `${spk}${l.text}`;
-      }).join('\n');
-      estimatedContentWords = preParsedLines[preParsedLines.length - 1].cumulativeWords;
-    } else {
-      const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 5000);
-      segments = [{ speaker: '', text, isAd: false, adType: null }];
-      fullText = text;
-      estimatedContentWords = text.split(/\s+/).length;
-    }
+  const fullText = lines.map(l => {
+    const spk = l.speaker ? `${l.speaker}: ` : '';
+    return `${spk}${l.text}`;
+  }).join('\n');
 
-    res.json({
-      segments,
-      fullText,
-      adMentions: [],
-      estimatedContentWords,
-    } as LLMTranscriptResult);
-    return;
-  }
+  const result: LLMTranscriptResult = {
+    segments,
+    fullText,
+    adMentions: [],          // populated by detect-ads step
+    estimatedContentWords: totalWords,
+    _lines: lines,           // pass through for detect-ads
+  };
 
-  // ── Pre-parsed path: build segments server-side, ask LLM only for ad flags ──
-  // This dramatically reduces output token requirements and avoids truncation
-  // on long transcripts (the main cause of 500 errors).
-  if (preParseValid) {
-    // Build segments and fullText server-side from pre-parsed lines
-    const segments: LLMTranscriptSegment[] = preParsedLines.map(l => ({
-      speaker: l.speaker,
-      text: l.text,
-      isAd: false,
-      adType: null,
-    }));
-    const fullText = preParsedLines.map(l => {
-      const spk = l.speaker ? `${l.speaker}: ` : '';
-      return `${spk}${l.text}`;
-    }).join('\n');
-    const totalWords = preParsedLines[preParsedLines.length - 1].cumulativeWords;
-
-    // Build a compact numbered version of the transcript for the LLM.
-    // Cap at ~50,000 chars to stay well within context window limits.
-    let compactInput = '';
-    for (let i = 0; i < preParsedLines.length; i++) {
-      const l = preParsedLines[i];
-      const spk = l.speaker ? `${l.speaker}: ` : '';
-      const line = `[${i}] ${spk}${l.text}\n`;
-      if (compactInput.length + line.length > 50000) break;
-      compactInput += line;
-    }
-
-    try {
-      // Lightweight LLM call: only ask for ad classification by segment index
-      const adResult = await chatJSON<{
-        adSegments: Array<{ index: number; adType: string; reason: string }>;
-        estimatedContentWords: number;
-      }>({
-        provider: LLM_PROVIDER,
-        model: LLM_MODEL,
-        apiKey: LLM_API_KEY,
-        baseUrl: LLM_BASE_URL,
-        temperature: 0,
-        maxTokens: 4096,
-        maxRetries: 2,
-        systemPrompt: `You are a podcast ad detector. You receive a numbered transcript and identify which segments are ads, sponsor reads, funding credits, or promotional content. Return ONLY valid JSON.`,
-        messages: [
-          {
-            role: 'user',
-            content: `Analyze this NPR podcast transcript. Each line is numbered [index].
-
-Identify which segments are ad reads, sponsor mentions, funding credits, or NPR promotional content.
-
-Return JSON matching this schema:
-{
-  "adSegments": [{ "index": number, "adType": "sponsor_read"|"funding_credit"|"npr_promo"|"show_promo", "reason": string }],
-  "estimatedContentWords": number
-}
-
-- "index" is the segment number from the transcript
-- "adType" classifies the ad
-- "reason" explains why (e.g. "contains sponsor mention for Squarespace")
-- "estimatedContentWords" is the total word count of non-ad segments (total is ~${totalWords} words)
-
-TRANSCRIPT:
-${compactInput}`,
-          },
-        ],
-      });
-
-      // Merge ad flags into pre-built segments
-      const adMentions: LLMTranscriptResult['adMentions'] = [];
-      for (const ad of adResult.adSegments || []) {
-        if (ad.index >= 0 && ad.index < segments.length) {
-          segments[ad.index].isAd = true;
-          segments[ad.index].adType = ad.adType || null;
-          adMentions.push({ segmentIndex: ad.index, reason: ad.reason });
-        }
-      }
-
-      res.json({
-        segments,
-        fullText,
-        adMentions,
-        estimatedContentWords: adResult.estimatedContentWords || totalWords,
-      } as LLMTranscriptResult);
-    } catch (err: any) {
-      // Graceful fallback: return pre-parsed data without ad flags rather than 500
-      console.error('LLM ad-classification failed, using fallback:', err.message);
-      res.json({
-        segments,
-        fullText,
-        adMentions: [],
-        estimatedContentWords: totalWords,
-      } as LLMTranscriptResult);
-    }
-    return;
-  }
-
-  // ── Fallback path: raw HTML when pre-parse fails (< 5 lines) ──────────────
-  const transcriptSection = extractTranscriptSection(html);
-  const llmInput = transcriptSection.slice(0, 60000);
-
-  try {
-    const result = await chatJSON<LLMTranscriptResult>({
-      provider: LLM_PROVIDER,
-      model: LLM_MODEL,
-      apiKey: LLM_API_KEY,
-      baseUrl: LLM_BASE_URL,
-      temperature: 0,
-      maxTokens: 16384,
-      maxRetries: 2,
-      systemPrompt: `You are a podcast transcript parser. You receive raw HTML from an NPR transcript page and extract structured data. Return ONLY valid JSON.`,
-      messages: [
-        {
-          role: 'user',
-          content: `Parse this NPR podcast transcript into structured segments.
-
-For each paragraph of spoken content, extract:
-- speaker: the speaker name (uppercase, e.g. "DARIAN WOODS") or empty string if unknown
-- text: the spoken text content
-- isAd: true if this segment is an ad read, sponsor mention, funding credit, or NPR promotional content
-- adType: if isAd is true, one of "sponsor_read", "funding_credit", "npr_promo", "show_promo", or null
-
-Also identify all ad mentions with:
-- segmentIndex: index into the segments array
-- reason: why this was flagged as ad content (e.g. "contains sponsor mention for Squarespace", "NPR funding credit")
-
-Count the number of words in editorial (non-ad) content as estimatedContentWords.
-
-Return JSON matching this schema:
-{
-  "segments": [{ "speaker": string, "text": string, "isAd": boolean, "adType": string|null }],
-  "fullText": string,
-  "adMentions": [{ "segmentIndex": number, "reason": string }],
-  "estimatedContentWords": number
-}
-
-HTML:
-${llmInput}`,
-        },
-      ],
-    });
-
-    res.json(result);
-  } catch (err: any) {
-    console.error('LLM parse-transcript error:', err.message);
-    res.status(500).json({ error: 'LLM parse failed', detail: err.message });
-  }
+  res.json(result);
 });
 
-// ─── LLM Step: Detect Ad Segments (ai.generate-text) ───────────────────────
+// ─── LLM Step 2: Detect Ads (v2 — numbered-line approach, single LLM call) ─
+//
+// Same approach as sandbox: send the full numbered transcript to the LLM and
+// ask "which line ranges are ad blocks?", then map to timestamps.
 
 interface LLMAdSegment {
   startTime: number;
@@ -772,15 +570,33 @@ app.post('/api/llm/detect-ads', async (req, res) => {
     return;
   }
 
+  // Reconstruct lines from the transcript segments (or use _lines if passed through)
+  let lines: TranscriptLine[] = (transcript as any)._lines || [];
+  if (lines.length === 0 && transcript.segments.length > 0) {
+    // Rebuild lines from segments if _lines wasn't passed
+    let cumulative = 0;
+    lines = transcript.segments.map((seg, i) => {
+      const wc = seg.text.split(/\s+/).filter(Boolean).length;
+      cumulative += wc;
+      return {
+        lineNum: i + 1,
+        speaker: seg.speaker,
+        text: seg.text,
+        wordCount: wc,
+        cumulativeWords: cumulative,
+      };
+    });
+  }
+
   if (!LLM_API_KEY) {
     // No-key fallback: basic heuristic
     const segments: LLMAdSegment[] = [];
     if (audioDurationSeconds > 120) {
-      segments.push({ startTime: 0, endTime: 30, type: 'pre-roll', confidence: 0.5, reason: 'heuristic fallback' });
+      segments.push({ startTime: 0, endTime: 30, type: 'pre-roll', confidence: 0.5, reason: 'heuristic fallback — no API key' });
     }
     if (audioDurationSeconds > 300) {
       const mid = audioDurationSeconds * 0.48;
-      segments.push({ startTime: mid, endTime: mid + 60, type: 'mid-roll', confidence: 0.4, reason: 'heuristic fallback' });
+      segments.push({ startTime: mid, endTime: mid + 60, type: 'mid-roll', confidence: 0.4, reason: 'heuristic fallback — no API key' });
     }
     const totalAdTime = segments.reduce((s, seg) => s + (seg.endTime - seg.startTime), 0);
     res.json({
@@ -792,61 +608,89 @@ app.post('/api/llm/detect-ads', async (req, res) => {
     return;
   }
 
-  try {
-    const result = await chatJSON<LLMAdDetectionResult>({
-      provider: LLM_PROVIDER,
-      model: LLM_MODEL,
-      apiKey: LLM_API_KEY,
-      baseUrl: LLM_BASE_URL,
-      temperature: 0,
-      maxTokens: 4096,
-      maxRetries: 2,
-      systemPrompt: `You are an ad detection engine for NPR podcasts. You analyze transcript structure and audio metadata to identify dynamically inserted ad segments. Return ONLY valid JSON.`,
-      messages: [
-        {
-          role: 'user',
-          content: `Analyze this podcast episode and identify all ad segments with precise time estimates.
+  // v2 approach: numbered transcript → single LLM call → line ranges → timestamps
+  const numberedText = buildNumberedTranscriptText(lines);
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
 
-Episode: "${episodeTitle}"
-Total audio duration: ${audioDurationSeconds} seconds
-Transcript editorial word count: ${transcript.estimatedContentWords}
-Number of transcript segments: ${transcript.segments.length}
-Number of ad mentions found in transcript: ${transcript.adMentions.length}
-Ad mentions: ${JSON.stringify(transcript.adMentions.slice(0, 20))}
+  const systemPrompt = `You are an ad-block detector for podcast transcripts. You read the full transcript and identify contiguous blocks of lines that are advertisements, sponsor reads, funding credits, or promotional content — NOT editorial content.
 
-Key context:
-- NPR podcasts use Megaphone for dynamic ad insertion
-- The transcript contains ONLY editorial content (no ad copy)
-- The difference between audio duration and expected speech duration (at ~155 words/minute) indicates total ad time
-- NPR typically places ads as: pre-roll (beginning), mid-roll (middle), post-roll (end credits/funding)
-- Sponsor reads within editorial content are different from inserted ads
-- Ad mentions in the transcript (funding credits, sponsor reads) indicate editorial ad content that IS in the transcript
+IMPORTANT: You are looking for OBVIOUS ad blocks. These are contiguous runs of lines where the content is clearly commercial/promotional. Typical patterns:
+- "Support for this podcast comes from..."
+- "This message comes from..."
+- Sponsor descriptions with calls-to-action ("visit example.com", "use promo code...")
+- NPR funding credits ("Support for NPR comes from...")
+- Show promos ("Coming up on..." for a different show)
 
-For each detected ad segment, provide:
-- startTime/endTime in seconds
-- type: "pre-roll", "mid-roll", "post-roll", or "sponsor-mention"
-- confidence: 0.0-1.0
-- reason: explanation of why this was identified as an ad
+These ad blocks are typically 1-5 lines long and there are at most a few per episode (one every 10-15 minutes of content). They are VERY obvious — a human would spot them instantly.
+
+Do NOT flag: regular editorial discussion about economics/business/companies, interview content, the host's own commentary, or transitions between topics.
+
+Return ONLY valid JSON.`;
+
+  const userPrompt = `Here is the full transcript of "${episodeTitle}" with numbered lines.
+Find all ad blocks — contiguous ranges of lines that are ads/sponsors/funding credits.
+
+For each block, return the start and end line numbers (inclusive) and a short reason.
+
+TRANSCRIPT:
+${numberedText}
 
 Return JSON:
 {
-  "segments": [{ "startTime": number, "endTime": number, "type": string, "confidence": number, "reason": string }],
-  "totalAdTime": number,
-  "contentDuration": number,
-  "strategy": "llm-transcript-analysis"
-}`,
-        },
-      ],
+  "adBlocks": [
+    { "startLine": number, "endLine": number, "reason": "short explanation" }
+  ]
+}`;
+
+  try {
+    const { parsed } = await callLLM(systemPrompt, userPrompt, 0, 2048);
+    const result = parsed as { adBlocks: Array<{ startLine: number; endLine: number; reason: string }> };
+    const adBlocks = result.adBlocks || [];
+
+    // Map line ranges → timestamps (proportional word position)
+    const lineMap = new Map<number, TranscriptLine>();
+    for (const l of lines) lineMap.set(l.lineNum, l);
+
+    const segments: LLMAdSegment[] = adBlocks.map(b => {
+      const startLine = lineMap.get(b.startLine);
+      const endLine = lineMap.get(b.endLine);
+      let startTimeSec = 0, endTimeSec = 0;
+      if (startLine && endLine && totalWords > 0) {
+        const startWord = startLine.cumulativeWords - startLine.wordCount;
+        const endWord = endLine.cumulativeWords;
+        startTimeSec = (startWord / totalWords) * audioDurationSeconds;
+        endTimeSec = (endWord / totalWords) * audioDurationSeconds;
+      }
+
+      // Classify ad position
+      const midpoint = (startTimeSec + endTimeSec) / 2;
+      let type: 'pre-roll' | 'mid-roll' | 'post-roll' | 'sponsor-mention' = 'mid-roll';
+      if (midpoint < audioDurationSeconds * 0.1) type = 'pre-roll';
+      else if (midpoint > audioDurationSeconds * 0.9) type = 'post-roll';
+
+      return {
+        startTime: Math.round(startTimeSec),
+        endTime: Math.round(endTimeSec),
+        type,
+        confidence: 0.9,
+        reason: b.reason,
+      };
     });
 
-    res.json(result);
+    const totalAdTime = segments.reduce((s, seg) => s + (seg.endTime - seg.startTime), 0);
+    res.json({
+      segments,
+      totalAdTime,
+      contentDuration: audioDurationSeconds - totalAdTime,
+      strategy: 'v2-numbered-line-ranges',
+    } as LLMAdDetectionResult);
   } catch (err: any) {
     console.error('LLM detect-ads error:', err.message);
     res.status(500).json({ error: 'LLM ad detection failed', detail: err.message });
   }
 });
 
-// ─── LLM Step: Prepare Player (ai.summarize) ───────────────────────────────
+// ─── LLM Step 3: Prepare Player ─────────────────────────────────────────────
 
 interface LLMPlaybackConfig {
   summary: string;
@@ -882,20 +726,9 @@ app.post('/api/llm/prepare-playback', async (req, res) => {
     return;
   }
 
-  try {
-    const result = await chatJSON<LLMPlaybackConfig>({
-      provider: LLM_PROVIDER,
-      model: LLM_MODEL,
-      apiKey: LLM_API_KEY,
-      baseUrl: LLM_BASE_URL,
-      temperature: 0.3,
-      maxTokens: 2048,
-      maxRetries: 2,
-      systemPrompt: `You are a podcast playback assistant. You create concise episode summaries and finalize skip configurations. Return ONLY valid JSON.`,
-      messages: [
-        {
-          role: 'user',
-          content: `Prepare a playback configuration for this podcast episode.
+  const systemPrompt = `You are a podcast playback assistant. You create concise episode summaries and finalize skip configurations. Return ONLY valid JSON.`;
+
+  const userPrompt = `Prepare a playback configuration for this podcast episode.
 
 Episode: "${episodeTitle}"
 Description: "${episodeDescription}"
@@ -920,12 +753,11 @@ Return JSON:
   "contentDuration": number,
   "totalAdTime": number,
   "recommendation": string
-}`,
-        },
-      ],
-    });
+}`;
 
-    res.json(result);
+  try {
+    const { parsed } = await callLLM(systemPrompt, userPrompt, 0.3, 2048);
+    res.json(parsed);
   } catch (err: any) {
     console.error('LLM prepare-playback error:', err.message);
     res.status(500).json({ error: 'LLM prepare-playback failed', detail: err.message });
@@ -1641,5 +1473,5 @@ if (fs.existsSync(path.join(distPath, 'index.html'))) {
 const PORT = parseInt(String(process.env.PORT || '5000'), 10);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`NPR Podcast server running on http://0.0.0.0:${PORT}`);
-  console.log(`LLM provider: ${LLM_PROVIDER}, model: ${LLM_MODEL}, key: ${LLM_API_KEY ? '***set***' : 'NOT SET (fallback mode)'}`);
+  console.log(`OpenAI model: ${LLM_MODEL}, key: ${LLM_API_KEY ? '***set***' : 'NOT SET (fallback mode)'}`);
 });

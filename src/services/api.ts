@@ -40,7 +40,7 @@ export async function fetchEpisodes(
   return res.json();
 }
 
-/** Fetch raw transcript HTML (no parsing — LLM does that now) */
+/** Fetch raw transcript HTML (server parses it into numbered lines) */
 export async function fetchTranscriptHtml(
   transcriptUrl: string
 ): Promise<{ html: string }> {
@@ -55,7 +55,7 @@ export function getAudioProxyUrl(audioUrl: string): string {
   return `${BASE}/audio?url=${encodeURIComponent(audioUrl)}`;
 }
 
-// ─── LLM Pipeline endpoints (bilko-flow chatJSON on server) ─────────────────
+// ─── LLM Pipeline endpoints (v2 — OpenAI on server) ─────────────────────────
 
 /** Step 4: LLM parses raw HTML into structured transcript with ad flags */
 export async function llmParseTranscript(html: string): Promise<LLMTranscriptResult> {
