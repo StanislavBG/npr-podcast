@@ -1,12 +1,10 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   fetchPodcasts,
   fetchEpisodes,
   sandboxAnalyze,
   parseDuration,
   formatTime,
-  type Podcast,
-  type Episode,
   type SandboxResult,
   type SandboxAdBlock,
   type SandboxLine,
@@ -16,7 +14,310 @@ interface Props {
   onBack: () => void;
 }
 
-// ─── Sub-components ──────────────────────────────────────────────────────────
+// ─── Step definitions ────────────────────────────────────────────────────────
+
+interface StepDef {
+  id: string;
+  label: string;
+  subtitle: string;
+}
+
+const STEPS: StepDef[] = [
+  { id: 'episode',    label: 'Episode',           subtitle: 'What we\'re analyzing' },
+  { id: 'raw-html',   label: 'Raw HTML',          subtitle: 'What NPR returned' },
+  { id: 'parsed',     label: 'Parsed Lines',      subtitle: 'After HTML parsing' },
+  { id: 'qa-diag',    label: 'QA Diagnostics',    subtitle: 'The math doesn\'t add up?' },
+  { id: 'sys-prompt', label: 'System Prompt',      subtitle: 'LLM instructions' },
+  { id: 'usr-prompt', label: 'User Prompt',        subtitle: 'What we send to the LLM' },
+  { id: 'llm-resp',   label: 'LLM Response',       subtitle: 'What the LLM returned' },
+  { id: 'ad-blocks',  label: 'Ad Blocks',          subtitle: 'Detected ad segments' },
+  { id: 'transcript', label: 'Annotated Transcript', subtitle: 'Full transcript + ad markers' },
+  { id: 'skip-map',   label: 'Skip Map',           subtitle: 'Final player JSON' },
+];
+
+// ─── Step content renderers ──────────────────────────────────────────────────
+
+function StepEpisode({ result }: { result: SandboxResult }) {
+  const { episode, summary } = result;
+  return (
+    <div className="sb-step-body">
+      <h2 className="sb-step-heading">{episode.title}</h2>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Duration</span><span className="sb-kv-v">{formatTime(episode.durationSec)} ({episode.durationSec}s)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Transcript URL</span><span className="sb-kv-v sb-kv-url">{episode.transcriptUrl}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Strategy</span><span className="sb-kv-v">{summary.strategy}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Lines</span><span className="sb-kv-v">{result.transcript.lineCount}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Words</span><span className="sb-kv-v">{result.transcript.totalWords.toLocaleString()}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Ad blocks found</span><span className="sb-kv-v">{summary.totalAdBlocks}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Ad word %</span><span className="sb-kv-v">{summary.adWordPercent}%</span></div>
+      </div>
+
+      <Timeline result={result} />
+    </div>
+  );
+}
+
+function StepRawHtml({ result }: { result: SandboxResult }) {
+  const { rawHtml } = result;
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        <strong>QA Check:</strong> Does the HTML actually contain transcript paragraphs?
+        If NPR changed their page structure, the parser won't find &lt;p&gt; tags.
+      </div>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">HTML size</span><span className="sb-kv-v">{(rawHtml.length / 1024).toFixed(1)} KB ({rawHtml.length.toLocaleString()} chars)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">&lt;p&gt; tags found</span><span className="sb-kv-v">{rawHtml.pTagCount}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Lines parsed</span><span className="sb-kv-v">{result.transcript.lineCount}</span></div>
+      </div>
+      {rawHtml.pTagCount === 0 && (
+        <div className="sb-qa-alert">
+          Zero &lt;p&gt; tags found. The transcript HTML may have changed structure,
+          or NPR may be blocking the request. Check the snippet below.
+        </div>
+      )}
+      <h3 className="sb-sub-heading">HTML Snippet (first 2KB)</h3>
+      <pre className="sb-code-block">{rawHtml.snippet}</pre>
+    </div>
+  );
+}
+
+function StepParsedLines({ result }: { result: SandboxResult }) {
+  const { lines } = result.transcript;
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+  const dur = result.episode.durationSec;
+
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        <strong>QA Check:</strong> Scan these lines as a human. Can you spot any
+        "Support for this podcast comes from..." or funding credits? If you can see them
+        but the LLM missed them, the problem is in the prompt. If you can't see them,
+        the ads are dynamically inserted audio — not in the transcript at all.
+      </div>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Total lines</span><span className="sb-kv-v">{lines.length}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{totalWords.toLocaleString()}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Speakers detected</span><span className="sb-kv-v">{new Set(lines.filter(l => l.speaker).map(l => l.speaker)).size}</span></div>
+      </div>
+      <div className="sb-parsed-lines">
+        {lines.map(l => {
+          const approxTime = dur > 0 && totalWords > 0
+            ? (l.cumulativeWords / totalWords) * dur
+            : 0;
+          return (
+            <div key={l.lineNum} className="sb-parsed-line">
+              <span className="sb-pl-time">{formatTime(approxTime)}</span>
+              <span className="sb-pl-num">[{l.lineNum}]</span>
+              <span className="sb-pl-text">
+                {l.speaker && <strong>{l.speaker}: </strong>}
+                {l.text}
+              </span>
+              <span className="sb-pl-wc">{l.wordCount}w</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function StepQaDiagnostics({ result }: { result: SandboxResult }) {
+  const { qa, summary } = result;
+  const gap = qa.impliedAdTimeSec;
+  const gapPercent = qa.audioDurationSec > 0
+    ? ((gap / qa.audioDurationSec) * 100).toFixed(1)
+    : '0';
+
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        <strong>The core question:</strong> NPR uses Megaphone for dynamic ad insertion.
+        The transcript only contains editorial text — ads are injected into the audio
+        stream separately. So the transcript will <em>never</em> contain the actual ad copy
+        (Geico, Squarespace, etc). Only "funding credits" like "Support for NPR comes from..."
+        appear in the text.
+      </div>
+
+      <h3 className="sb-sub-heading">Duration vs Speech Math</h3>
+      <div className="sb-qa-math">
+        <div className="sb-qa-row">
+          <span className="sb-qa-label">Audio duration</span>
+          <span className="sb-qa-val">{formatTime(qa.audioDurationSec)} ({qa.audioDurationSec}s)</span>
+        </div>
+        <div className="sb-qa-row">
+          <span className="sb-qa-label">Transcript words</span>
+          <span className="sb-qa-val">{qa.transcriptWords.toLocaleString()}</span>
+        </div>
+        <div className="sb-qa-row">
+          <span className="sb-qa-label">Expected speech @ {qa.speechRateWpm} wpm</span>
+          <span className="sb-qa-val">{formatTime(qa.expectedSpeechSec)} ({qa.expectedSpeechSec}s)</span>
+        </div>
+        <div className="sb-qa-row sb-qa-highlight">
+          <span className="sb-qa-label">Unaccounted time (implied ads)</span>
+          <span className="sb-qa-val">{formatTime(gap)} ({gap}s = {gapPercent}%)</span>
+        </div>
+        <div className="sb-qa-row">
+          <span className="sb-qa-label">LLM-detected ad time</span>
+          <span className="sb-qa-val">{summary.totalAdTimeSec}s</span>
+        </div>
+      </div>
+
+      <h3 className="sb-sub-heading">Speaker Breakdown</h3>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Lines with speaker</span><span className="sb-kv-v">{qa.linesWithSpeaker}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Lines without speaker</span><span className="sb-kv-v">{qa.linesWithoutSpeaker}</span></div>
+      </div>
+
+      {gap > 30 && summary.totalAdTimeSec === 0 && (
+        <div className="sb-qa-alert">
+          There's {gap}s of unaccounted time but zero ad blocks were found in the transcript.
+          This strongly suggests the ads are dynamically inserted audio that doesn't
+          appear in the transcript text at all. The LLM can only find what's actually
+          written in the transcript.
+        </div>
+      )}
+
+      {gap < 15 && (
+        <div className="sb-qa-ok">
+          Audio duration closely matches expected speech time. This episode may have
+          minimal or no dynamically inserted ads.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StepSystemPrompt({ result }: { result: SandboxResult }) {
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        <strong>QA Check:</strong> Does the system prompt correctly describe what to look for?
+        Are the patterns listed comprehensive? Should we add more patterns or change the instructions?
+      </div>
+      <pre className="sb-code-block sb-prompt-text">{result.prompts.system}</pre>
+    </div>
+  );
+}
+
+function StepUserPrompt({ result }: { result: SandboxResult }) {
+  const lineCount = (result.prompts.user.match(/\n/g) || []).length + 1;
+  const charCount = result.prompts.user.length;
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        <strong>QA Check:</strong> Is the full transcript included? Is anything truncated?
+        The LLM can only detect ads in lines it can see.
+      </div>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Prompt size</span><span className="sb-kv-v">{(charCount / 1024).toFixed(1)} KB ({charCount.toLocaleString()} chars)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Lines in prompt</span><span className="sb-kv-v">{lineCount}</span></div>
+      </div>
+      <pre className="sb-code-block sb-prompt-text">{result.prompts.user}</pre>
+    </div>
+  );
+}
+
+function StepLlmResponse({ result }: { result: SandboxResult }) {
+  let parsed: any = null;
+  try { parsed = JSON.parse(result.llmResponse); } catch { /* not JSON */ }
+
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        <strong>QA Check:</strong> Did the LLM return valid JSON? Did it find any adBlocks?
+        If the array is empty, the LLM didn't see anything that matched the ad patterns
+        in the transcript text.
+      </div>
+      {parsed && (
+        <div className="sb-kv-grid">
+          <div className="sb-kv">
+            <span className="sb-kv-k">adBlocks returned</span>
+            <span className="sb-kv-v">{parsed.adBlocks?.length ?? 'N/A'}</span>
+          </div>
+        </div>
+      )}
+      {parsed && parsed.adBlocks?.length === 0 && (
+        <div className="sb-qa-alert">
+          The LLM returned zero ad blocks. Either the transcript genuinely contains no
+          ad-like content (all ads are dynamic audio injection), or the prompt needs tuning.
+        </div>
+      )}
+      <pre className="sb-code-block sb-json-text">{result.llmResponse}</pre>
+    </div>
+  );
+}
+
+function StepAdBlocks({ result }: { result: SandboxResult }) {
+  const { adBlocks, episode } = result;
+  return (
+    <div className="sb-step-body">
+      {adBlocks.length === 0 ? (
+        <>
+          <div className="sb-qa-alert">
+            No ad blocks detected. This is the key finding for QA.
+            Check the "QA Diagnostics" step to see if there's unaccounted time
+            in the audio that suggests dynamic ad insertion.
+          </div>
+          <div className="sb-qa-callout">
+            <strong>Why this happens:</strong> NPR uses Megaphone to dynamically
+            insert ads into the audio stream. These ads are NOT part of the editorial
+            transcript. The transcript only contains what the hosts/guests actually said,
+            plus occasional "funding credits" like "Support for NPR comes from...".
+          </div>
+        </>
+      ) : (
+        <>
+          <Timeline result={result} />
+          <div className="sb-ad-list">
+            {adBlocks.map((b, i) => (
+              <AdBlockCard key={i} block={b} index={i} durationSec={episode.durationSec} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function StepAnnotatedTranscript({ result }: { result: SandboxResult }) {
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        <strong>QA Check:</strong> Read through the transcript. Lines highlighted in red
+        are detected ad blocks. Can you spot any ad-like content the LLM missed?
+        Look for: "Support for...", "This message comes from...", sponsor names, promo codes.
+      </div>
+      <TranscriptViewer
+        lines={result.transcript.lines}
+        adBlocks={result.adBlocks}
+        durationSec={result.episode.durationSec}
+      />
+    </div>
+  );
+}
+
+function StepSkipMap({ result }: { result: SandboxResult }) {
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        <strong>Final output:</strong> This JSON is what the audio player uses to auto-skip.
+        Each entry defines a time range to skip, a confidence score, and the reason.
+      </div>
+      {result.skipMap.length === 0 && (
+        <div className="sb-qa-alert">
+          Empty skip map — the player will not skip anything for this episode.
+        </div>
+      )}
+      <pre className="sb-code-block sb-json-text">
+        {JSON.stringify(result.skipMap, null, 2)}
+      </pre>
+    </div>
+  );
+}
+
+// ─── Shared sub-components ───────────────────────────────────────────────────
 
 function Timeline({ result }: { result: SandboxResult }) {
   const dur = result.episode.durationSec;
@@ -49,19 +350,20 @@ function Timeline({ result }: { result: SandboxResult }) {
   );
 }
 
-function AdBlockCard({ block, index }: { block: SandboxAdBlock; index: number }) {
+function AdBlockCard({ block, index, durationSec }: { block: SandboxAdBlock; index: number; durationSec: number }) {
   const duration = block.endTimeSec - block.startTimeSec;
   const words = block.endWord - block.startWord;
+  const pctOfEpisode = durationSec > 0 ? ((duration / durationSec) * 100).toFixed(1) : '0';
 
   return (
     <div className="sb-ad-card">
       <div className="sb-ad-card-header">
         <span className="sb-ad-badge">AD {index + 1}</span>
-        <span className="sb-ad-lines">Lines {block.startLine}–{block.endLine}</span>
+        <span className="sb-ad-lines">Lines {block.startLine}--{block.endLine}</span>
         <span className="sb-ad-time">
-          {formatTime(block.startTimeSec)} → {formatTime(block.endTimeSec)}
+          {formatTime(block.startTimeSec)} -- {formatTime(block.endTimeSec)}
         </span>
-        <span className="sb-ad-dur">{duration.toFixed(0)}s, ~{words} words</span>
+        <span className="sb-ad-dur">{duration.toFixed(0)}s ({pctOfEpisode}%), ~{words} words</span>
       </div>
       <div className="sb-ad-card-reason">{block.reason}</div>
       <div className="sb-ad-card-preview">"{block.textPreview}"</div>
@@ -80,7 +382,6 @@ function TranscriptViewer({
 }) {
   const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
 
-  // Build lookup sets
   const adLineSet = new Set<number>();
   const adLineToBlock = new Map<number, SandboxAdBlock>();
   for (const b of adBlocks) {
@@ -95,27 +396,23 @@ function TranscriptViewer({
 
   for (const l of lines) {
     const isAd = adLineSet.has(l.lineNum);
-    const approxTime = durationSec > 0
+    const approxTime = durationSec > 0 && totalWords > 0
       ? (l.cumulativeWords / totalWords) * durationSec
       : 0;
 
-    // Banner when entering an ad block
     if (isAd && !lastWasAd) {
       const block = adLineToBlock.get(l.lineNum)!;
       elements.push(
         <div key={`ad-start-${l.lineNum}`} className="sb-ad-banner start">
-          AD BLOCK (lines {block.startLine}–{block.endLine}){' '}
-          {formatTime(block.startTimeSec)} → {formatTime(block.endTimeSec)}
-          {' — '}{block.reason}
+          AD BLOCK (lines {block.startLine}--{block.endLine}){' '}
+          {formatTime(block.startTimeSec)} -- {formatTime(block.endTimeSec)}
+          {' -- '}{block.reason}
         </div>
       );
     }
 
     elements.push(
-      <div
-        key={l.lineNum}
-        className={`sb-line ${isAd ? 'is-ad' : ''}`}
-      >
+      <div key={l.lineNum} className={`sb-line ${isAd ? 'is-ad' : ''}`}>
         <span className="sb-line-time">{formatTime(approxTime)}</span>
         <span className="sb-line-num">{l.lineNum}</span>
         {isAd && <span className="sb-line-ad-mark" />}
@@ -126,7 +423,6 @@ function TranscriptViewer({
       </div>
     );
 
-    // Banner when leaving an ad block
     if (lastWasAd && !isAd) {
       elements.push(
         <div key={`ad-end-${l.lineNum}`} className="sb-ad-banner end">
@@ -136,7 +432,6 @@ function TranscriptViewer({
     }
     lastWasAd = isAd;
   }
-  // Close any trailing ad block
   if (lastWasAd) {
     elements.push(
       <div key="ad-end-final" className="sb-ad-banner end">
@@ -148,218 +443,197 @@ function TranscriptViewer({
   return <div className="sb-transcript">{elements}</div>;
 }
 
-function PromptViewer({ label, content }: { label: string; content: string }) {
-  const [open, setOpen] = useState(false);
-
-  return (
-    <div className="sb-prompt-box">
-      <button className="sb-prompt-toggle" onClick={() => setOpen(!open)}>
-        {open ? '▾' : '▸'} {label}
-      </button>
-      {open && <pre className="sb-prompt-content">{content}</pre>}
-    </div>
-  );
-}
-
 // ─── Main SandboxPage ────────────────────────────────────────────────────────
 
 export function SandboxPage({ onBack }: Props) {
-  const [podcasts, setPodcasts] = useState<Podcast[]>([]);
-  const [podcastId, setPodcastId] = useState('510325');
-  const [episodes, setEpisodes] = useState<Episode[]>([]);
-  const [episodeId, setEpisodeId] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [step, setStep] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState('Loading podcasts...');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SandboxResult | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
 
-  // Load podcasts on mount
+  // Auto-fetch single podcast + episode and analyze on mount
   useEffect(() => {
-    fetchPodcasts()
-      .then(setPodcasts)
-      .catch(() =>
-        setPodcasts([
-          { id: '510325', name: 'The Indicator from Planet Money' },
-          { id: '510289', name: 'Planet Money' },
-          { id: '510318', name: 'Short Wave' },
-          { id: '510308', name: 'Hidden Brain' },
-          { id: '344098539', name: 'Up First' },
-        ])
-      );
+    let cancelled = false;
+
+    async function run() {
+      try {
+        // 1. Fetch podcasts
+        setStatus('Loading podcasts...');
+        let podcasts;
+        try {
+          podcasts = await fetchPodcasts();
+        } catch {
+          podcasts = [{ id: '510325', name: 'The Indicator from Planet Money' }];
+        }
+        if (cancelled) return;
+
+        // Pick first podcast
+        const podcastId = podcasts[0].id;
+        setStatus(`Loading episodes for ${podcasts[0].name}...`);
+
+        // 2. Fetch episodes
+        const data = await fetchEpisodes(podcastId);
+        if (cancelled) return;
+
+        // Pick first episode with transcript
+        const ep = data.episodes.find(e => e.transcriptUrl);
+        if (!ep) {
+          setError('No episodes with transcripts found.');
+          setLoading(false);
+          return;
+        }
+
+        setStatus(`Analyzing: ${ep.title}...`);
+
+        // 3. Run analysis
+        const res = await sandboxAnalyze(
+          ep.transcriptUrl!,
+          ep.title,
+          parseDuration(ep.duration),
+        );
+        if (cancelled) return;
+
+        setResult(res);
+        setLoading(false);
+      } catch (err: any) {
+        if (!cancelled) {
+          setError(err.message || 'Analysis failed');
+          setLoading(false);
+        }
+      }
+    }
+
+    run();
+    return () => { cancelled = true; };
   }, []);
 
-  // Load episodes when podcast changes
+  // Keyboard navigation
   useEffect(() => {
-    setEpisodes([]);
-    setEpisodeId('');
-    setResult(null);
-    fetchEpisodes(podcastId)
-      .then(data => {
-        setEpisodes(data.episodes);
-        // Auto-select first episode with transcript
-        const first = data.episodes.find(e => e.transcriptUrl);
-        if (first) setEpisodeId(first.id);
-      })
-      .catch(() => {});
-  }, [podcastId]);
-
-  const selectedEpisode = episodes.find(e => e.id === episodeId) || null;
-
-  const analyze = useCallback(async () => {
-    if (!selectedEpisode?.transcriptUrl) return;
-    setLoading(true);
-    setError(null);
-    setResult(null);
-
-    try {
-      const data = await sandboxAnalyze(
-        selectedEpisode.transcriptUrl,
-        selectedEpisode.title,
-        parseDuration(selectedEpisode.duration),
-      );
-      setResult(data);
-    } catch (err: any) {
-      setError(err.message || 'Analysis failed');
-    } finally {
-      setLoading(false);
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        setStep(s => Math.min(s + 1, STEPS.length - 1));
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        setStep(s => Math.max(s - 1, 0));
+      }
     }
-  }, [selectedEpisode]);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Scroll content to top when step changes
+  useEffect(() => {
+    contentRef.current?.scrollTo(0, 0);
+  }, [step]);
+
+  const goLeft = () => setStep(s => Math.max(s - 1, 0));
+  const goRight = () => setStep(s => Math.min(s + 1, STEPS.length - 1));
+  const current = STEPS[step];
+
+  // ─── Render ──────────────────────────────────────────────────────────────
 
   return (
     <div className="sb-page">
       {/* Header */}
       <header className="sb-header">
-        <button className="sb-back" onClick={onBack}>← Back</button>
-        <h1 className="sb-title">Ad Detection Sandbox</h1>
+        <button className="sb-back" onClick={onBack}>Back</button>
+        <div className="sb-header-center">
+          <h1 className="sb-title">Ad Detection QA</h1>
+          {result && (
+            <span className="sb-header-ep">{result.episode.title}</span>
+          )}
+        </div>
+        {result && (
+          <span className="sb-step-counter">{step + 1}/{STEPS.length}</span>
+        )}
       </header>
 
-      {/* Controls */}
-      <div className="sb-controls">
-        <div className="sb-field">
-          <label className="sb-label">Podcast</label>
-          <select
-            className="sb-select"
-            value={podcastId}
-            onChange={e => setPodcastId(e.target.value)}
-          >
-            {podcasts.map(p => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="sb-field">
-          <label className="sb-label">Episode</label>
-          <select
-            className="sb-select"
-            value={episodeId}
-            onChange={e => setEpisodeId(e.target.value)}
-            disabled={episodes.length === 0}
-          >
-            {episodes.length === 0 && <option value="">Loading...</option>}
-            {episodes.map(ep => (
-              <option key={ep.id} value={ep.id} disabled={!ep.transcriptUrl}>
-                {ep.title}{!ep.transcriptUrl ? ' (no transcript)' : ''} — {ep.duration}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <button
-          className="sb-analyze-btn"
-          onClick={analyze}
-          disabled={loading || !selectedEpisode?.transcriptUrl}
-        >
-          {loading ? 'Analyzing...' : 'Analyze'}
-        </button>
-      </div>
-
-      {error && <div className="sb-error">{error}</div>}
-
+      {/* Loading state */}
       {loading && (
-        <div className="sb-loading">
-          <div className="dot" />
-          <span>Fetching transcript and running ad detection...</span>
+        <div className="sb-loading-full">
+          <div className="sb-loading-spinner" />
+          <span className="sb-loading-status">{status}</span>
         </div>
       )}
 
-      {/* Results */}
-      {result && (
-        <div className="sb-results">
-          {/* Summary stats */}
-          <section className="sb-section">
-            <h2 className="sb-section-title">Summary</h2>
-            <div className="sb-stats">
-              <div className="sb-stat">
-                <span className="sb-stat-val">{result.transcript.lineCount}</span>
-                <span className="sb-stat-label">lines</span>
-              </div>
-              <div className="sb-stat">
-                <span className="sb-stat-val">{result.transcript.totalWords}</span>
-                <span className="sb-stat-label">words</span>
-              </div>
-              <div className="sb-stat">
-                <span className="sb-stat-val">{result.summary.totalAdBlocks}</span>
-                <span className="sb-stat-label">ad blocks</span>
-              </div>
-              <div className="sb-stat">
-                <span className="sb-stat-val">{result.summary.totalAdTimeSec}s</span>
-                <span className="sb-stat-label">ad time</span>
-              </div>
-              <div className="sb-stat">
-                <span className="sb-stat-val">{result.summary.adWordPercent}%</span>
-                <span className="sb-stat-label">ad words</span>
-              </div>
-              <div className="sb-stat">
-                <span className="sb-stat-val">{result.summary.strategy}</span>
-                <span className="sb-stat-label">strategy</span>
-              </div>
-            </div>
-          </section>
-
-          {/* Timeline */}
-          <section className="sb-section">
-            <h2 className="sb-section-title">Timeline</h2>
-            <Timeline result={result} />
-          </section>
-
-          {/* Ad blocks detail */}
-          <section className="sb-section">
-            <h2 className="sb-section-title">
-              Ad Blocks ({result.adBlocks.length})
-            </h2>
-            {result.adBlocks.length === 0 ? (
-              <p className="sb-muted">No ad blocks detected.</p>
-            ) : (
-              result.adBlocks.map((b, i) => (
-                <AdBlockCard key={i} block={b} index={i} />
-              ))
-            )}
-          </section>
-
-          {/* Annotated transcript */}
-          <section className="sb-section">
-            <h2 className="sb-section-title">Annotated Transcript</h2>
-            <TranscriptViewer
-              lines={result.transcript.lines}
-              adBlocks={result.adBlocks}
-              durationSec={result.episode.durationSec}
-            />
-          </section>
-
-          {/* LLM Prompts */}
-          <section className="sb-section">
-            <h2 className="sb-section-title">LLM Prompts & Response</h2>
-            <PromptViewer label="System Prompt" content={result.prompts.system} />
-            <PromptViewer label="User Prompt (full transcript)" content={result.prompts.user} />
-            <PromptViewer label="LLM Response" content={result.llmResponse} />
-          </section>
-
-          {/* Skip map */}
-          <section className="sb-section">
-            <h2 className="sb-section-title">Skip Map (Player JSON)</h2>
-            <pre className="sb-json">{JSON.stringify(result.skipMap, null, 2)}</pre>
-          </section>
+      {/* Error state */}
+      {error && !loading && (
+        <div className="sb-error-full">
+          <div className="sb-error-icon">!</div>
+          <p>{error}</p>
+          <button className="sb-retry-btn" onClick={() => window.location.reload()}>
+            Retry
+          </button>
         </div>
+      )}
+
+      {/* Step carousel */}
+      {result && !loading && (
+        <>
+          {/* Step nav pills */}
+          <nav className="sb-step-nav">
+            {STEPS.map((s, i) => (
+              <button
+                key={s.id}
+                className={`sb-step-pill ${i === step ? 'active' : ''} ${i < step ? 'done' : ''}`}
+                onClick={() => setStep(i)}
+              >
+                <span className="sb-pill-num">{i + 1}</span>
+                <span className="sb-pill-label">{s.label}</span>
+              </button>
+            ))}
+          </nav>
+
+          {/* Step content */}
+          <div className="sb-step-content" ref={contentRef}>
+            <div className="sb-step-header">
+              <span className="sb-step-badge">Step {step + 1}</span>
+              <h2 className="sb-step-title">{current.label}</h2>
+              <p className="sb-step-subtitle">{current.subtitle}</p>
+            </div>
+
+            {step === 0 && <StepEpisode result={result} />}
+            {step === 1 && <StepRawHtml result={result} />}
+            {step === 2 && <StepParsedLines result={result} />}
+            {step === 3 && <StepQaDiagnostics result={result} />}
+            {step === 4 && <StepSystemPrompt result={result} />}
+            {step === 5 && <StepUserPrompt result={result} />}
+            {step === 6 && <StepLlmResponse result={result} />}
+            {step === 7 && <StepAdBlocks result={result} />}
+            {step === 8 && <StepAnnotatedTranscript result={result} />}
+            {step === 9 && <StepSkipMap result={result} />}
+          </div>
+
+          {/* Bottom nav */}
+          <footer className="sb-step-footer">
+            <button
+              className="sb-nav-btn sb-nav-prev"
+              onClick={goLeft}
+              disabled={step === 0}
+            >
+              Prev
+            </button>
+            <div className="sb-step-dots">
+              {STEPS.map((_, i) => (
+                <div
+                  key={i}
+                  className={`sb-dot ${i === step ? 'active' : ''}`}
+                  onClick={() => setStep(i)}
+                />
+              ))}
+            </div>
+            <button
+              className="sb-nav-btn sb-nav-next"
+              onClick={goRight}
+              disabled={step === STEPS.length - 1}
+            >
+              Next
+            </button>
+          </footer>
+        </>
       )}
     </div>
   );
