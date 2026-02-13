@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { XMLParser } from 'fast-xml-parser';
+import { ensureCompatibleFormat, openai as sttOpenai, speechToText } from './replit_integrations/audio/client.js';
 
 const app = express();
 app.use(cors());
@@ -1303,19 +1304,10 @@ Return JSON:
     let llmRaw = '';
 
     if (LLM_API_KEY) {
-      const result = await chatJSON<{ adBlocks: Array<{ startLine: number; endLine: number; reason: string }> }>({
-        provider: LLM_PROVIDER,
-        model: LLM_MODEL,
-        apiKey: LLM_API_KEY,
-        baseUrl: LLM_BASE_URL,
-        temperature: 0,
-        maxTokens: 2048,
-        maxRetries: 2,
-        systemPrompt,
-        messages: [{ role: 'user', content: userPrompt }],
-      });
+      const { parsed, rawText } = await callLLM(systemPrompt, userPrompt, 0, 2048);
+      const result = parsed as { adBlocks: Array<{ startLine: number; endLine: number; reason: string }> };
 
-      llmRaw = JSON.stringify(result, null, 2);
+      llmRaw = rawText;
       adBlocks = (result.adBlocks || []).map(b => ({
         startLine: b.startLine,
         endLine: b.endLine,
