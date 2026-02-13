@@ -266,19 +266,6 @@ export default function App() {
             />
           )}
 
-          {playback && (
-            <div className="llm-summary">
-              <p className="summary-text">{playback.summary}</p>
-              {playback.topics.length > 0 && (
-                <div className="topic-tags">
-                  {playback.topics.map((t, i) => (
-                    <span key={i} className="topic-tag">{t}</span>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
           <FlowVisualizer flowState={flow} />
         </main>
 
