@@ -8,7 +8,11 @@
     "dev:client": "vite",
     "dev:server": "tsx server/index.ts",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "sandbox": "tsx server/sandbox.ts",
+    "sandbox:indicator": "tsx server/sandbox.ts 510325",
+    "sandbox:planetmoney": "tsx server/sandbox.ts 510289",
+    "sandbox:upfirst": "tsx server/sandbox.ts 344098539"
   },
   "dependencies": {
     "bilko-flow": "github:StanislavBG/bilko-flow",
