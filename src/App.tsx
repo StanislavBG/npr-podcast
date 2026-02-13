@@ -185,33 +185,31 @@ export default function App() {
   }, []);
 
   return (
-    <div className="shell">
-      <header className="header">
-        <h1 className="header-title">NPR Podcasts</h1>
-      </header>
+    <div className="phone-frame">
+      <div className="phone-notch" />
+      <div className="shell">
+        <header className="header">
+          <h1 className="header-title">NPR Podcasts</h1>
+        </header>
 
-      <PodcastSelector
-        podcasts={podcasts}
-        selected={selected}
-        onSelect={setSelected}
-      />
+        <PodcastSelector
+          podcasts={podcasts}
+          selected={selected}
+          onSelect={setSelected}
+        />
 
-      <main className="content">
-        {error && !episodes.length ? (
-          <div className="empty">{error}</div>
-        ) : (
-          <EpisodeList
-            episodes={episodes}
-            loading={loading}
-            selectedId={episode?.id || null}
-            onSelect={pick}
-          />
-        )}
-      </main>
+        <main className="content">
+          {error && !episodes.length ? (
+            <div className="empty">{error}</div>
+          ) : (
+            <EpisodeList
+              episodes={episodes}
+              loading={loading}
+              selectedId={episode?.id || null}
+              onSelect={pick}
+            />
+          )}
 
-      {episode && (
-        <div className="player-dock">
-          <Player episode={episode} adDetection={ads} />
           {playback && (
             <div className="llm-summary">
               <p className="summary-text">{playback.summary}</p>
@@ -224,10 +222,17 @@ export default function App() {
               )}
             </div>
           )}
-        </div>
-      )}
 
-      <FlowVisualizer flowState={flow} />
+          <FlowVisualizer flowState={flow} />
+        </main>
+
+        {/* Player dock pinned to bottom with progress bar at very bottom */}
+        {episode && (
+          <div className="player-dock">
+            <Player episode={episode} adDetection={ads} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
