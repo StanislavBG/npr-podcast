@@ -6,9 +6,23 @@ import { randomUUID } from "crypto";
 import { tmpdir } from "os";
 import { join } from "path";
 
-export const openai = new OpenAI({
-  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+// Lazy-init OpenAI client: avoid crashing at import when no API key is set.
+// Audio transcription is optional — the server falls back to text transcripts.
+let _openai: OpenAI | null = null;
+export const openai: OpenAI = new Proxy({} as OpenAI, {
+  get(_target, prop) {
+    if (!_openai) {
+      const apiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
+      if (!apiKey) {
+        throw new Error('OpenAI API key not configured (set OPENAI_API_KEY or AI_INTEGRATIONS_OPENAI_API_KEY)');
+      }
+      _openai = new OpenAI({
+        apiKey,
+        baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+      });
+    }
+    return (_openai as any)[prop];
+  },
 });
 
 export type AudioFormat = "wav" | "mp3" | "webm" | "mp4" | "ogg" | "unknown";
