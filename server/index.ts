@@ -560,6 +560,252 @@ Return JSON:
   }
 });
 
+// ─── Sandbox: full transcript + ad-block analysis ───────────────────────────
+
+interface SandboxLine {
+  lineNum: number;
+  speaker: string;
+  text: string;
+  wordCount: number;
+  cumulativeWords: number;
+}
+
+interface SandboxAdBlock {
+  startLine: number;
+  endLine: number;
+  reason: string;
+  textPreview: string;
+  startWord: number;
+  endWord: number;
+  startTimeSec: number;
+  endTimeSec: number;
+}
+
+function parseTranscriptToLines(html: string): SandboxLine[] {
+  const lines: SandboxLine[] = [];
+  const pBlocks = html.match(/<p[^>]*>[\s\S]*?<\/p>/gi) || [];
+
+  let cumulative = 0;
+  let lineNum = 0;
+
+  for (const block of pBlocks) {
+    const text = block
+      .replace(/<br\s*\/?>/gi, ' ')
+      .replace(/<[^>]*>/g, '')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#x27;/g, "'")
+      .replace(/&nbsp;/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!text || text.length < 3) continue;
+
+    let speaker = '';
+    let content = text;
+    const speakerMatch = text.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+    if (speakerMatch) {
+      speaker = speakerMatch[1].trim();
+      content = text.slice(speakerMatch[0].length).trim();
+    }
+
+    if (!content) continue;
+
+    lineNum++;
+    const wc = content.split(/\s+/).filter(Boolean).length;
+    cumulative += wc;
+
+    lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative });
+  }
+
+  return lines;
+}
+
+function mapAdBlocksToTimestamps(
+  blocks: SandboxAdBlock[],
+  lines: SandboxLine[],
+  durationSec: number,
+): SandboxAdBlock[] {
+  if (lines.length === 0 || durationSec === 0) return blocks;
+
+  const totalWords = lines[lines.length - 1].cumulativeWords;
+  const lineMap = new Map<number, SandboxLine>();
+  for (const l of lines) lineMap.set(l.lineNum, l);
+
+  for (const b of blocks) {
+    const startLine = lineMap.get(b.startLine);
+    const endLine = lineMap.get(b.endLine);
+    if (!startLine || !endLine) continue;
+
+    b.startWord = startLine.cumulativeWords - startLine.wordCount;
+    b.endWord = endLine.cumulativeWords;
+    b.startTimeSec = (b.startWord / totalWords) * durationSec;
+    b.endTimeSec = (b.endWord / totalWords) * durationSec;
+  }
+
+  return blocks;
+}
+
+app.post('/api/sandbox/analyze', async (req, res) => {
+  const { transcriptUrl, episodeTitle, durationSec } = req.body as {
+    transcriptUrl: string;
+    episodeTitle: string;
+    durationSec: number;
+  };
+
+  if (!transcriptUrl) {
+    res.status(400).json({ error: 'Missing transcriptUrl' });
+    return;
+  }
+
+  try {
+    // Step 1: Fetch transcript HTML
+    const htmlRes = await fetch(transcriptUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'text/html',
+      },
+    });
+    if (!htmlRes.ok) throw new Error(`Transcript fetch failed: ${htmlRes.status}`);
+    const html = await htmlRes.text();
+
+    // Step 2: Parse into numbered lines
+    const lines = parseTranscriptToLines(html);
+    const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+
+    // Step 3: Build numbered transcript for LLM
+    const numberedText = lines.map(l => {
+      const spk = l.speaker ? `${l.speaker}: ` : '';
+      return `[${l.lineNum}] ${spk}${l.text}`;
+    }).join('\n');
+
+    const systemPrompt = `You are an ad-block detector for podcast transcripts. You read the full transcript and identify contiguous blocks of lines that are advertisements, sponsor reads, funding credits, or promotional content — NOT editorial content.
+
+IMPORTANT: You are looking for OBVIOUS ad blocks. These are contiguous runs of lines where the content is clearly commercial/promotional. Typical patterns:
+- "Support for this podcast comes from..."
+- "This message comes from..."
+- Sponsor descriptions with calls-to-action ("visit example.com", "use promo code...")
+- NPR funding credits ("Support for NPR comes from...")
+- Show promos ("Coming up on..." for a different show)
+
+These ad blocks are typically 1-5 lines long and there are at most a few per episode. They are VERY obvious — a human would spot them instantly.
+
+Do NOT flag: regular editorial discussion about economics/business/companies, interview content, the host's own commentary, or transitions between topics.
+
+Return ONLY valid JSON.`;
+
+    const userPrompt = `Here is the full transcript of "${episodeTitle || 'Unknown Episode'}" with numbered lines.
+Find all ad blocks — contiguous ranges of lines that are ads/sponsors/funding credits.
+
+For each block, return the start and end line numbers (inclusive) and a short reason.
+
+TRANSCRIPT:
+${numberedText}
+
+Return JSON:
+{
+  "adBlocks": [
+    { "startLine": number, "endLine": number, "reason": "short explanation" }
+  ]
+}`;
+
+    // Step 4: Call LLM (or fallback)
+    let adBlocks: SandboxAdBlock[] = [];
+    let llmRaw = '';
+
+    if (LLM_API_KEY) {
+      const result = await chatJSON<{ adBlocks: Array<{ startLine: number; endLine: number; reason: string }> }>({
+        provider: LLM_PROVIDER,
+        model: LLM_MODEL,
+        apiKey: LLM_API_KEY,
+        baseUrl: LLM_BASE_URL,
+        temperature: 0,
+        maxTokens: 2048,
+        maxRetries: 2,
+        systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      });
+
+      llmRaw = JSON.stringify(result, null, 2);
+      adBlocks = (result.adBlocks || []).map(b => ({
+        startLine: b.startLine,
+        endLine: b.endLine,
+        reason: b.reason,
+        textPreview: lines
+          .filter(l => l.lineNum >= b.startLine && l.lineNum <= b.endLine)
+          .map(l => l.text)
+          .join(' ')
+          .slice(0, 300),
+        startWord: 0,
+        endWord: 0,
+        startTimeSec: 0,
+        endTimeSec: 0,
+      }));
+    } else {
+      // No-key heuristic: scan for obvious patterns
+      llmRaw = '(no LLM key — using keyword heuristic)';
+      for (const l of lines) {
+        const lower = l.text.toLowerCase();
+        if (
+          lower.includes('support for this podcast') ||
+          lower.includes('this message comes from') ||
+          lower.includes('support for npr') ||
+          lower.match(/sponsor(?:ed by|s?\b)/)
+        ) {
+          adBlocks.push({
+            startLine: l.lineNum,
+            endLine: l.lineNum,
+            reason: 'Keyword match (no LLM): ' + l.text.slice(0, 60),
+            textPreview: l.text.slice(0, 300),
+            startWord: 0,
+            endWord: 0,
+            startTimeSec: 0,
+            endTimeSec: 0,
+          });
+        }
+      }
+    }
+
+    // Step 5: Map to timestamps
+    const dur = durationSec || 0;
+    adBlocks = mapAdBlocksToTimestamps(adBlocks, lines, dur);
+
+    // Build skip map
+    const skipMap = adBlocks.map(b => ({
+      startTime: Math.round(b.startTimeSec),
+      endTime: Math.round(b.endTimeSec),
+      type: 'mid-roll' as const,
+      confidence: LLM_API_KEY ? 0.9 : 0.5,
+      reason: b.reason,
+    }));
+
+    const totalAdWords = adBlocks.reduce((s, b) => s + (b.endWord - b.startWord), 0);
+    const totalAdTimeSec = adBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
+
+    res.json({
+      episode: { title: episodeTitle, durationSec: dur, transcriptUrl },
+      transcript: { lineCount: lines.length, totalWords, lines },
+      adBlocks,
+      summary: {
+        totalAdBlocks: adBlocks.length,
+        totalAdWords,
+        totalAdTimeSec: Math.round(totalAdTimeSec),
+        contentTimeSec: Math.round(dur - totalAdTimeSec),
+        adWordPercent: totalWords > 0 ? +((totalAdWords / totalWords) * 100).toFixed(1) : 0,
+        strategy: LLM_API_KEY ? `llm-${LLM_MODEL}` : 'keyword-heuristic',
+      },
+      prompts: { system: systemPrompt, user: userPrompt },
+      llmResponse: llmRaw,
+      skipMap,
+    });
+  } catch (err: any) {
+    console.error('Sandbox analyze error:', err.message);
+    res.status(500).json({ error: 'Sandbox analysis failed', detail: err.message });
+  }
+});
+
 // ─── Audio Proxy (to bypass CORS and tracking redirects) ────────────────────
 
 app.get('/api/audio', async (req, res) => {
