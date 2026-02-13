@@ -1,10 +1,14 @@
 # Bilko Flow: LLM-Powered Ad Detection Pipeline
 
+> **NOTE:** This document describes the original 6-step flow.
+> See [clarified-flow.md](./clarified-flow.md) for the updated 9-step
+> audio-streaming-first architecture.
+
 Every post-episode-selection step uses bilko-flow LLM components (`chatJSON`).
 No regex. No word-count heuristics. Three chained LLM calls that actually
 understand podcast content.
 
-## Pipeline Overview
+## Pipeline Overview (Original — Superseded)
 
 ```
 Step 1: Fetch RSS Feed             (http.request)
