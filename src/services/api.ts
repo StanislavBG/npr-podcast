@@ -133,6 +133,7 @@ export interface SandboxResult {
   episode: { title: string; durationSec: number; transcriptUrl: string };
   rawHtml: { length: number; pTagCount: number; snippet: string };
   transcript: { lineCount: number; totalWords: number; lines: SandboxLine[] };
+  transcriptSource?: string;
   adBlocks: SandboxAdBlock[];
   summary: {
     totalAdBlocks: number;

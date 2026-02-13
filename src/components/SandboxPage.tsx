@@ -14,93 +14,121 @@ interface Props {
   onBack: () => void;
 }
 
-// ─── Step definitions ────────────────────────────────────────────────────────
+// ─── Step definitions (mirrors podcastFlow.ts pipeline) ─────────────────────
 
 interface StepDef {
   id: string;
   label: string;
   subtitle: string;
+  type: string;
 }
 
 const STEPS: StepDef[] = [
-  { id: 'episode',    label: 'Episode',           subtitle: 'What we\'re analyzing' },
-  { id: 'raw-html',   label: 'Raw HTML',          subtitle: 'What NPR returned' },
-  { id: 'parsed',     label: 'Parsed Lines',      subtitle: 'After HTML parsing' },
-  { id: 'qa-diag',    label: 'QA Diagnostics',    subtitle: 'The math doesn\'t add up?' },
-  { id: 'sys-prompt', label: 'System Prompt',      subtitle: 'LLM instructions' },
-  { id: 'usr-prompt', label: 'User Prompt',        subtitle: 'What we send to the LLM' },
-  { id: 'llm-resp',   label: 'LLM Response',       subtitle: 'What the LLM returned' },
-  { id: 'ad-blocks',  label: 'Ad Blocks',          subtitle: 'Detected ad segments' },
-  { id: 'transcript', label: 'Annotated Transcript', subtitle: 'Full transcript + ad markers' },
-  { id: 'skip-map',   label: 'Skip Map',           subtitle: 'Final player JSON' },
+  { id: 'fetch-rss',             label: 'Fetch RSS Feed',       subtitle: 'Pull podcast feed',         type: 'http.request' },
+  { id: 'parse-episodes',       label: 'Parse Episodes',        subtitle: 'Extract episode metadata',  type: 'http.request' },
+  { id: 'fetch-transcript',     label: 'Fetch Transcript',      subtitle: 'Get transcript content',    type: 'http.request' },
+  { id: 'llm-parse-transcript', label: 'LLM Parse Transcript',  subtitle: 'Extract structured segments', type: 'ai.generate-text' },
+  { id: 'llm-detect-ads',       label: 'LLM Detect Ads',        subtitle: 'Identify ad time ranges',   type: 'ai.generate-text' },
+  { id: 'llm-prepare-player',   label: 'LLM Prepare Player',    subtitle: 'Build skip-map + summary',  type: 'ai.summarize' },
 ];
 
 // ─── Step content renderers ──────────────────────────────────────────────────
 
-function StepEpisode({ result }: { result: SandboxResult }) {
+function StepFetchRss({ podcastName, podcastId }: { podcastName: string; podcastId: string }) {
+  return (
+    <div className="sb-step-body">
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Podcast</span><span className="sb-kv-v">{podcastName}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Feed ID</span><span className="sb-kv-v">{podcastId}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Endpoint</span><span className="sb-kv-v">/api/podcast/{podcastId}/episodes</span></div>
+      </div>
+      <div className="sb-qa-ok">
+        RSS feed fetched successfully.
+      </div>
+    </div>
+  );
+}
+
+function StepParseEpisodes({ result }: { result: SandboxResult }) {
   const { episode, summary } = result;
   return (
     <div className="sb-step-body">
       <h2 className="sb-step-heading">{episode.title}</h2>
       <div className="sb-kv-grid">
         <div className="sb-kv"><span className="sb-kv-k">Duration</span><span className="sb-kv-v">{formatTime(episode.durationSec)} ({episode.durationSec}s)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Transcript URL</span><span className="sb-kv-v sb-kv-url">{episode.transcriptUrl}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Transcript URL</span><span className="sb-kv-v sb-kv-url">{episode.transcriptUrl || '(none)'}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Strategy</span><span className="sb-kv-v">{summary.strategy}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Lines</span><span className="sb-kv-v">{result.transcript.lineCount}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Words</span><span className="sb-kv-v">{result.transcript.totalWords.toLocaleString()}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Ad blocks found</span><span className="sb-kv-v">{summary.totalAdBlocks}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Ad word %</span><span className="sb-kv-v">{summary.adWordPercent}%</span></div>
       </div>
-
       <Timeline result={result} />
     </div>
   );
 }
 
-function StepRawHtml({ result }: { result: SandboxResult }) {
-  const { rawHtml } = result;
-  return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        <strong>QA Check:</strong> Does the HTML actually contain transcript paragraphs?
-        If NPR changed their page structure, the parser won't find &lt;p&gt; tags.
-      </div>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">HTML size</span><span className="sb-kv-v">{(rawHtml.length / 1024).toFixed(1)} KB ({rawHtml.length.toLocaleString()} chars)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">&lt;p&gt; tags found</span><span className="sb-kv-v">{rawHtml.pTagCount}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Lines parsed</span><span className="sb-kv-v">{result.transcript.lineCount}</span></div>
-      </div>
-      {rawHtml.pTagCount === 0 && (
-        <div className="sb-qa-alert">
-          Zero &lt;p&gt; tags found. The transcript HTML may have changed structure,
-          or NPR may be blocking the request. Check the snippet below.
-        </div>
-      )}
-      <h3 className="sb-sub-heading">HTML Snippet (first 2KB)</h3>
-      <pre className="sb-code-block">{rawHtml.snippet}</pre>
-    </div>
-  );
-}
+function StepFetchTranscript({ result }: { result: SandboxResult }) {
+  const { rawHtml, transcript, qa } = result;
+  const source = result.transcriptSource || 'html';
+  const sourceLabels: Record<string, string> = {
+    'audio-transcription': 'Audio Transcription (speech-to-text)',
+    'srt': 'SRT subtitle file',
+    'vtt': 'VTT subtitle file',
+    'json': 'JSON transcript',
+    'html': 'HTML page scraping',
+  };
 
-function StepParsedLines({ result }: { result: SandboxResult }) {
-  const { lines } = result.transcript;
+  const { lines } = transcript;
   const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
   const dur = result.episode.durationSec;
 
   return (
     <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        <strong>QA Check:</strong> Scan these lines as a human. Can you spot any
-        "Support for this podcast comes from..." or funding credits? If you can see them
-        but the LLM missed them, the problem is in the prompt. If you can't see them,
-        the ads are dynamically inserted audio — not in the transcript at all.
-      </div>
       <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Total lines</span><span className="sb-kv-v">{lines.length}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Source</span><span className="sb-kv-v">{sourceLabels[source] || source}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Content size</span><span className="sb-kv-v">{(rawHtml.length / 1024).toFixed(1)} KB ({rawHtml.length.toLocaleString()} chars)</span></div>
+        {source === 'html' && (
+          <div className="sb-kv"><span className="sb-kv-k">&lt;p&gt; tags found</span><span className="sb-kv-v">{rawHtml.pTagCount}</span></div>
+        )}
+        <div className="sb-kv"><span className="sb-kv-k">Lines parsed</span><span className="sb-kv-v">{lines.length}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{totalWords.toLocaleString()}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Speakers detected</span><span className="sb-kv-v">{new Set(lines.filter(l => l.speaker).map(l => l.speaker)).size}</span></div>
       </div>
+
+      {source === 'html' && rawHtml.pTagCount === 0 && (
+        <div className="sb-qa-alert">
+          Zero &lt;p&gt; tags found. The transcript HTML may have changed structure,
+          or NPR may be blocking the request.
+        </div>
+      )}
+
+      {source === 'audio-transcription' && (
+        <div className="sb-qa-ok">
+          Audio transcription captures dynamic ads injected into the audio stream
+          that don't appear in text transcripts.
+        </div>
+      )}
+
+      {/* QA: Duration vs speech math */}
+      <h3 className="sb-sub-heading">Duration vs Speech Math</h3>
+      <div className="sb-qa-math">
+        <div className="sb-qa-row">
+          <span className="sb-qa-label">Audio duration</span>
+          <span className="sb-qa-val">{formatTime(qa.audioDurationSec)} ({qa.audioDurationSec}s)</span>
+        </div>
+        <div className="sb-qa-row">
+          <span className="sb-qa-label">Transcript words</span>
+          <span className="sb-qa-val">{qa.transcriptWords.toLocaleString()}</span>
+        </div>
+        <div className="sb-qa-row">
+          <span className="sb-qa-label">Expected speech @ {qa.speechRateWpm} wpm</span>
+          <span className="sb-qa-val">{formatTime(qa.expectedSpeechSec)} ({qa.expectedSpeechSec}s)</span>
+        </div>
+        <div className="sb-qa-row sb-qa-highlight">
+          <span className="sb-qa-label">Unaccounted time (implied ads)</span>
+          <span className="sb-qa-val">{formatTime(qa.impliedAdTimeSec)} ({qa.impliedAdTimeSec}s)</span>
+        </div>
+      </div>
+
+      {/* Parsed lines */}
+      <h3 className="sb-sub-heading">Parsed Lines</h3>
       <div className="sb-parsed-lines">
         {lines.map(l => {
           const approxTime = dur > 0 && totalWords > 0
@@ -123,150 +151,62 @@ function StepParsedLines({ result }: { result: SandboxResult }) {
   );
 }
 
-function StepQaDiagnostics({ result }: { result: SandboxResult }) {
-  const { qa, summary } = result;
-  const gap = qa.impliedAdTimeSec;
-  const gapPercent = qa.audioDurationSec > 0
-    ? ((gap / qa.audioDurationSec) * 100).toFixed(1)
-    : '0';
+function StepLlmParseTranscript({ result }: { result: SandboxResult }) {
+  const { lines } = result.transcript;
+  const speakers = new Set(lines.filter(l => l.speaker).map(l => l.speaker));
 
   return (
     <div className="sb-step-body">
       <div className="sb-qa-callout">
-        <strong>The core question:</strong> NPR uses Megaphone for dynamic ad insertion.
-        The transcript only contains editorial text — ads are injected into the audio
-        stream separately. So the transcript will <em>never</em> contain the actual ad copy
-        (Geico, Squarespace, etc). Only "funding credits" like "Support for NPR comes from..."
-        appear in the text.
+        <strong>LLM extracts structured segments</strong> with speaker attribution
+        from the raw transcript content.
       </div>
-
-      <h3 className="sb-sub-heading">Duration vs Speech Math</h3>
-      <div className="sb-qa-math">
-        <div className="sb-qa-row">
-          <span className="sb-qa-label">Audio duration</span>
-          <span className="sb-qa-val">{formatTime(qa.audioDurationSec)} ({qa.audioDurationSec}s)</span>
-        </div>
-        <div className="sb-qa-row">
-          <span className="sb-qa-label">Transcript words</span>
-          <span className="sb-qa-val">{qa.transcriptWords.toLocaleString()}</span>
-        </div>
-        <div className="sb-qa-row">
-          <span className="sb-qa-label">Expected speech @ {qa.speechRateWpm} wpm</span>
-          <span className="sb-qa-val">{formatTime(qa.expectedSpeechSec)} ({qa.expectedSpeechSec}s)</span>
-        </div>
-        <div className="sb-qa-row sb-qa-highlight">
-          <span className="sb-qa-label">Unaccounted time (implied ads)</span>
-          <span className="sb-qa-val">{formatTime(gap)} ({gap}s = {gapPercent}%)</span>
-        </div>
-        <div className="sb-qa-row">
-          <span className="sb-qa-label">LLM-detected ad time</span>
-          <span className="sb-qa-val">{summary.totalAdTimeSec}s</span>
-        </div>
-      </div>
-
-      <h3 className="sb-sub-heading">Speaker Breakdown</h3>
       <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Lines with speaker</span><span className="sb-kv-v">{qa.linesWithSpeaker}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Lines without speaker</span><span className="sb-kv-v">{qa.linesWithoutSpeaker}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Total lines</span><span className="sb-kv-v">{lines.length}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Lines with speaker</span><span className="sb-kv-v">{result.qa.linesWithSpeaker}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Lines without speaker</span><span className="sb-kv-v">{result.qa.linesWithoutSpeaker}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Unique speakers</span><span className="sb-kv-v">{speakers.size}</span></div>
       </div>
 
-      {gap > 30 && summary.totalAdTimeSec === 0 && (
-        <div className="sb-qa-alert">
-          There's {gap}s of unaccounted time but zero ad blocks were found in the transcript.
-          This strongly suggests the ads are dynamically inserted audio that doesn't
-          appear in the transcript text at all. The LLM can only find what's actually
-          written in the transcript.
-        </div>
+      {speakers.size > 0 && (
+        <>
+          <h3 className="sb-sub-heading">Speakers</h3>
+          <div className="sb-kv-grid">
+            {[...speakers].map(s => (
+              <div key={s} className="sb-kv">
+                <span className="sb-kv-k">{s}</span>
+                <span className="sb-kv-v">{lines.filter(l => l.speaker === s).length} lines</span>
+              </div>
+            ))}
+          </div>
+        </>
       )}
 
-      {gap < 15 && (
-        <div className="sb-qa-ok">
-          Audio duration closely matches expected speech time. This episode may have
-          minimal or no dynamically inserted ads.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function StepSystemPrompt({ result }: { result: SandboxResult }) {
-  return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        <strong>QA Check:</strong> Does the system prompt correctly describe what to look for?
-        Are the patterns listed comprehensive? Should we add more patterns or change the instructions?
-      </div>
+      <h3 className="sb-sub-heading">System Prompt</h3>
       <pre className="sb-code-block sb-prompt-text">{result.prompts.system}</pre>
     </div>
   );
 }
 
-function StepUserPrompt({ result }: { result: SandboxResult }) {
-  const lineCount = (result.prompts.user.match(/\n/g) || []).length + 1;
-  const charCount = result.prompts.user.length;
-  return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        <strong>QA Check:</strong> Is the full transcript included? Is anything truncated?
-        The LLM can only detect ads in lines it can see.
-      </div>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Prompt size</span><span className="sb-kv-v">{(charCount / 1024).toFixed(1)} KB ({charCount.toLocaleString()} chars)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Lines in prompt</span><span className="sb-kv-v">{lineCount}</span></div>
-      </div>
-      <pre className="sb-code-block sb-prompt-text">{result.prompts.user}</pre>
-    </div>
-  );
-}
-
-function StepLlmResponse({ result }: { result: SandboxResult }) {
+function StepLlmDetectAds({ result }: { result: SandboxResult }) {
+  const { adBlocks, episode, summary } = result;
   let parsed: any = null;
   try { parsed = JSON.parse(result.llmResponse); } catch { /* not JSON */ }
 
   return (
     <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        <strong>QA Check:</strong> Did the LLM return valid JSON? Did it find any adBlocks?
-        If the array is empty, the LLM didn't see anything that matched the ad patterns
-        in the transcript text.
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Ad blocks found</span><span className="sb-kv-v">{summary.totalAdBlocks}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Ad word %</span><span className="sb-kv-v">{summary.adWordPercent}%</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">LLM-detected ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
       </div>
-      {parsed && (
-        <div className="sb-kv-grid">
-          <div className="sb-kv">
-            <span className="sb-kv-k">adBlocks returned</span>
-            <span className="sb-kv-v">{parsed.adBlocks?.length ?? 'N/A'}</span>
-          </div>
-        </div>
-      )}
-      {parsed && parsed.adBlocks?.length === 0 && (
-        <div className="sb-qa-alert">
-          The LLM returned zero ad blocks. Either the transcript genuinely contains no
-          ad-like content (all ads are dynamic audio injection), or the prompt needs tuning.
-        </div>
-      )}
-      <pre className="sb-code-block sb-json-text">{result.llmResponse}</pre>
-    </div>
-  );
-}
 
-function StepAdBlocks({ result }: { result: SandboxResult }) {
-  const { adBlocks, episode } = result;
-  return (
-    <div className="sb-step-body">
       {adBlocks.length === 0 ? (
-        <>
-          <div className="sb-qa-alert">
-            No ad blocks detected. This is the key finding for QA.
-            Check the "QA Diagnostics" step to see if there's unaccounted time
-            in the audio that suggests dynamic ad insertion.
-          </div>
-          <div className="sb-qa-callout">
-            <strong>Why this happens:</strong> NPR uses Megaphone to dynamically
-            insert ads into the audio stream. These ads are NOT part of the editorial
-            transcript. The transcript only contains what the hosts/guests actually said,
-            plus occasional "funding credits" like "Support for NPR comes from...".
-          </div>
-        </>
+        <div className="sb-qa-alert">
+          No ad blocks detected. The transcript may not contain any ad-like content,
+          or ads are dynamically inserted into the audio stream only.
+        </div>
       ) : (
         <>
           <Timeline result={result} />
@@ -277,33 +217,50 @@ function StepAdBlocks({ result }: { result: SandboxResult }) {
           </div>
         </>
       )}
-    </div>
-  );
-}
 
-function StepAnnotatedTranscript({ result }: { result: SandboxResult }) {
-  return (
-    <div className="sb-step-body">
+      {/* Annotated transcript */}
+      <h3 className="sb-sub-heading">Annotated Transcript</h3>
       <div className="sb-qa-callout">
-        <strong>QA Check:</strong> Read through the transcript. Lines highlighted in red
-        are detected ad blocks. Can you spot any ad-like content the LLM missed?
-        Look for: "Support for...", "This message comes from...", sponsor names, promo codes.
+        Lines highlighted in red are detected ad blocks. Scan for any the LLM may have missed.
       </div>
       <TranscriptViewer
         lines={result.transcript.lines}
         adBlocks={result.adBlocks}
         durationSec={result.episode.durationSec}
       />
+
+      {/* LLM response detail */}
+      <h3 className="sb-sub-heading">User Prompt</h3>
+      <pre className="sb-code-block sb-prompt-text">{result.prompts.user}</pre>
+
+      <h3 className="sb-sub-heading">Raw LLM Response</h3>
+      {parsed && parsed.adBlocks?.length === 0 && (
+        <div className="sb-qa-alert">
+          The LLM returned zero ad blocks.
+        </div>
+      )}
+      <pre className="sb-code-block sb-json-text">{result.llmResponse}</pre>
     </div>
   );
 }
 
-function StepSkipMap({ result }: { result: SandboxResult }) {
+function StepLlmPreparePlayer({ result }: { result: SandboxResult }) {
+  const { summary } = result;
   return (
     <div className="sb-step-body">
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Total ad blocks</span><span className="sb-kv-v">{summary.totalAdBlocks}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Content time</span><span className="sb-kv-v">{summary.contentTimeSec}s</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Strategy</span><span className="sb-kv-v">{summary.strategy}</span></div>
+      </div>
+
+      <Timeline result={result} />
+
+      <h3 className="sb-sub-heading">Skip Map (Player JSON)</h3>
       <div className="sb-qa-callout">
-        <strong>Final output:</strong> This JSON is what the audio player uses to auto-skip.
-        Each entry defines a time range to skip, a confidence score, and the reason.
+        This JSON is what the audio player uses to auto-skip ad segments.
+        Each entry defines a time range, confidence score, and reason.
       </div>
       {result.skipMap.length === 0 && (
         <div className="sb-qa-alert">
@@ -451,6 +408,7 @@ export function SandboxPage({ onBack }: Props) {
   const [status, setStatus] = useState('Loading podcasts...');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SandboxResult | null>(null);
+  const [podcastInfo, setPodcastInfo] = useState<{ name: string; id: string }>({ name: '', id: '' });
   const contentRef = useRef<HTMLDivElement>(null);
 
   // Auto-fetch single podcast + episode and analyze on mount
@@ -460,7 +418,7 @@ export function SandboxPage({ onBack }: Props) {
     async function run() {
       try {
         // 1. Fetch podcasts
-        setStatus('Loading podcasts...');
+        setStatus('Fetching RSS feed...');
         let podcasts;
         try {
           podcasts = await fetchPodcasts();
@@ -471,7 +429,8 @@ export function SandboxPage({ onBack }: Props) {
 
         // Pick first podcast
         const podcastId = podcasts[0].id;
-        setStatus(`Loading episodes for ${podcasts[0].name}...`);
+        setPodcastInfo({ name: podcasts[0].name, id: podcastId });
+        setStatus(`Parsing episodes for ${podcasts[0].name}...`);
 
         // 2. Fetch episodes
         const data = await fetchEpisodes(podcastId);
@@ -485,7 +444,7 @@ export function SandboxPage({ onBack }: Props) {
           return;
         }
 
-        setStatus(`Analyzing: ${ep.title}...`);
+        setStatus(`Fetching transcript: ${ep.title}...`);
 
         // 3. Run analysis (prefer audio transcription when audioUrl available)
         const res = await sandboxAnalyze(
@@ -593,20 +552,17 @@ export function SandboxPage({ onBack }: Props) {
           <div className="sb-step-content" ref={contentRef}>
             <div className="sb-step-header">
               <span className="sb-step-badge">Step {step + 1}</span>
+              <span className="sb-step-type">{current.type}</span>
               <h2 className="sb-step-title">{current.label}</h2>
               <p className="sb-step-subtitle">{current.subtitle}</p>
             </div>
 
-            {step === 0 && <StepEpisode result={result} />}
-            {step === 1 && <StepRawHtml result={result} />}
-            {step === 2 && <StepParsedLines result={result} />}
-            {step === 3 && <StepQaDiagnostics result={result} />}
-            {step === 4 && <StepSystemPrompt result={result} />}
-            {step === 5 && <StepUserPrompt result={result} />}
-            {step === 6 && <StepLlmResponse result={result} />}
-            {step === 7 && <StepAdBlocks result={result} />}
-            {step === 8 && <StepAnnotatedTranscript result={result} />}
-            {step === 9 && <StepSkipMap result={result} />}
+            {step === 0 && <StepFetchRss podcastName={podcastInfo.name} podcastId={podcastInfo.id} />}
+            {step === 1 && <StepParseEpisodes result={result} />}
+            {step === 2 && <StepFetchTranscript result={result} />}
+            {step === 3 && <StepLlmParseTranscript result={result} />}
+            {step === 4 && <StepLlmDetectAds result={result} />}
+            {step === 5 && <StepLlmPreparePlayer result={result} />}
           </div>
 
           {/* Bottom nav */}
