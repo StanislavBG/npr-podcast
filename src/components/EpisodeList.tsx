@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useMemo } from 'react';
 import type { Episode } from '../services/api';
 
 interface Props {
@@ -8,48 +8,107 @@ interface Props {
   onSelect: (episode: Episode) => void;
 }
 
+/** Group episodes by date label, e.g. "Today", "Yesterday", "Feb 10" */
+function groupByDay(episodes: Episode[]): { label: string; eps: Episode[] }[] {
+  const now = new Date();
+  const todayStr = now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = yesterday.toDateString();
+
+  const map = new Map<string, Episode[]>();
+  const labels = new Map<string, string>();
+
+  for (const ep of episodes) {
+    const d = ep.pubDate ? new Date(ep.pubDate) : null;
+    const key = d ? d.toDateString() : 'Unknown';
+    if (!map.has(key)) {
+      map.set(key, []);
+      if (key === todayStr) labels.set(key, 'Today');
+      else if (key === yesterdayStr) labels.set(key, 'Yesterday');
+      else if (d)
+        labels.set(
+          key,
+          d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        );
+      else labels.set(key, 'Unknown');
+    }
+    map.get(key)!.push(ep);
+  }
+
+  return Array.from(map.entries()).map(([key, eps]) => ({
+    label: labels.get(key) || key,
+    eps,
+  }));
+}
+
 export function EpisodeList({ episodes, loading, selectedId, onSelect }: Props) {
+  const scrollRef = useRef<HTMLDivElement>(null);
   const selectedRef = useRef<HTMLButtonElement>(null);
+
+  // Take latest 3 episodes per the request
+  const latest = useMemo(() => episodes.slice(0, 3), [episodes]);
+  const groups = useMemo(() => groupByDay(latest), [latest]);
 
   useEffect(() => {
     selectedRef.current?.scrollIntoView({
       behavior: 'smooth',
       block: 'nearest',
+      inline: 'nearest',
     });
   }, [selectedId]);
 
-  if (loading) return <div className="episodes"><div className="dot" /></div>;
+  if (loading)
+    return (
+      <div className="episodes-h">
+        <div className="dot" />
+      </div>
+    );
   if (!episodes.length) return null;
 
   return (
-    <div className="episodes">
-      {episodes.map((ep) => {
-        const on = selectedId === ep.id;
-        const date = ep.pubDate
-          ? new Date(ep.pubDate).toLocaleDateString('en-US', {
-              month: 'short',
-              day: 'numeric',
-            })
-          : '';
+    <div className="episodes-h-wrapper">
+      <div className="episodes-h" ref={scrollRef}>
+        {groups.map((group) => (
+          <div key={group.label} className="ep-day-group">
+            <div className="ep-day-label">{group.label}</div>
+            <div className="ep-day-tiles">
+              {group.eps.map((ep) => {
+                const on = selectedId === ep.id;
+                const time = ep.pubDate
+                  ? new Date(ep.pubDate).toLocaleTimeString('en-US', {
+                      hour: 'numeric',
+                      minute: '2-digit',
+                    })
+                  : '';
 
-        return (
-          <button
-            key={ep.id}
-            ref={on ? selectedRef : undefined}
-            className={`ep ${on ? 'on' : ''}`}
-            onClick={() => onSelect(ep)}
-          >
-            <div className="ep-meta">
-              {date && <span className="ep-date">{date}</span>}
-              {ep.duration && <span className="ep-duration">{ep.duration}</span>}
+                return (
+                  <button
+                    key={ep.id}
+                    ref={on ? selectedRef : undefined}
+                    className={`ep-tile ${on ? 'on' : ''}`}
+                    onClick={() => onSelect(ep)}
+                  >
+                    <div className="ep-tile-meta">
+                      {time && <span className="ep-tile-time">{time}</span>}
+                      {ep.duration && (
+                        <span className="ep-tile-dur">{ep.duration}</span>
+                      )}
+                    </div>
+                    <span className="ep-tile-title">{ep.title}</span>
+                    {ep.description && (
+                      <span className="ep-tile-desc">{ep.description}</span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
-            <span className="ep-title">{ep.title}</span>
-            {ep.description && (
-              <span className="ep-desc">{ep.description}</span>
-            )}
-          </button>
-        );
-      })}
+          </div>
+        ))}
+      </div>
+      {episodes.length > 3 && (
+        <div className="ep-swipe-hint">Swipe for more episodes</div>
+      )}
     </div>
   );
 }
