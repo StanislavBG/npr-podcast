@@ -25,8 +25,8 @@ app.get('/health', (_req, res) => {
 
 const LLM_PROVIDER = (process.env.BILKO_LLM_PROVIDER || 'openai') as LLMProvider;
 const LLM_MODEL = process.env.BILKO_LLM_MODEL || 'gpt-4o-mini';
-const LLM_API_KEY = process.env.BILKO_LLM_API_KEY || '';
-const LLM_BASE_URL = process.env.BILKO_LLM_BASE_URL || undefined;
+const LLM_API_KEY = process.env.BILKO_LLM_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY || '';
+const LLM_BASE_URL = process.env.BILKO_LLM_BASE_URL || process.env.AI_INTEGRATIONS_OPENAI_BASE_URL || undefined;
 
 // Register a Claude adapter (handles Anthropic API format)
 function createClaudeAdapter() {
@@ -100,7 +100,10 @@ function createOpenAIAdapter() {
       body.response_format = options.responseFormat;
     }
 
-    const res = await fetch(options.baseUrl || 'https://api.openai.com/v1/chat/completions', {
+    const baseUrl = options.baseUrl
+      ? (options.baseUrl.endsWith('/chat/completions') ? options.baseUrl : `${options.baseUrl}/chat/completions`)
+      : 'https://api.openai.com/v1/chat/completions';
+    const res = await fetch(baseUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
