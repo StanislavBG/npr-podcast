@@ -670,6 +670,8 @@ app.post('/api/sandbox/analyze', async (req, res) => {
     });
     if (!htmlRes.ok) throw new Error(`Transcript fetch failed: ${htmlRes.status}`);
     const html = await htmlRes.text();
+    const rawHtmlLength = html.length;
+    const pTagCount = (html.match(/<p[^>]*>/gi) || []).length;
 
     // Step 2: Parse into numbered lines
     const lines = parseTranscriptToLines(html);
@@ -784,8 +786,18 @@ Return JSON:
     const totalAdWords = adBlocks.reduce((s, b) => s + (b.endWord - b.startWord), 0);
     const totalAdTimeSec = adBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
 
+    // Compute QA diagnostics
+    const speechRateWpm = 155;
+    const expectedSpeechSec = totalWords > 0 ? (totalWords / speechRateWpm) * 60 : 0;
+    const impliedAdTimeSec = Math.max(0, dur - expectedSpeechSec);
+
     res.json({
       episode: { title: episodeTitle, durationSec: dur, transcriptUrl },
+      rawHtml: {
+        length: rawHtmlLength,
+        pTagCount,
+        snippet: html.slice(0, 2000),
+      },
       transcript: { lineCount: lines.length, totalWords, lines },
       adBlocks,
       summary: {
@@ -795,6 +807,15 @@ Return JSON:
         contentTimeSec: Math.round(dur - totalAdTimeSec),
         adWordPercent: totalWords > 0 ? +((totalAdWords / totalWords) * 100).toFixed(1) : 0,
         strategy: LLM_API_KEY ? `llm-${LLM_MODEL}` : 'keyword-heuristic',
+      },
+      qa: {
+        expectedSpeechSec: Math.round(expectedSpeechSec),
+        impliedAdTimeSec: Math.round(impliedAdTimeSec),
+        speechRateWpm,
+        audioDurationSec: dur,
+        transcriptWords: totalWords,
+        linesWithSpeaker: lines.filter(l => l.speaker).length,
+        linesWithoutSpeaker: lines.filter(l => !l.speaker).length,
       },
       prompts: { system: systemPrompt, user: userPrompt },
       llmResponse: llmRaw,

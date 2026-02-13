@@ -125,6 +125,7 @@ export interface SandboxAdBlock {
 
 export interface SandboxResult {
   episode: { title: string; durationSec: number; transcriptUrl: string };
+  rawHtml: { length: number; pTagCount: number; snippet: string };
   transcript: { lineCount: number; totalWords: number; lines: SandboxLine[] };
   adBlocks: SandboxAdBlock[];
   summary: {
@@ -134,6 +135,15 @@ export interface SandboxResult {
     contentTimeSec: number;
     adWordPercent: number;
     strategy: string;
+  };
+  qa: {
+    expectedSpeechSec: number;
+    impliedAdTimeSec: number;
+    speechRateWpm: number;
+    audioDurationSec: number;
+    transcriptWords: number;
+    linesWithSpeaker: number;
+    linesWithoutSpeaker: number;
   };
   prompts: { system: string; user: string };
   llmResponse: string;
