@@ -7,6 +7,11 @@ export interface Podcast {
   name: string;
 }
 
+export interface PodcastTranscript {
+  url: string;
+  type: string;
+}
+
 export interface Episode {
   id: string;
   title: string;
@@ -16,6 +21,7 @@ export interface Episode {
   audioUrl: string;
   link: string;
   transcriptUrl: string | null;
+  podcastTranscripts: PodcastTranscript[];
 }
 
 // ─── Existing endpoints ─────────────────────────────────────────────────────
@@ -98,6 +104,80 @@ export async function llmPreparePlayback(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Unknown error' }));
     throw new Error(err.error || 'LLM prepare-playback failed');
+  }
+  return res.json();
+}
+
+// ─── Sandbox endpoint ────────────────────────────────────────────────────────
+
+export interface SandboxLine {
+  lineNum: number;
+  speaker: string;
+  text: string;
+  wordCount: number;
+  cumulativeWords: number;
+}
+
+export interface SandboxAdBlock {
+  startLine: number;
+  endLine: number;
+  reason: string;
+  textPreview: string;
+  startWord: number;
+  endWord: number;
+  startTimeSec: number;
+  endTimeSec: number;
+}
+
+export interface SandboxResult {
+  episode: { title: string; durationSec: number; transcriptUrl: string };
+  rawHtml: { length: number; pTagCount: number; snippet: string };
+  transcript: { lineCount: number; totalWords: number; lines: SandboxLine[] };
+  transcriptSource?: string;
+  adBlocks: SandboxAdBlock[];
+  summary: {
+    totalAdBlocks: number;
+    totalAdWords: number;
+    totalAdTimeSec: number;
+    contentTimeSec: number;
+    adWordPercent: number;
+    strategy: string;
+  };
+  qa: {
+    expectedSpeechSec: number;
+    impliedAdTimeSec: number;
+    speechRateWpm: number;
+    audioDurationSec: number;
+    transcriptWords: number;
+    linesWithSpeaker: number;
+    linesWithoutSpeaker: number;
+  };
+  prompts: { system: string; user: string };
+  llmResponse: string;
+  skipMap: Array<{
+    startTime: number;
+    endTime: number;
+    type: string;
+    confidence: number;
+    reason: string;
+  }>;
+}
+
+export async function sandboxAnalyze(
+  transcriptUrl: string,
+  episodeTitle: string,
+  durationSec: number,
+  podcastTranscripts?: PodcastTranscript[],
+  audioUrl?: string,
+): Promise<SandboxResult> {
+  const res = await fetch(`${BASE}/sandbox/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ transcriptUrl, episodeTitle, durationSec, podcastTranscripts, audioUrl }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || 'Sandbox analysis failed');
   }
   return res.json();
 }

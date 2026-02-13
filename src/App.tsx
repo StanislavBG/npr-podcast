@@ -3,6 +3,7 @@ import { PodcastSelector } from './components/PodcastSelector';
 import { EpisodeList } from './components/EpisodeList';
 import { Player } from './components/Player';
 import { FlowVisualizer } from './components/FlowVisualizer';
+import { SandboxPage } from './components/SandboxPage';
 import {
   fetchPodcasts,
   fetchEpisodes,
@@ -33,7 +34,12 @@ function setStep(
   };
 }
 
+function getInitialPage(): 'app' | 'sandbox' {
+  return window.location.pathname === '/sandbox' ? 'sandbox' : 'app';
+}
+
 export default function App() {
+  const [page, setPage] = useState<'app' | 'sandbox'>(getInitialPage);
   const [podcasts, setPodcasts] = useState<Podcast[]>([]);
   const [selected, setSelected] = useState('510325');
   const [episodes, setEpisodes] = useState<Episode[]>([]);
@@ -117,9 +123,35 @@ export default function App() {
 
     const durationSec = parseDuration(ep.duration);
 
+    // Step 1: Get transcript — prefer audio transcription, fall back to HTML
     let html = '';
-    if (ep.transcriptUrl) {
-      setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'running'));
+    let audioTranscriptText = '';
+    setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'running'));
+
+    // Try audio transcription first (captures dynamic ads in audio)
+    if (ep.audioUrl) {
+      try {
+        const transcribeRes = await fetch('/api/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audioUrl: ep.audioUrl }),
+        });
+        if (transcribeRes.ok) {
+          const transcription = await transcribeRes.json();
+          audioTranscriptText = transcription.text || '';
+          if (audioTranscriptText.length > 100) {
+            // Wrap the transcription as simple HTML paragraphs for the LLM pipeline
+            html = audioTranscriptText.split(/(?<=[.!?])\s+/).map((s: string) => `<p>${s}</p>`).join('\n');
+            setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'completed'));
+          }
+        }
+      } catch (err) {
+        console.warn('Audio transcription failed, falling back to HTML transcript:', err);
+      }
+    }
+
+    // Fall back to HTML transcript if audio transcription didn't work
+    if (!html && ep.transcriptUrl) {
       try {
         const result = await fetchTranscriptHtml(ep.transcriptUrl);
         html = result.html;
@@ -127,7 +159,7 @@ export default function App() {
       } catch {
         setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
       }
-    } else {
+    } else if (!html) {
       setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
     }
 
@@ -184,12 +216,36 @@ export default function App() {
     }
   }, []);
 
+  const goToSandbox = useCallback(() => {
+    window.history.pushState(null, '', '/sandbox');
+    setPage('sandbox');
+  }, []);
+
+  const goToApp = useCallback(() => {
+    window.history.pushState(null, '', '/');
+    setPage('app');
+  }, []);
+
+  // Handle browser back/forward
+  useEffect(() => {
+    const handler = () => setPage(getInitialPage());
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, []);
+
+  if (page === 'sandbox') {
+    return <SandboxPage onBack={goToApp} />;
+  }
+
   return (
     <div className="phone-frame">
       <div className="phone-notch" />
       <div className="shell">
         <header className="header">
           <h1 className="header-title">NPR Podcasts</h1>
+          <button className="header-sandbox-link" onClick={goToSandbox}>
+            Sandbox
+          </button>
         </header>
 
         <PodcastSelector
@@ -208,19 +264,6 @@ export default function App() {
               selectedId={episode?.id || null}
               onSelect={pick}
             />
-          )}
-
-          {playback && (
-            <div className="llm-summary">
-              <p className="summary-text">{playback.summary}</p>
-              {playback.topics.length > 0 && (
-                <div className="topic-tags">
-                  {playback.topics.map((t, i) => (
-                    <span key={i} className="topic-tag">{t}</span>
-                  ))}
-                </div>
-              )}
-            </div>
           )}
 
           <FlowVisualizer flowState={flow} />
