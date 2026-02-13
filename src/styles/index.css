@@ -151,6 +151,8 @@ button {
   overflow-x: auto;
   scrollbar-width: none;
   flex-shrink: 0;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
 }
 .shows::-webkit-scrollbar { display: none; }
 
@@ -165,6 +167,7 @@ button {
   background: var(--surface);
   transition: all 0.15s;
   white-space: nowrap;
+  touch-action: pan-x;
 }
 
 .show.on {
