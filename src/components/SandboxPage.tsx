@@ -487,12 +487,13 @@ export function SandboxPage({ onBack }: Props) {
 
         setStatus(`Analyzing: ${ep.title}...`);
 
-        // 3. Run analysis
+        // 3. Run analysis (prefer audio transcription when audioUrl available)
         const res = await sandboxAnalyze(
           ep.transcriptUrl!,
           ep.title,
           parseDuration(ep.duration),
           ep.podcastTranscripts,
+          ep.audioUrl || undefined,
         );
         if (cancelled) return;
 

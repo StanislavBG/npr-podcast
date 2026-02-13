@@ -123,9 +123,35 @@ export default function App() {
 
     const durationSec = parseDuration(ep.duration);
 
+    // Step 1: Get transcript — prefer audio transcription, fall back to HTML
     let html = '';
-    if (ep.transcriptUrl) {
-      setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'running'));
+    let audioTranscriptText = '';
+    setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'running'));
+
+    // Try audio transcription first (captures dynamic ads in audio)
+    if (ep.audioUrl) {
+      try {
+        const transcribeRes = await fetch('/api/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audioUrl: ep.audioUrl }),
+        });
+        if (transcribeRes.ok) {
+          const transcription = await transcribeRes.json();
+          audioTranscriptText = transcription.text || '';
+          if (audioTranscriptText.length > 100) {
+            // Wrap the transcription as simple HTML paragraphs for the LLM pipeline
+            html = audioTranscriptText.split(/(?<=[.!?])\s+/).map((s: string) => `<p>${s}</p>`).join('\n');
+            setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'completed'));
+          }
+        }
+      } catch (err) {
+        console.warn('Audio transcription failed, falling back to HTML transcript:', err);
+      }
+    }
+
+    // Fall back to HTML transcript if audio transcription didn't work
+    if (!html && ep.transcriptUrl) {
       try {
         const result = await fetchTranscriptHtml(ep.transcriptUrl);
         html = result.html;
@@ -133,7 +159,7 @@ export default function App() {
       } catch {
         setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
       }
-    } else {
+    } else if (!html) {
       setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
     }
 
