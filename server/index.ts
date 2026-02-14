@@ -960,14 +960,16 @@ function extractTranscriptSection(html: string): string {
   // Strategy 1: Look for known transcript container patterns
   // NPR uses various containers depending on the page version
   const containerPatterns = [
-    // Modern NPR transcript pages
-    /<div[^>]*\bclass="[^"]*\btranscript\b[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?:<\/div>|<div[^>]*\bclass="[^"]*\b(?:footer|related|sidebar)\b)/i,
-    // Older NPR transcript pages with storytext class
-    /<div[^>]*\bclass="[^"]*\bstorytext\b[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/i,
-    // Article body container
-    /<article[^>]*>([\s\S]*?)<\/article>/i,
     // Look for a section with id="transcript" or id="storytext"
     /<(?:div|section)[^>]*\bid=["'](?:transcript|storytext)["'][^>]*>([\s\S]*?)<\/(?:div|section)>/i,
+    // Modern NPR transcript pages — class contains "transcript"
+    /<div[^>]*\bclass="[^"]*\btranscript\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+    // Older NPR transcript pages with storytext class
+    /<div[^>]*\bclass="[^"]*\bstorytext\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+    // Article body container
+    /<article[^>]*>([\s\S]*?)<\/article>/i,
+    // Main content area
+    /<main[^>]*>([\s\S]*?)<\/main>/i,
   ];
 
   for (const pattern of containerPatterns) {
@@ -990,15 +992,27 @@ function extractTranscriptSection(html: string): string {
 
   if (speakerParagraphs.length >= 3) {
     // Find the region of HTML that contains these speaker paragraphs
-    const firstIdx = html.indexOf(speakerParagraphs[0]);
-    const lastParagraph = speakerParagraphs[speakerParagraphs.length - 1];
+    const firstIdx = html.indexOf(speakerParagraphs[0]!);
+    const lastParagraph = speakerParagraphs[speakerParagraphs.length - 1]!;
     const lastIdx = html.lastIndexOf(lastParagraph) + lastParagraph.length;
     if (firstIdx !== -1 && lastIdx > firstIdx) {
       return html.slice(firstIdx, lastIdx);
     }
   }
 
-  // Strategy 3: No container found — return the full HTML
+  // Strategy 3: Strip <header>, <footer>, <nav>, <aside>, <script>, <style> to reduce noise
+  const stripped = html
+    .replace(/<(?:header|footer|nav|aside)[^>]*>[\s\S]*?<\/(?:header|footer|nav|aside)>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+
+  // Check if stripping reduced noise meaningfully (still has <p> content)
+  const strippedPCount = (stripped.match(/<p[^>]*>/gi) || []).length;
+  if (strippedPCount >= 3) {
+    return stripped;
+  }
+
+  // Strategy 4: No container found — return the full HTML
   // (the p-tag extraction will still filter, but results may be noisy)
   return html;
 }
@@ -1035,16 +1049,41 @@ function isPageChrome(text: string): boolean {
   // Skip lines that contain JSON-LD or structured data
   if (text.includes('"@type"') || text.includes('"@context"') || text.includes('ImageObject')) return true;
 
-  // Skip navigation-like content
+  // Skip navigation-like content (exact line match)
   if (/^(?:Skip to|Keyboard shortcuts|Open Navigation|Close Navigation|Expand\/collapse)/i.test(text)) return true;
   if (/^(?:Home|News|Music|Culture|Podcasts & Shows|Search|Newsletters|NPR Shop)\s*$/i.test(text)) return true;
 
-  // Skip NPR page footer/header elements
+  // Skip NPR page footer/header elements (exact line match)
   if (/^(?:About NPR|Diversity|Support|Careers|Press|Ethics)\s*$/i.test(text)) return true;
   if (/^(?:LISTEN & FOLLOW|NPR App|Apple Podcasts|Spotify|Amazon Music|iHeart Radio|YouTube Music)\s*$/i.test(text)) return true;
 
+  // Skip lines CONTAINING platform/navigation keywords (catches concatenated nav bars)
+  // e.g. "NPR Planet Money LISTEN & FOLLOW NPR App Apple Podcasts Spotify Amazon Music..."
+  if (/LISTEN\s*&\s*FOLLOW/i.test(text)) return true;
+  const platformCount = [
+    /Apple Podcasts/i, /Spotify/i, /Amazon Music/i, /iHeart Radio/i,
+    /YouTube Music/i, /Google Podcasts/i, /NPR App/i, /NPR One/i,
+    /Pocket Casts/i, /Overcast/i, /Stitcher/i, /TuneIn/i,
+  ].filter(rx => rx.test(text)).length;
+  if (platformCount >= 2) return true;
+
   // Skip "Sponsor Message" / "Become an NPR sponsor" page elements (not transcript content)
-  if (/^(?:Sponsor Message|Become an NPR sponsor)\s*$/i.test(text)) return true;
+  if (/(?:Sponsor Message|Become an NPR sponsor)/i.test(text)) return true;
+
+  // Skip NPR section headings and boilerplate
+  if (/^(?:Terms of Use|Privacy Policy|Cookie Policy|Your Privacy Choices|Accessibility)\s*$/i.test(text)) return true;
+  if (/^(?:Get in touch|Contact Us|Connect with us|Follow us|Share this page)\s*$/i.test(text)) return true;
+  if (/^\s*(?:Facebook|Twitter|Instagram|Flipboard|Email|LinkedIn|Threads|Mastodon)\s*$/i.test(text)) return true;
+  if (/^(?:Related Stories|More Stories|More News|You May Also Like|Recommended)\s*$/i.test(text)) return true;
+  if (/(?:© \d{4}|©\d{4}|All Rights Reserved|Terms of Service)/i.test(text)) return true;
+  if (/^(?:Newsletter|Sign Up|Subscribe)\s*$/i.test(text)) return true;
+
+  // Skip show promo / network page elements
+  if (/^(?:NPR thanks our sponsors|Support NPR|Learn more at npr\.org)/i.test(text)) return true;
+  if (/^(?:Transcript provided by NPR|Copyright NPR)/i.test(text)) return true;
+
+  // Skip lines containing toggle/caption UI elements
+  if (/\b(?:hide caption|toggle caption|enlarge this image)\b/i.test(text)) return true;
 
   // Skip lines with excessive URLs or technical content
   const urlCount = (text.match(/https?:\/\//g) || []).length;
@@ -1053,8 +1092,7 @@ function isPageChrome(text: string): boolean {
   // Skip very long lines (>2000 chars) — real transcript paragraphs are rarely this long
   if (text.length > 2000) return true;
 
-  // Skip lines that are just image captions (contain "hide caption" or photo credit patterns)
-  if (/\bhide caption\b/i.test(text)) return true;
+  // Skip lines that are just image captions
   if (/\(Photo by [^)]+\)/i.test(text) && text.length < 300) return true;
 
   return false;

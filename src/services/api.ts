@@ -1,4 +1,4 @@
-import type { AdDetectionResult, LLMTranscriptResult, PlaybackConfig } from './adDetector';
+import type { AdDetectionResult, AdSegment, LLMTranscriptResult, PlaybackConfig } from './adDetector';
 
 const BASE = '/api';
 
