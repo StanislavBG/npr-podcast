@@ -70,7 +70,6 @@ function StepParseEpisodes({ result }: { result: SandboxResult }) {
         <div className="sb-kv"><span className="sb-kv-k">Audio available</span><span className="sb-kv-v">{audio?.available ? 'Yes' : 'No'}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Strategy</span><span className="sb-kv-v">{summary.strategy}</span></div>
       </div>
-      <Timeline result={result} />
     </div>
   );
 }
