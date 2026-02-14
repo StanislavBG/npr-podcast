@@ -34,8 +34,8 @@ const STEPS: StepDef[] = STEP_ORDER.map(id => ({
     step_parse_episodes:        'Extract episode metadata from feed',
     step_resolve_audio_stream:  'Resolve CDN URL, get audio metadata',
     step_start_audio_streaming: 'Stream audio chunks ahead of playback',
-    step_transcribe_chunks:     'Speech-to-text on audio via OpenAI',
-    step_mark_ad_locations:     'LLM classifies segments as content or ad',
+    step_transcribe_chunks:     'Produce timestamped transcript from audio via OpenAI STT',
+    step_mark_ad_locations:     'LLM classifies each sentence as content or ad',
     step_build_skip_map:        'Merge adjacent ad segments into skip ranges',
     step_fetch_html_transcript: 'Fetch NPR HTML transcript for cross-reference',
     step_finalize_playback:     'Reconcile + summary + build player config',
@@ -235,23 +235,20 @@ function StepTranscribeChunks({ result }: { result: SandboxResult }) {
       <div className="sb-qa-callout">
         Each audio chunk is sent to <strong>OpenAI {audio.transcriptionModel}</strong> for
         speech-to-text with <code>verbose_json</code> format to get segment-level timestamps.
-        {isAudioSource && (
-          <> Audio transcription captures <strong>dynamic ads</strong> inserted by Megaphone
-          that never appear in text transcripts.</>
-        )}
+        The result is a timestamped transcript that Step 6 uses as input for ad classification.
       </div>
       <div className="sb-kv-grid">
         <div className="sb-kv"><span className="sb-kv-k">Model</span><span className="sb-kv-v">{audio.transcriptionModel}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Response format</span><span className="sb-kv-v">verbose_json (segment timestamps)</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Segments returned</span><span className="sb-kv-v">{audio.segmentCount}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Audio duration (STT)</span><span className="sb-kv-v">{audio.audioDurationSec > 0 ? `${formatTime(audio.audioDurationSec)} (${audio.audioDurationSec.toFixed(1)}s)` : '(not reported)'}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Lines produced</span><span className="sb-kv-v">{result.transcript.lineCount}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Sentences produced</span><span className="sb-kv-v">{result.transcript.lineCount}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{result.transcript.totalWords.toLocaleString()}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Transcript source used</span><span className="sb-kv-v">{isAudioSource ? 'Audio transcription (STT)' : result.transcriptSource || 'html'}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Transcript source</span><span className="sb-kv-v">{isAudioSource ? 'Audio transcription (STT)' : result.transcriptSource || 'html'}</span></div>
       </div>
       {isAudioSource ? (
         <div className="sb-qa-ok">
-          Audio transcription succeeded — this captures dynamic ads in the audio stream.
+          Audio transcription succeeded. Full timestamped transcript ready for Step 6.
         </div>
       ) : (
         <div className="sb-qa-alert">
