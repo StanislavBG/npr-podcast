@@ -395,6 +395,128 @@ function alignToMp3Frame(buf: Buffer): Buffer {
   return buf;
 }
 
+// MPEG audio frame parameters for duration calculation
+const MPEG_SAMPLES_PER_FRAME: Record<string, number> = {
+  '1-1': 384, '1-2': 1152, '1-3': 1152,  // MPEG1 Layer I/II/III
+  '2-1': 384, '2-2': 1152, '2-3': 576,   // MPEG2 Layer I/II/III
+  '2.5-1': 384, '2.5-2': 1152, '2.5-3': 576,
+};
+const MPEG_SAMPLE_RATES: Record<string, number[]> = {
+  '1': [44100, 48000, 32000],
+  '2': [22050, 24000, 16000],
+  '2.5': [11025, 12000, 8000],
+};
+
+/**
+ * Split a full MP3 buffer into chunks of approximately `targetDurationSec` seconds,
+ * cutting precisely at frame boundaries. Returns array of { buffer, durationSec }.
+ */
+function splitMp3IntoChunks(
+  fullBuf: Buffer,
+  targetDurationSec: number,
+): Array<{ buffer: Buffer; durationSec: number; offsetSec: number }> {
+  const chunks: Array<{ buffer: Buffer; durationSec: number; offsetSec: number }> = [];
+
+  // Skip ID3v2 header if present
+  let pos = 0;
+  if (fullBuf.length > 10 && fullBuf[0] === 0x49 && fullBuf[1] === 0x44 && fullBuf[2] === 0x33) {
+    // ID3v2 tag: size is stored in 4 syncsafe bytes at offset 6
+    const size = (fullBuf[6]! << 21) | (fullBuf[7]! << 14) | (fullBuf[8]! << 7) | fullBuf[9]!;
+    pos = 10 + size;
+    console.log(`[mp3-split] Skipped ID3v2 header: ${pos} bytes`);
+  }
+
+  let chunkStart = pos;
+  let chunkDuration = 0;
+  let totalDuration = 0;
+
+  while (pos < fullBuf.length - 4) {
+    // Look for frame sync
+    if (fullBuf[pos] !== 0xFF || (fullBuf[pos + 1]! & 0xE0) !== 0xE0) {
+      pos++;
+      continue;
+    }
+
+    const byte1 = fullBuf[pos + 1]!;
+    const byte2 = fullBuf[pos + 2]!;
+
+    // Parse MPEG version
+    const versionBits = (byte1 >> 3) & 0x03;
+    const mpegVersion = versionBits === 3 ? '1' : versionBits === 2 ? '2' : versionBits === 0 ? '2.5' : null;
+    if (!mpegVersion) { pos++; continue; }
+
+    // Parse layer
+    const layerBits = (byte1 >> 1) & 0x03;
+    const layer = layerBits === 3 ? 1 : layerBits === 2 ? 2 : layerBits === 1 ? 3 : 0;
+    if (layer === 0) { pos++; continue; }
+
+    // Parse sample rate
+    const sampleRateIndex = (byte2 >> 2) & 0x03;
+    if (sampleRateIndex === 3) { pos++; continue; }
+    const sampleRate = MPEG_SAMPLE_RATES[mpegVersion]?.[sampleRateIndex];
+    if (!sampleRate) { pos++; continue; }
+
+    // Parse bitrate
+    const bitrateIndex = (byte2 >> 4) & 0x0F;
+    if (bitrateIndex === 0 || bitrateIndex === 0x0F) { pos++; continue; }
+
+    // Bitrate tables (kbps)
+    const bitrateTables: Record<string, number[]> = {
+      '1-1': [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
+      '1-2': [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+      '1-3': [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+      '2-1': [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+      '2-2': [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+      '2-3': [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+    };
+    const btKey = mpegVersion === '2.5' ? `2-${layer}` : `${mpegVersion}-${layer}`;
+    const bitrate = (bitrateTables[btKey]?.[bitrateIndex] || 0) * 1000;
+    if (bitrate === 0) { pos++; continue; }
+
+    // Parse padding
+    const padding = (byte2 >> 1) & 0x01;
+
+    // Calculate frame size
+    const samplesPerFrame = MPEG_SAMPLES_PER_FRAME[`${mpegVersion}-${layer}`] || 1152;
+    let frameSize: number;
+    if (layer === 1) {
+      frameSize = Math.floor((12 * bitrate / sampleRate + padding) * 4);
+    } else {
+      frameSize = Math.floor(samplesPerFrame * bitrate / (8 * sampleRate) + padding);
+    }
+
+    if (frameSize < 8 || frameSize > 4096) { pos++; continue; }
+
+    const frameDuration = samplesPerFrame / sampleRate;
+    chunkDuration += frameDuration;
+    pos += frameSize;
+
+    // If we've accumulated enough duration, cut a chunk
+    if (chunkDuration >= targetDurationSec) {
+      chunks.push({
+        buffer: fullBuf.subarray(chunkStart, pos),
+        durationSec: chunkDuration,
+        offsetSec: totalDuration,
+      });
+      totalDuration += chunkDuration;
+      chunkStart = pos;
+      chunkDuration = 0;
+    }
+  }
+
+  // Push remaining frames as final chunk
+  if (chunkStart < fullBuf.length && chunkDuration > 0.5) {
+    chunks.push({
+      buffer: fullBuf.subarray(chunkStart, fullBuf.length),
+      durationSec: chunkDuration,
+      offsetSec: totalDuration,
+    });
+  }
+
+  console.log(`[mp3-split] Split ${(fullBuf.length / 1024 / 1024).toFixed(1)} MB into ${chunks.length} chunks: ${chunks.map(c => `${c.durationSec.toFixed(0)}s/${(c.buffer.length / 1024 / 1024).toFixed(1)}MB`).join(', ')}`);
+  return chunks;
+}
+
 /**
  * Step 3: Resolve Audio Stream — HEAD request to follow redirects, get metadata for chunking.
  */
@@ -1414,67 +1536,58 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         }
         console.log(`[sandbox] Audio resolved: ${audioDetails.resolvedUrl.slice(0, 80)}, ${audioDetails.contentType}, ${audioDetails.contentLengthBytes} bytes`);
 
-        // Steps 4-5: Stream + Transcribe audio in 5-min chunks
+        // Steps 4-5: Download full audio, split at MP3 frame boundaries, transcribe chunks
         const resolvedUrl = audioDetails.resolvedUrl;
         const totalBytes = audioDetails.contentLengthBytes;
-        const bps = DEFAULT_BITRATE / 8;
-        const estDuration = totalBytes > 0 ? Math.round((totalBytes * 8) / DEFAULT_BITRATE) : (durationSec || 600);
-        const numChunks = Math.ceil(estDuration / CHUNK_DURATION_SEC);
 
-        console.log(`[sandbox] Transcribing "${episodeTitle}" in ${numChunks} chunks (~${CHUNK_DURATION_SEC}s each)...`);
+        console.log(`[sandbox] Downloading full audio file: ${(totalBytes / 1024 / 1024).toFixed(1)} MB`);
+        const fullAudioRes = await fetch(resolvedUrl, {
+          headers: { 'User-Agent': 'NPR-Podcast-Player/1.0' },
+          redirect: 'follow',
+        });
+        if (!fullAudioRes.ok) throw new Error(`Audio download failed: ${fullAudioRes.status}`);
+        const fullAudioBuf = Buffer.from(await fullAudioRes.arrayBuffer());
+        console.log(`[sandbox] Downloaded ${(fullAudioBuf.length / 1024 / 1024).toFixed(1)} MB`);
+
+        // Split at MP3 frame boundaries into ~5 minute chunks
+        const mp3Chunks = splitMp3IntoChunks(fullAudioBuf, CHUNK_DURATION_SEC);
+        const numChunks = mp3Chunks.length;
+        const estDuration = mp3Chunks.reduce((sum, c) => sum + c.durationSec, 0);
+
+        console.log(`[sandbox] Transcribing "${episodeTitle}" in ${numChunks} chunks, total duration ~${estDuration.toFixed(0)}s`);
 
         let allText = '';
         let allSegments: Array<{ start: number; end: number; text: string }> = [];
 
         for (let ci = 0; ci < numChunks; ci++) {
-          const chunkStartSec = ci * CHUNK_DURATION_SEC;
-          const chunkEndSec = Math.min((ci + 1) * CHUNK_DURATION_SEC + CHUNK_OVERLAP_SEC, estDuration);
-          const fetchStartSec = ci > 0 ? Math.max(0, chunkStartSec - CHUNK_OVERLAP_SEC) : 0;
-
-          const startByte = Math.floor(fetchStartSec * bps);
-          const endByte = Math.min(Math.floor(chunkEndSec * bps) - 1, totalBytes - 1);
-
-          console.log(`[sandbox] Chunk ${ci + 1}/${numChunks}: bytes ${startByte}-${endByte} (${((endByte - startByte + 1) / 1024 / 1024).toFixed(1)} MB)`);
-
-          let chunkBuffer: Buffer;
-          const rangeRes = await fetch(resolvedUrl, {
-            headers: { 'User-Agent': 'NPR-Podcast-Player/1.0', 'Range': `bytes=${startByte}-${endByte}` },
-          });
-          if (rangeRes.ok || rangeRes.status === 206) {
-            chunkBuffer = Buffer.from(await rangeRes.arrayBuffer());
-          } else {
-            // Fallback: download full file, slice (only happens once if range unsupported)
-            console.warn(`[sandbox] Range request failed (${rangeRes.status}), downloading full file`);
-            const fullRes = await fetch(resolvedUrl, { headers: { 'User-Agent': 'NPR-Podcast-Player/1.0' }, redirect: 'follow' });
-            if (!fullRes.ok) throw new Error(`Audio fetch failed: ${fullRes.status}`);
-            const fullBuf = Buffer.from(await fullRes.arrayBuffer());
-            chunkBuffer = fullBuf.subarray(startByte, endByte + 1);
-          }
-
-          // Align to first valid MP3 frame sync — Range requests start at
-          // arbitrary byte offsets producing leading garbage that confuses Whisper.
-          const compatBuf = alignToMp3Frame(chunkBuffer);
-          const fmt = 'mp3';
-          console.log(`[sandbox] Chunk ${ci + 1}: aligned ${chunkBuffer.length} -> ${compatBuf.length} bytes`);
+          const chunk = mp3Chunks[ci]!;
+          const chunkMB = (chunk.buffer.length / 1024 / 1024).toFixed(1);
+          console.log(`[sandbox] Chunk ${ci + 1}/${numChunks}: ${chunkMB} MB, offset ${chunk.offsetSec.toFixed(0)}s, duration ${chunk.durationSec.toFixed(0)}s`);
 
           try {
             const { toFile } = await import('openai');
-            const file = await toFile(compatBuf, `chunk_${ci}.${fmt}`);
+            const file = await toFile(chunk.buffer, `chunk_${ci}.mp3`);
             const result = await sttOpenai.audio.transcriptions.create({ file, model: 'gpt-4o-mini-transcribe', response_format: 'verbose_json' }) as any;
 
-            allText += (result.text || '') + ' ';
+            const chunkText = (result.text || '').trim();
+            allText += chunkText + ' ';
             const segs = (result.segments || []).map((s: any) => ({
-              start: (s.start || 0) + fetchStartSec,
-              end: (s.end || 0) + fetchStartSec,
+              start: (s.start || 0) + chunk.offsetSec,
+              end: (s.end || 0) + chunk.offsetSec,
               text: (s.text || '').trim(),
             }));
             allSegments.push(...segs);
-            console.log(`[sandbox] Chunk ${ci + 1}: ${segs.length} segments`);
+            console.log(`[sandbox] Chunk ${ci + 1}: ${segs.length} segments, ${chunkText.split(/\s+/).length} words`);
           } catch (chunkErr: any) {
             console.warn(`[sandbox] Chunk ${ci + 1} transcription failed: ${chunkErr.message}`);
+            // Fallback: try plain text transcription
             try {
-              const plainText = await speechToText(compatBuf, fmt);
-              allText += plainText + ' ';
+              const plainText = await speechToText(chunk.buffer, 'mp3');
+              if (plainText) {
+                allText += plainText + ' ';
+                // Create a single segment for the whole chunk
+                allSegments.push({ start: chunk.offsetSec, end: chunk.offsetSec + chunk.durationSec, text: plainText.trim() });
+              }
             } catch { /* skip chunk */ }
           }
         }
@@ -1493,6 +1606,22 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           const wc = content.split(/\s+/).filter(Boolean).length;
           cumW += wc;
           lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW });
+        }
+
+        // If segments produced no lines but we have accumulated text, split it into lines
+        if (lines.length === 0 && allText.trim().length > 50) {
+          console.log(`[sandbox] No segments but got raw text (${allText.trim().split(/\s+/).length} words) — splitting into lines`);
+          const sentences = allText.trim().split(/(?<=[.!?])\s+/);
+          cumW = 0;
+          lineN = 0;
+          for (const sent of sentences) {
+            const trimmed = sent.trim();
+            if (!trimmed) continue;
+            lineN++;
+            const wc = trimmed.split(/\s+/).filter(Boolean).length;
+            cumW += wc;
+            lines.push({ lineNum: lineN, speaker: '', text: trimmed, wordCount: wc, cumulativeWords: cumW });
+          }
         }
 
         transcriptSource = 'audio-transcription-chunked';

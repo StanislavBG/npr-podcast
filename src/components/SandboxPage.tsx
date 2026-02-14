@@ -156,9 +156,9 @@ function StepStreamAudioChunks({ result }: { result: SandboxResult }) {
   return (
     <div className="sb-step-body">
       <div className="sb-qa-callout">
-        Audio is fetched in <strong>5-minute chunks</strong> via HTTP Range requests.
-        Each chunk is ~{chunkSizeMb} MB — well under Whisper's 25 MB limit.
-        A 10-second overlap between chunks catches ad boundaries.
+        Full audio is downloaded once, then <strong>split at MP3 frame boundaries</strong> into
+        ~5-minute chunks. Each chunk is a valid MP3 fragment (&lt;5 MB) — well under Whisper's
+        25 MB limit. Frame-accurate splitting ensures clean decoding.
       </div>
       <div className="sb-kv-grid">
         <div className="sb-kv"><span className="sb-kv-k">File size</span><span className="sb-kv-v">{fileSizeMb} MB ({audio.contentLengthBytes.toLocaleString()} bytes)</span></div>
@@ -177,6 +177,22 @@ function StepStreamAudioChunks({ result }: { result: SandboxResult }) {
       ) : (
         <div className="sb-qa-ok">
           Audio chunked successfully ({estimatedChunks} chunks, {fileSizeMb} MB total). Feeding into transcription pipeline.
+        </div>
+      )}
+
+      {/* Audio player — lets you hear what Whisper receives */}
+      {audio.resolvedUrl && (
+        <div style={{ marginTop: '12px' }}>
+          <h3 className="sb-sub-heading">Audio Preview</h3>
+          <audio
+            controls
+            preload="none"
+            src={audio.resolvedUrl}
+            style={{ width: '100%', borderRadius: '6px' }}
+          />
+          <div className="sb-qa-callout" style={{ marginTop: '4px', fontSize: '11px' }}>
+            Streams directly from CDN. Listen to verify audio is accessible and audible.
+          </div>
         </div>
       )}
     </div>
