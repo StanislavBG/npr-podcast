@@ -144,7 +144,25 @@ export async function resolveAudio(audioUrl: string): Promise<AudioMeta> {
   return res.json();
 }
 
-/** Steps 4+5+6: Process a single audio chunk — fetch, transcribe, detect ads */
+/** Step 6: Detect ads from the full assembled transcript (all chunks) */
+export async function detectAdsFromTranscript(params: {
+  segments: Array<{ start: number; end: number; text: string }>;
+  episodeTitle: string;
+  durationSec: number;
+}): Promise<{ adSegments: AdSegment[] }> {
+  const res = await fetch(`${BASE}/audio/detect-ads`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || 'Ad detection failed');
+  }
+  return res.json();
+}
+
+/** Steps 4+5: Process a single audio chunk — fetch and transcribe */
 export async function processAudioChunk(params: {
   resolvedUrl: string;
   chunkIndex: number;
