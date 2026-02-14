@@ -1594,6 +1594,18 @@ app.post('/api/sandbox/analyze', async (req, res) => {
     return;
   }
 
+  // SSE streaming: send progress events as each pipeline stage completes
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  function sendEvent(event: string, data: any) {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
   try {
     let html = '';
     let rawHtmlLength = 0;
@@ -1630,6 +1642,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
     if (audioUrl && lines.length === 0) {
       try {
         // Step 3: Resolve Audio Stream — HEAD request to follow redirects, get metadata
+        sendEvent('progress', { step: 'step_resolve_audio_stream', message: 'Resolving audio URL...' });
         console.log(`[sandbox] Resolving audio URL: ${audioUrl.slice(0, 80)}...`);
         const headRes = await fetch(audioUrl, {
           method: 'HEAD',
@@ -1645,8 +1658,15 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           audioDetails.downloadSizeMb = (audioDetails.contentLengthBytes / 1024 / 1024).toFixed(1);
         }
         console.log(`[sandbox] Audio resolved: ${audioDetails.resolvedUrl.slice(0, 80)}, ${audioDetails.contentType}, ${audioDetails.contentLengthBytes} bytes`);
+        sendEvent('progress', {
+          step: 'step_resolve_audio_stream',
+          status: 'done',
+          message: `Audio resolved: ${audioDetails.contentType}, ${audioDetails.downloadSizeMb} MB`,
+          audioDetails: { ...audioDetails },
+        });
 
-        // Steps 4-5: Download full audio, split at MP3 frame boundaries, transcribe chunks
+        // Step 4: Download full audio, split at MP3 frame boundaries
+        sendEvent('progress', { step: 'step_start_audio_streaming', message: `Downloading audio (${audioDetails.downloadSizeMb} MB)...` });
         const resolvedUrl = audioDetails.resolvedUrl;
         const totalBytes = audioDetails.contentLengthBytes;
 
@@ -1664,15 +1684,25 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         const numChunks = mp3Chunks.length;
         const estDuration = mp3Chunks.reduce((sum, c) => sum + c.durationSec, 0);
 
+        sendEvent('progress', {
+          step: 'step_start_audio_streaming',
+          status: 'done',
+          message: `Downloaded ${(fullAudioBuf.length / 1024 / 1024).toFixed(1)} MB, split into ${numChunks} chunks`,
+          audioDetails: { ...audioDetails },
+        });
+
         console.log(`[sandbox] Transcribing "${episodeTitle}" in ${numChunks} chunks, total duration ~${estDuration.toFixed(0)}s`);
 
         let allText = '';
         let allSegments: Array<{ start: number; end: number; text: string }> = [];
 
+        // Step 5: Transcribe each chunk
+        sendEvent('progress', { step: 'step_transcribe_chunks', message: `Transcribing ${numChunks} chunks...`, chunk: 0, totalChunks: numChunks });
         for (let ci = 0; ci < numChunks; ci++) {
           const chunk = mp3Chunks[ci]!;
           const chunkMB = (chunk.buffer.length / 1024 / 1024).toFixed(1);
           console.log(`[sandbox] Chunk ${ci + 1}/${numChunks}: ${chunkMB} MB, offset ${chunk.offsetSec.toFixed(0)}s, duration ${chunk.durationSec.toFixed(0)}s`);
+          sendEvent('progress', { step: 'step_transcribe_chunks', message: `Transcribing chunk ${ci + 1}/${numChunks} (${chunkMB} MB)...`, chunk: ci + 1, totalChunks: numChunks });
 
           try {
             const { toFile } = await import('openai');
@@ -1761,14 +1791,24 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         audioDetails.audioDurationSec = estDuration;
 
         console.log(`[sandbox] Audio transcription complete: ${lines.length} lines, ${cumW} words, ${allSegments.length} segments`);
+        sendEvent('progress', {
+          step: 'step_transcribe_chunks',
+          status: 'done',
+          message: `Transcription complete: ${lines.length} sentences, ${cumW} words`,
+          lineCount: lines.length,
+          totalWords: cumW,
+          segmentCount: allSegments.length,
+        });
       } catch (sttErr: any) {
         audioDetails.error = sttErr.message;
         console.warn(`[sandbox] Audio transcription failed: ${sttErr.message} — falling back to text transcript`);
+        sendEvent('progress', { step: 'step_transcribe_chunks', status: 'error', message: `Audio transcription failed: ${sttErr.message}` });
       }
     }
 
     // Step 2: Try direct podcast transcript files (SRT, VTT, JSON from RSS)
     if (lines.length === 0 && podcastTranscripts && podcastTranscripts.length > 0) {
+      sendEvent('progress', { step: 'step_fetch_html_transcript', message: 'Trying podcast transcript files (SRT/VTT/JSON)...' });
       const preferred = [...podcastTranscripts].sort((a, b) => {
         const priority: Record<string, number> = {
           'application/x-subrip': 1, 'application/srt': 1,
@@ -1812,6 +1852,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
 
     // Step 3: Fall back to NPR transcript HTML page
     if (lines.length === 0 && transcriptUrl) {
+      sendEvent('progress', { step: 'step_fetch_html_transcript', message: 'Fetching HTML transcript...' });
       try {
         const htmlRes = await fetch(transcriptUrl, {
           headers: {
@@ -1825,8 +1866,10 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         pTagCount = (html.match(/<p[^>]*>/gi) || []).length;
         transcriptSource = 'html';
         lines = parseTranscriptToLines(html);
+        sendEvent('progress', { step: 'step_fetch_html_transcript', status: 'done', message: `HTML transcript fetched: ${lines.length} lines` });
       } catch (htmlErr: any) {
         console.warn(`[sandbox] HTML transcript fetch failed: ${htmlErr.message}`);
+        sendEvent('progress', { step: 'step_fetch_html_transcript', status: 'error', message: `HTML fetch failed: ${htmlErr.message}` });
       }
     }
 
@@ -1847,7 +1890,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
       console.warn(`Transcript validation failed for "${episodeTitle}": ${validation.reason}`);
     }
 
-    // Step 3: Build numbered transcript for LLM — with hh:mm:ss timestamps
+    // Build numbered transcript for LLM — with hh:mm:ss timestamps
     const dur = durationSec || 0;
     const numberedText = lines.map(l => {
       const spk = l.speaker ? `${l.speaker}: ` : '';
@@ -1903,7 +1946,8 @@ Return JSON:
   ]
 }`;
 
-    // Step 4: Call LLM (or fallback)
+    // Step 6: Call LLM for ad classification (or fallback)
+    sendEvent('progress', { step: 'step_mark_ad_locations', message: 'Classifying sentences as content/ad via LLM...' });
     let adBlocks: SandboxAdBlock[] = [];
     let llmRaw = '';
 
@@ -1951,7 +1995,15 @@ Return JSON:
       }
     }
 
-    // Step 5: Map to timestamps
+    sendEvent('progress', {
+      step: 'step_mark_ad_locations',
+      status: 'done',
+      message: `Ad classification complete: ${adBlocks.length} ad blocks found`,
+      adBlockCount: adBlocks.length,
+    });
+
+    // Step 7: Map to timestamps and build skip map
+    sendEvent('progress', { step: 'step_build_skip_map', message: 'Building skip map from ad blocks...' });
     adBlocks = mapAdBlocksToTimestamps(adBlocks, lines, dur);
 
     // Build skip map
@@ -1966,12 +2018,19 @@ Return JSON:
     const totalAdWords = adBlocks.reduce((s, b) => s + (b.endWord - b.startWord), 0);
     const totalAdTimeSec = adBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
 
+    sendEvent('progress', {
+      step: 'step_build_skip_map',
+      status: 'done',
+      message: `Skip map built: ${skipMap.length} ranges, ${Math.round(totalAdTimeSec)}s of ads`,
+    });
+
     // Compute QA diagnostics
     const speechRateWpm = 155;
     const expectedSpeechSec = totalWords > 0 ? (totalWords / speechRateWpm) * 60 : 0;
     const impliedAdTimeSec = Math.max(0, dur - expectedSpeechSec);
 
-    res.json({
+    // Send the complete result
+    sendEvent('complete', {
       episode: { title: episodeTitle, durationSec: dur, transcriptUrl },
       rawHtml: {
         length: rawHtmlLength,
@@ -2008,9 +2067,11 @@ Return JSON:
       skipMap,
       audioDetails,
     });
+    res.end();
   } catch (err: any) {
     console.error('Sandbox analyze error:', err.message);
-    res.status(500).json({ error: 'Sandbox analysis failed', detail: err.message });
+    sendEvent('error', { error: 'Sandbox analysis failed', detail: err.message });
+    res.end();
   }
 });
 
