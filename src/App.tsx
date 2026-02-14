@@ -110,83 +110,124 @@ export default function App() {
     setAds(null);
     setPlayback(null);
 
-    setFlow((prev) => ({
-      ...prev,
-      steps: {
-        ...prev.steps,
-        step_fetch_transcript: 'pending',
-        step_llm_parse_transcript: 'pending',
-        step_llm_detect_ads: 'pending',
-        step_llm_prepare_player: 'pending',
-      },
-    }));
-
     const durationSec = parseDuration(ep.duration);
-
-    // Step 1: Get transcript — prefer audio transcription, fall back to HTML
     let html = '';
-    let audioTranscriptText = '';
-    setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'running'));
 
-    // Try audio transcription first (captures dynamic ads in audio)
+    // ── Steps 3-5: Audio Pipeline (resolve → stream → transcribe) ────
     if (ep.audioUrl) {
+      setFlow((prev) => setStep(prev, 'step_resolve_audio_stream', 'running'));
+
       try {
+        // Step 3 done: audio URL resolved from RSS feed
+        setFlow((prev) => {
+          let fs = setStep(prev, 'step_resolve_audio_stream', 'completed');
+          // Step 4: audio is being fetched for transcription
+          fs = setStep(fs, 'step_start_audio_streaming', 'running');
+          return fs;
+        });
+
+        setFlow((prev) => {
+          let fs = setStep(prev, 'step_start_audio_streaming', 'completed');
+          // Step 5: transcription running
+          fs = setStep(fs, 'step_transcribe_chunks', 'running');
+          return fs;
+        });
+
         const transcribeRes = await fetch('/api/transcribe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ audioUrl: ep.audioUrl }),
         });
+
         if (transcribeRes.ok) {
           const transcription = await transcribeRes.json();
-          audioTranscriptText = transcription.text || '';
-          if (audioTranscriptText.length > 100) {
-            // Wrap the transcription as simple HTML paragraphs for the LLM pipeline
-            html = audioTranscriptText.split(/(?<=[.!?])\s+/).map((s: string) => `<p>${s}</p>`).join('\n');
-            setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'completed'));
+          const audioText = transcription.text || '';
+          if (audioText.length > 100) {
+            html = audioText.split(/(?<=[.!?])\s+/).map((s: string) => `<p>${s}</p>`).join('\n');
+            setFlow((prev) => setStep(prev, 'step_transcribe_chunks', 'completed'));
+          } else {
+            throw new Error('Transcription too short');
           }
+        } else {
+          throw new Error(`Transcription request failed: ${transcribeRes.status}`);
         }
       } catch (err) {
         console.warn('Audio transcription failed, falling back to HTML transcript:', err);
+        // Mark any incomplete audio steps as failed/skipped
+        setFlow((prev) => {
+          let fs = prev;
+          if (fs.steps.step_resolve_audio_stream === 'running') fs = setStep(fs, 'step_resolve_audio_stream', 'failed');
+          if (fs.steps.step_start_audio_streaming === 'running') fs = setStep(fs, 'step_start_audio_streaming', 'failed');
+          else if (fs.steps.step_start_audio_streaming === 'pending') fs = setStep(fs, 'step_start_audio_streaming', 'skipped');
+          if (fs.steps.step_transcribe_chunks === 'running') fs = setStep(fs, 'step_transcribe_chunks', 'failed');
+          else if (fs.steps.step_transcribe_chunks === 'pending') fs = setStep(fs, 'step_transcribe_chunks', 'skipped');
+          return fs;
+        });
       }
+    } else {
+      // No audio URL — skip audio pipeline
+      setFlow((prev) => {
+        let fs = setStep(prev, 'step_resolve_audio_stream', 'skipped');
+        fs = setStep(fs, 'step_start_audio_streaming', 'skipped');
+        fs = setStep(fs, 'step_transcribe_chunks', 'skipped');
+        return fs;
+      });
     }
 
-    // Fall back to HTML transcript if audio transcription didn't work
+    // ── Step 8: Fetch HTML Transcript (parallel path / fallback) ─────
     if (!html && ep.transcriptUrl) {
+      setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', 'running'));
       try {
         const result = await fetchTranscriptHtml(ep.transcriptUrl);
         html = result.html;
-        setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'completed'));
+        setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', 'completed'));
       } catch {
-        setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
+        setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', 'skipped'));
       }
-    } else if (!html) {
-      setFlow((prev) => setStep(prev, 'step_fetch_transcript', 'skipped'));
+    } else {
+      // Audio transcription succeeded or no transcript URL available
+      setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', 'skipped'));
     }
 
-    setFlow((prev) => setStep(prev, 'step_llm_parse_transcript', 'running'));
+    // ── Step 6: Mark Ad Locations (parse transcript + detect ads) ────
+    setFlow((prev) => setStep(prev, 'step_mark_ad_locations', 'running'));
     let transcript;
     try {
       transcript = await llmParseTranscript(html || `<p>${ep.description}</p>`);
-      setFlow((prev) => setStep(prev, 'step_llm_parse_transcript', 'completed'));
     } catch (err) {
       console.error('LLM parse failed:', err);
-      setFlow((prev) => setStep(prev, 'step_llm_parse_transcript', 'failed'));
+      setFlow((prev) => {
+        let fs = setStep(prev, 'step_mark_ad_locations', 'failed');
+        fs = setStep(fs, 'step_build_skip_map', 'skipped');
+        fs = setStep(fs, 'step_finalize_playback', 'skipped');
+        return { ...fs, currentStep: null };
+      });
       return;
     }
 
-    setFlow((prev) => setStep(prev, 'step_llm_detect_ads', 'running'));
     let adResult: AdDetectionResult;
     try {
       adResult = await llmDetectAds(transcript, durationSec, ep.title);
       setAds(adResult);
-      setFlow((prev) => setStep(prev, 'step_llm_detect_ads', 'completed'));
+      setFlow((prev) => setStep(prev, 'step_mark_ad_locations', 'completed'));
     } catch (err) {
       console.error('LLM ad detection failed:', err);
-      setFlow((prev) => setStep(prev, 'step_llm_detect_ads', 'failed'));
+      setFlow((prev) => {
+        let fs = setStep(prev, 'step_mark_ad_locations', 'failed');
+        fs = setStep(fs, 'step_build_skip_map', 'skipped');
+        fs = setStep(fs, 'step_finalize_playback', 'skipped');
+        return { ...fs, currentStep: null };
+      });
       return;
     }
 
-    setFlow((prev) => setStep(prev, 'step_llm_prepare_player', 'running'));
+    // ── Step 7: Build Skip Map ───────────────────────────────────────
+    setFlow((prev) => setStep(prev, 'step_build_skip_map', 'running'));
+    // Skip map is produced as part of ad detection; mark complete
+    setFlow((prev) => setStep(prev, 'step_build_skip_map', 'completed'));
+
+    // ── Step 9: Finalize Playback ────────────────────────────────────
+    setFlow((prev) => setStep(prev, 'step_finalize_playback', 'running'));
     try {
       const config = await llmPreparePlayback(
         transcript,
@@ -204,13 +245,13 @@ export default function App() {
         });
       }
       setFlow((prev) => {
-        const fs = setStep(prev, 'step_llm_prepare_player', 'completed');
+        const fs = setStep(prev, 'step_finalize_playback', 'completed');
         return { ...fs, currentStep: null };
       });
     } catch (err) {
       console.error('LLM prepare-playback failed:', err);
       setFlow((prev) => {
-        const fs = setStep(prev, 'step_llm_prepare_player', 'skipped');
+        const fs = setStep(prev, 'step_finalize_playback', 'skipped');
         return { ...fs, currentStep: null };
       });
     }
