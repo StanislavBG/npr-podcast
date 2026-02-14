@@ -267,10 +267,25 @@ export interface SandboxResult {
   audioDetails?: SandboxAudioDetails;
 }
 
-export async function sandboxAnalyze(
+/** Progress event from the SSE sandbox stream */
+export interface SandboxProgressEvent {
+  step: string;
+  status?: 'done' | 'error';
+  message: string;
+  chunk?: number;
+  totalChunks?: number;
+  [key: string]: unknown;
+}
+
+/**
+ * Stream sandbox analysis via SSE. Calls onProgress for each pipeline step,
+ * then resolves with the final SandboxResult.
+ */
+export async function sandboxAnalyzeStream(
   transcriptUrl: string,
   episodeTitle: string,
   durationSec: number,
+  onProgress: (event: SandboxProgressEvent) => void,
   podcastTranscripts?: PodcastTranscript[],
   audioUrl?: string,
 ): Promise<SandboxResult> {
@@ -283,7 +298,65 @@ export async function sandboxAnalyze(
     const err = await res.json().catch(() => ({ error: 'Unknown error' }));
     throw new Error(err.error || 'Sandbox analysis failed');
   }
-  return res.json();
+
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result: SandboxResult | null = null;
+  let streamError: string | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // Parse SSE events from buffer
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop() || ''; // keep incomplete last part
+
+    for (const part of parts) {
+      if (!part.trim()) continue;
+      let eventType = 'message';
+      let data = '';
+      for (const line of part.split('\n')) {
+        if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+        else if (line.startsWith('data: ')) data = line.slice(6);
+      }
+      if (!data) continue;
+
+      try {
+        const parsed = JSON.parse(data);
+        if (eventType === 'progress') {
+          onProgress(parsed as SandboxProgressEvent);
+        } else if (eventType === 'complete') {
+          result = parsed as SandboxResult;
+        } else if (eventType === 'error') {
+          streamError = parsed.error || parsed.detail || 'Unknown error';
+        }
+      } catch {
+        // ignore malformed JSON
+      }
+    }
+  }
+
+  if (streamError) throw new Error(streamError);
+  if (!result) throw new Error('Sandbox stream ended without a result');
+  return result;
+}
+
+/** Legacy non-streaming sandbox call (kept for compatibility) */
+export async function sandboxAnalyze(
+  transcriptUrl: string,
+  episodeTitle: string,
+  durationSec: number,
+  podcastTranscripts?: PodcastTranscript[],
+  audioUrl?: string,
+): Promise<SandboxResult> {
+  return sandboxAnalyzeStream(
+    transcriptUrl, episodeTitle, durationSec,
+    () => {}, // ignore progress
+    podcastTranscripts, audioUrl,
+  );
 }
 
 /** Parse "MM:SS" or "HH:MM:SS" or raw seconds into seconds number */

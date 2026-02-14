@@ -2,13 +2,14 @@ import { useState, useEffect, useRef } from 'react';
 import {
   fetchPodcasts,
   fetchEpisodes,
-  sandboxAnalyze,
+  sandboxAnalyzeStream,
   parseDuration,
   formatTime,
   formatTimestamp,
   type SandboxResult,
   type SandboxAdBlock,
   type SandboxLine,
+  type SandboxProgressEvent,
 } from '../services/api';
 import { STEP_ORDER, STEP_META } from '../workflows/podcastFlow';
 
@@ -828,6 +829,68 @@ function StepSection({ index, step, children, defaultOpen = true }: {
   );
 }
 
+// ─── Pipeline progress tracker during loading ────────────────────────────────
+
+interface PipelineStep {
+  id: string;
+  label: string;
+  status: 'pending' | 'active' | 'done' | 'error';
+  message: string;
+  detail?: string;
+}
+
+const PIPELINE_STEPS: Array<{ id: string; label: string }> = [
+  { id: 'step_fetch_rss', label: 'Fetch RSS Feed' },
+  { id: 'step_parse_episodes', label: 'Parse Episodes' },
+  { id: 'step_resolve_audio_stream', label: 'Resolve Audio Stream' },
+  { id: 'step_start_audio_streaming', label: 'Download & Chunk Audio' },
+  { id: 'step_transcribe_chunks', label: 'Transcribe Audio' },
+  { id: 'step_mark_ad_locations', label: 'Classify Ads (LLM)' },
+  { id: 'step_build_skip_map', label: 'Build Skip Map' },
+  { id: 'step_fetch_html_transcript', label: 'Fetch HTML Transcript' },
+  { id: 'step_finalize_playback', label: 'Finalize Playback' },
+];
+
+function ProgressTracker({ steps, episodeTitle }: { steps: PipelineStep[]; episodeTitle: string }) {
+  const activeStep = steps.find(s => s.status === 'active');
+  const doneCount = steps.filter(s => s.status === 'done').length;
+
+  return (
+    <div className="sb-progress-tracker">
+      {episodeTitle && (
+        <div className="sb-progress-episode">{episodeTitle}</div>
+      )}
+      <div className="sb-progress-summary">
+        Step {doneCount}/{steps.length} completed
+      </div>
+      <div className="sb-progress-steps">
+        {steps.map((step, i) => (
+          <div key={step.id} className={`sb-progress-step sb-progress-${step.status}`}>
+            <span className="sb-progress-icon">
+              {step.status === 'done' && '\u2713'}
+              {step.status === 'active' && '\u25B6'}
+              {step.status === 'error' && '\u2717'}
+              {step.status === 'pending' && '\u2022'}
+            </span>
+            <span className="sb-progress-label">
+              <strong>Step {i + 1}:</strong> {step.label}
+            </span>
+            {step.message && step.status !== 'pending' && (
+              <span className="sb-progress-msg">{step.message}</span>
+            )}
+          </div>
+        ))}
+      </div>
+      {activeStep && (
+        <div className="sb-progress-active-detail">
+          <div className="sb-loading-spinner" />
+          <span>{activeStep.message || `${activeStep.label}...`}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main SandboxPage ────────────────────────────────────────────────────────
 
 export function SandboxPage({ onBack }: Props) {
@@ -836,6 +899,22 @@ export function SandboxPage({ onBack }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SandboxResult | null>(null);
   const [podcastInfo, setPodcastInfo] = useState<{ name: string; id: string }>({ name: '', id: '' });
+  const [episodeTitle, setEpisodeTitle] = useState('');
+  const [pipelineSteps, setPipelineSteps] = useState<PipelineStep[]>(
+    PIPELINE_STEPS.map(s => ({ ...s, status: 'pending' as const, message: '' }))
+  );
+
+  // Helper: update a single pipeline step
+  const updateStep = (stepId: string, updates: Partial<PipelineStep>) => {
+    setPipelineSteps(prev => prev.map(s =>
+      s.id === stepId ? { ...s, ...updates } : s
+    ));
+  };
+
+  // Helper: mark step as done and set next as active
+  const markStepDone = (stepId: string, message: string) => {
+    updateStep(stepId, { status: 'done', message });
+  };
 
   // Auto-fetch single podcast + episode and analyze on mount
   useEffect(() => {
@@ -843,6 +922,8 @@ export function SandboxPage({ onBack }: Props) {
 
     async function run() {
       try {
+        // Step 1: Fetch RSS
+        updateStep('step_fetch_rss', { status: 'active', message: 'Fetching podcast list...' });
         setStatus('Fetching RSS feed...');
         let podcasts;
         try {
@@ -854,6 +935,10 @@ export function SandboxPage({ onBack }: Props) {
 
         const podcastId = podcasts[0].id;
         setPodcastInfo({ name: podcasts[0].name, id: podcastId });
+        markStepDone('step_fetch_rss', `Fetched: ${podcasts[0].name}`);
+
+        // Step 2: Parse episodes
+        updateStep('step_parse_episodes', { status: 'active', message: 'Loading episodes...' });
         setStatus(`Parsing episodes for ${podcasts[0].name}...`);
 
         const data = await fetchEpisodes(podcastId);
@@ -870,16 +955,39 @@ export function SandboxPage({ onBack }: Props) {
           return;
         }
 
+        setEpisodeTitle(ep.title);
+        markStepDone('step_parse_episodes', `Selected: ${ep.title}`);
         setStatus(`Analyzing: ${ep.title}...`);
 
-        const res = await sandboxAnalyze(
+        // Steps 3-9: Stream from server via SSE
+        const handleProgress = (evt: SandboxProgressEvent) => {
+          if (cancelled) return;
+          const stepId = evt.step;
+          if (evt.status === 'done') {
+            markStepDone(stepId, evt.message);
+          } else if (evt.status === 'error') {
+            updateStep(stepId, { status: 'error', message: evt.message });
+          } else {
+            updateStep(stepId, { status: 'active', message: evt.message });
+          }
+        };
+
+        const res = await sandboxAnalyzeStream(
           ep.transcriptUrl || '',
           ep.title,
           parseDuration(ep.duration),
+          handleProgress,
           ep.podcastTranscripts,
           ep.audioUrl || undefined,
         );
         if (cancelled) return;
+
+        // Mark all remaining pending steps as done
+        setPipelineSteps(prev => prev.map(s =>
+          s.status === 'pending' || s.status === 'active'
+            ? { ...s, status: 'done' as const, message: s.message || 'Complete' }
+            : s
+        ));
 
         setResult(res);
         setLoading(false);
@@ -901,16 +1009,15 @@ export function SandboxPage({ onBack }: Props) {
         <button className="sb-back" onClick={onBack}>Back</button>
         <div className="sb-header-center">
           <h1 className="sb-title">Pipeline Report</h1>
-          {result && (
-            <span className="sb-header-ep">{result.episode.title}</span>
+          {(result || episodeTitle) && (
+            <span className="sb-header-ep">{result?.episode.title || episodeTitle}</span>
           )}
         </div>
       </header>
 
       {loading && (
         <div className="sb-loading-full">
-          <div className="sb-loading-spinner" />
-          <span className="sb-loading-status">{status}</span>
+          <ProgressTracker steps={pipelineSteps} episodeTitle={episodeTitle} />
         </div>
       )}
 
