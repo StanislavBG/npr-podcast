@@ -158,6 +158,14 @@ function parseTranscriptHtml(html: string): TranscriptLine[] {
   return lines;
 }
 
+/** Format seconds as 00h:00m:00s */
+function fmtTs(sec: number): string {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return `${h.toString().padStart(2, '0')}h:${m.toString().padStart(2, '0')}m:${s.toString().padStart(2, '0')}s`;
+}
+
 function buildNumberedTranscriptText(lines: TranscriptLine[]): string {
   return lines.map(l => {
     const spk = l.speaker ? `${l.speaker}: ` : '';
@@ -771,52 +779,46 @@ app.post('/api/audio/detect-ads', async (req, res) => {
       }
     }
 
-    // Build numbered transcript for the LLM — each line is one sentence
+    // Build numbered transcript for the LLM — each line is one sentence with hh:mm:ss timestamps
     const numberedTranscript = splitLines.map(l =>
-      `[${l.idx}] (${l.start.toFixed(1)}s – ${l.end.toFixed(1)}s) ${l.text}`
+      `[${l.idx}] (${fmtTs(l.start)}) ${l.text}`
     ).join('\n');
 
-    const systemPrompt = `You are an expert ad detector for NPR podcast transcripts. You will receive the full transcript of a podcast episode, split into numbered, timestamped sentences.
+    const systemPrompt = `You are a sentence-level classifier for podcast transcripts. Your task is to read each sentence and decide: is this sentence part of an ADVERTISEMENT or part of the EDITORIAL CONTENT?
 
-Your job: find the SPECIFIC SENTENCES that are advertisements, sponsor reads, or funding credits — content that is NOT part of the actual podcast editorial discussion.
+## How to classify each sentence
 
-WHAT AD SECTIONS LOOK LIKE — they are short interruptions (typically 2-8 sentences) that break away from the podcast's editorial topic:
+Read every sentence in the transcript. For each sentence, ask yourself:
+- Is this sentence part of the podcast's actual topic/discussion/interview? → CONTENT (skip it)
+- Is this sentence selling a product, promoting a service, or reading a sponsor credit? → AD
 
-1. SPONSOR READS: The host pauses the editorial discussion to read a sponsor message.
-   - Usually starts with: "Support for this podcast comes from...", "This message comes from..."
-   - Contains a company/product name and description of what they offer
-   - Often ends with a call to action: "visit [website]", "use promo code [code]"
-   - Then the host returns to the editorial topic
+## What ad blocks look like in a podcast
 
-2. NPR FUNDING CREDITS: Short institutional credits.
-   - "Support for NPR comes from..."
-   - Usually 1-3 sentences
+Ads are COMPLETE BLOCKS of consecutive sentences — typically 3 to 10 sentences long — that form a coherent promotional message. They are NOT single words or phrases. A single sentence alone is rarely an ad; ads are paragraphs.
 
-3. SHOW PROMOS: Promotions for other NPR shows.
-   - "Coming up on [show name]...", "Check out [show name]..."
+Common ad block patterns:
+- SPONSOR READ: A block that opens with "Support for this podcast comes from..." or "This message comes from...", describes a company/product across several sentences, and ends with a call to action ("visit example.com", "use promo code X"). Then the editorial content resumes.
+- FUNDING CREDIT: 1-3 sentences like "Support for NPR comes from [Company], providing [service]. Learn more at [website]."
+- INSERTED AD: A block of sentences about a product/service that has nothing to do with the episode's editorial topic — it's clearly a commercial break.
 
-4. DYNAMICALLY INSERTED ADS: Ads that sound different from the editorial content.
-   - Abrupt topic change to a product/service unrelated to the episode
-   - Usually 3-8 sentences
+## What is NOT an ad (critical — do not classify these as ads)
 
-WHAT IS NOT AN AD (do NOT flag these — this is critical):
-- The podcast's own editorial content, even if it discusses companies, products, money, or economics
-- Interview segments with guests, even if the guest works at a company
-- The host's own analysis, commentary, or opinions
-- Topic transitions within the editorial content ("Now let's talk about...")
-- Episode introductions or sign-offs by the hosts
+- ALL editorial discussion, even about companies, money, economics, products, or business deals
+- Interviews, even with CEOs or business leaders
+- Host commentary, analysis, opinions, jokes
+- Topic transitions ("Now let's turn to...", "Coming up after the break...")
+- Episode intros and sign-offs
+- Any content that relates to the episode's topic
 
-IMPORTANT RULES:
-1. A typical NPR podcast (10-30 min) has only 1-4 ad breaks, each lasting 15-60 seconds (2-8 sentences)
-2. Total ad content is usually 5-15% of the episode, NEVER more than 20%
-3. If you're unsure, do NOT flag it — only flag obvious ad/sponsor content
-4. Return the EXACT sentence numbers (first and last inclusive) for each ad block
+## Output format
+
+Return the sentence numbers that are ads, grouped into contiguous blocks. A typical 10-30 minute NPR episode has 1-4 ad blocks. If no ads are found, return an empty array.
 
 Return ONLY valid JSON.`;
 
-    const userPrompt = `Here is the full transcript of "${episodeTitle}" (${Math.round(durationSec / 60)} minutes, ${splitLines.length} sentences).
+    const userPrompt = `Classify each sentence in this transcript of "${episodeTitle}" (${Math.round(durationSec / 60)} min, ${splitLines.length} sentences).
 
-Find the ad sections — short interruptions where the editorial content pauses for sponsor reads, funding credits, or promos.
+For each ad block, return the first and last sentence numbers (inclusive) that form the ad.
 
 TRANSCRIPT:
 ${numberedTranscript}
@@ -825,9 +827,9 @@ Return JSON:
 {
   "adBlocks": [
     {
-      "firstSegment": <first sentence number of the ad>,
-      "lastSegment": <last sentence number of the ad>,
-      "reason": "<short explanation>"
+      "firstSegment": <number>,
+      "lastSegment": <number>,
+      "reason": "<what is being advertised>"
     }
   ]
 }`;
@@ -1845,56 +1847,51 @@ app.post('/api/sandbox/analyze', async (req, res) => {
       console.warn(`Transcript validation failed for "${episodeTitle}": ${validation.reason}`);
     }
 
-    // Step 3: Build numbered transcript for LLM
+    // Step 3: Build numbered transcript for LLM — with hh:mm:ss timestamps
+    const dur = durationSec || 0;
     const numberedText = lines.map(l => {
       const spk = l.speaker ? `${l.speaker}: ` : '';
-      return `[${l.lineNum}] ${spk}${l.text}`;
+      const approxTime = dur > 0 && totalWords > 0
+        ? (l.cumulativeWords / totalWords) * dur
+        : 0;
+      return `[${l.lineNum}] (${fmtTs(approxTime)}) ${spk}${l.text}`;
     }).join('\n');
 
-    const systemPrompt = `You are an expert ad detector for NPR podcast transcripts. You will receive the full transcript of a podcast episode, split into numbered lines (one sentence per line).
+    const systemPrompt = `You are a sentence-level classifier for podcast transcripts. Your task is to read each sentence and decide: is this sentence part of an ADVERTISEMENT or part of the EDITORIAL CONTENT?
 
-Your job: find the SPECIFIC SENTENCES that are advertisements, sponsor reads, or funding credits — content that is NOT part of the actual podcast editorial discussion.
+## How to classify each sentence
 
-WHAT AD SECTIONS LOOK LIKE — they are short interruptions (typically 2-8 sentences) that break away from the podcast's editorial topic:
+Read every sentence in the transcript. For each sentence, ask yourself:
+- Is this sentence part of the podcast's actual topic/discussion/interview? → CONTENT (skip it)
+- Is this sentence selling a product, promoting a service, or reading a sponsor credit? → AD
 
-1. SPONSOR READS: The host pauses the editorial discussion to read a sponsor message.
-   - Usually starts with a transition phrase: "Support for this podcast comes from...", "This message comes from...", "And now a word from our sponsor..."
-   - Contains a company/product name and description of what they offer
-   - Often ends with a call to action: "visit [website]", "use promo code [code]", "download the app at..."
-   - Then the host returns to the editorial topic
+## What ad blocks look like in a podcast
 
-2. NPR FUNDING CREDITS: Short institutional credits.
-   - "Support for NPR comes from..."
-   - Usually 1-3 sentences, very formulaic
+Ads are COMPLETE BLOCKS of consecutive sentences — typically 3 to 10 sentences long — that form a coherent promotional message. They are NOT single words or phrases. A single sentence alone is rarely an ad; ads are paragraphs.
 
-3. SHOW PROMOS: Promotions for other NPR shows.
-   - "Coming up on [show name]...", "Check out [show name]..."
-   - Usually 1-2 sentences
+Common ad block patterns:
+- SPONSOR READ: A block that opens with "Support for this podcast comes from..." or "This message comes from...", describes a company/product across several sentences, and ends with a call to action ("visit example.com", "use promo code X"). Then the editorial content resumes.
+- FUNDING CREDIT: 1-3 sentences like "Support for NPR comes from [Company], providing [service]. Learn more at [website]."
+- INSERTED AD: A block of sentences about a product/service that has nothing to do with the episode's editorial topic — it's clearly a commercial break.
 
-4. DYNAMICALLY INSERTED ADS: Ads that sound different from the editorial content.
-   - Abrupt topic change to a product/service unrelated to the episode
-   - Different speaker or tone from the editorial hosts
-   - Usually 3-8 sentences
+## What is NOT an ad (critical — do not classify these as ads)
 
-WHAT IS NOT AN AD (do NOT flag these — this is critical):
-- The podcast's own editorial content, even if it discusses companies, products, money, economics, or business
-- Interview segments with guests, even if the guest works at a company
-- The host's own opinions, analysis, or commentary
-- Topic transitions within the editorial content ("Now let's talk about...")
-- Episode introductions or sign-offs by the hosts
-- Questions from the host to a guest
+- ALL editorial discussion, even about companies, money, economics, products, or business deals
+- Interviews, even with CEOs or business leaders
+- Host commentary, analysis, opinions, jokes
+- Topic transitions ("Now let's turn to...", "Coming up after the break...")
+- Episode intros and sign-offs
+- Any content that relates to the episode's topic
 
-IMPORTANT RULES:
-1. A typical NPR podcast episode (10-30 minutes) has only 1-4 ad breaks, each lasting 15-60 seconds (2-8 sentences)
-2. Total ad content is usually 5-15% of the episode, NEVER more than 20%
-3. If you're unsure whether something is an ad, do NOT flag it — only flag obvious ads
-4. Be precise with line numbers: only include lines that are actually ad content
+## Output format
+
+Return the sentence numbers that are ads, grouped into contiguous blocks. A typical 10-30 minute NPR episode has 1-4 ad blocks. If no ads are found, return an empty array.
 
 Return ONLY valid JSON.`;
 
-    const userPrompt = `Here is the full transcript of "${episodeTitle || 'Unknown Episode'}" (${Math.round((durationSec || 0) / 60)} minutes) with numbered lines. Each line is one sentence.
+    const userPrompt = `Classify each sentence in this transcript of "${episodeTitle || 'Unknown Episode'}" (${Math.round((durationSec || 0) / 60)} min, ${lines.length} sentences).
 
-Find the ad sections — short interruptions where the editorial content pauses for sponsor reads, funding credits, or promos.
+For each ad block, return the first and last sentence numbers (inclusive) that form the ad.
 
 TRANSCRIPT:
 ${numberedText}
@@ -1902,7 +1899,7 @@ ${numberedText}
 Return JSON:
 {
   "adBlocks": [
-    { "startLine": <first line number of the ad>, "endLine": <last line number of the ad>, "reason": "short explanation" }
+    { "startLine": <first sentence number>, "endLine": <last sentence number>, "reason": "<what is being advertised>" }
   ]
 }`;
 
@@ -1955,7 +1952,6 @@ Return JSON:
     }
 
     // Step 5: Map to timestamps
-    const dur = durationSec || 0;
     adBlocks = mapAdBlocksToTimestamps(adBlocks, lines, dur);
 
     // Build skip map
