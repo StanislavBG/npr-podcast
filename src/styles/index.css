@@ -518,6 +518,15 @@ button {
   overflow-y: auto;
   overflow-x: hidden;
 }
+.flow-complete {
+  border-top: 1px solid rgba(46, 204, 113, 0.2);
+}
+.flow-complete .flow-label {
+  color: #2ecc71;
+}
+.flow-complete .flow-step-done {
+  opacity: 0.8;
+}
 .flow-label {
   font-size: 11px;
   font-weight: 600;

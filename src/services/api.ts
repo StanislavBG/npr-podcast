@@ -277,9 +277,21 @@ export interface SandboxProgressEvent {
   [key: string]: unknown;
 }
 
+/** Partial ad detection result sent before full analysis completes */
+export interface PartialAdsEvent {
+  skipMap: Array<{
+    startTime: number;
+    endTime: number;
+    type: string;
+    confidence: number;
+    reason: string;
+  }>;
+  source: string;
+}
+
 /**
  * Stream sandbox analysis via SSE. Calls onProgress for each pipeline step,
- * then resolves with the final SandboxResult.
+ * onPartialAds for early ad detection results, then resolves with the final SandboxResult.
  */
 export async function sandboxAnalyzeStream(
   transcriptUrl: string,
@@ -288,6 +300,7 @@ export async function sandboxAnalyzeStream(
   onProgress: (event: SandboxProgressEvent) => void,
   podcastTranscripts?: PodcastTranscript[],
   audioUrl?: string,
+  onPartialAds?: (event: PartialAdsEvent) => void,
 ): Promise<SandboxResult> {
   const res = await fetch(`${BASE}/sandbox/analyze`, {
     method: 'POST',
@@ -328,6 +341,8 @@ export async function sandboxAnalyzeStream(
         const parsed = JSON.parse(data);
         if (eventType === 'progress') {
           onProgress(parsed as SandboxProgressEvent);
+        } else if (eventType === 'partial_ads') {
+          onPartialAds?.(parsed as PartialAdsEvent);
         } else if (eventType === 'complete') {
           result = parsed as SandboxResult;
         } else if (eventType === 'error') {
