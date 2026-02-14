@@ -108,6 +108,67 @@ export async function llmPreparePlayback(
   return res.json();
 }
 
+// ─── Chunked Audio Processing endpoints ─────────────────────────────────────
+
+export interface AudioMeta {
+  resolvedUrl: string;
+  contentLength: number;
+  acceptRanges: boolean;
+  contentType: string;
+  durationSec: number;
+  bitrate: number;
+  totalChunks: number;
+  chunkDurationSec: number;
+}
+
+export interface ChunkResult {
+  chunkIndex: number;
+  startTimeSec: number;
+  endTimeSec: number;
+  transcript: { text: string; segments: Array<{ start: number; end: number; text: string }> };
+  adSegments: AdSegment[];
+  trailingText: string;
+}
+
+/** Step 3: Resolve audio URL — HEAD request, follow redirects, get metadata */
+export async function resolveAudio(audioUrl: string): Promise<AudioMeta> {
+  const res = await fetch(`${BASE}/audio/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audioUrl }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || 'Audio resolve failed');
+  }
+  return res.json();
+}
+
+/** Steps 4+5+6: Process a single audio chunk — fetch, transcribe, detect ads */
+export async function processAudioChunk(params: {
+  resolvedUrl: string;
+  chunkIndex: number;
+  totalChunks: number;
+  contentLength: number;
+  durationSec: number;
+  bitrate: number;
+  chunkDurationSec: number;
+  overlapSec: number;
+  episodeTitle: string;
+  prevChunkTrailingText: string;
+}): Promise<ChunkResult> {
+  const res = await fetch(`${BASE}/audio/chunk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || `Chunk ${params.chunkIndex} processing failed`);
+  }
+  return res.json();
+}
+
 // ─── Sandbox endpoint ────────────────────────────────────────────────────────
 
 export interface SandboxLine {

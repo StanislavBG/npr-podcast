@@ -49,6 +49,43 @@ export interface PlaybackConfig {
   recommendation: string;
 }
 
+// ─── Chunk merge/dedup (used by App.tsx chunk orchestrator) ─────────────────
+
+/**
+ * Merge ad segments from a new chunk into the existing accumulated segments.
+ * Handles deduplication from overlapping chunk regions and merges adjacent segments.
+ */
+export function mergeChunkAdSegments(
+  existing: AdSegment[],
+  incoming: AdSegment[],
+): AdSegment[] {
+  const all = [...existing, ...incoming];
+  if (all.length === 0) return [];
+
+  // Sort by startTime
+  all.sort((a, b) => a.startTime - b.startTime);
+
+  // Merge overlapping or adjacent segments (within 3s gap)
+  const merged: AdSegment[] = [{ ...all[0] }];
+  for (let i = 1; i < all.length; i++) {
+    const prev = merged[merged.length - 1];
+    const curr = all[i];
+    if (curr.startTime <= prev.endTime + 3) {
+      // Merge: extend range, keep higher confidence
+      prev.endTime = Math.max(prev.endTime, curr.endTime);
+      if (curr.confidence > prev.confidence) {
+        prev.confidence = curr.confidence;
+        prev.reason = curr.reason;
+        prev.type = curr.type;
+      }
+    } else {
+      merged.push({ ...curr });
+    }
+  }
+
+  return merged;
+}
+
 // ─── Player helpers (unchanged — used by Player.tsx timeupdate listener) ────
 
 /** Check if a given time falls within an ad segment */

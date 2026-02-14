@@ -108,9 +108,10 @@ export function createPodcastWorkflow(podcastId: string): Workflow {
         // Feed each chunk to transcription pipeline AND player buffer
         url: '/api/audio/stream',
         method: 'GET',
-        chunkStrategy: 'time-based',      // chunk by ~30s of audio
-        chunkSizeBytes: 480_000,           // ~30s at 128kbps MP3
-        lookaheadChunks: 3,                // stay 3 chunks (~90s) ahead of playback
+        chunkStrategy: 'time-based',      // chunk by ~5min of audio
+        chunkDurationSec: 300,             // 5 minutes per chunk (~4.7MB at 128kbps)
+        overlapSec: 10,                    // 10s overlap for boundary ad detection
+        lookaheadChunks: 2,                // process 2 chunks (~10min) ahead of playback
         parallelDownloads: 2,              // fetch 2 chunks concurrently
       },
       policy: { timeoutMs: 120000, maxAttempts: 2 },
@@ -362,6 +363,10 @@ export interface FlowState {
   steps: Record<string, StepStatus>;
   currentStep: string | null;
   error: string | null;
+  chunkProgress?: {
+    currentChunk: number;
+    totalChunks: number;
+  };
 }
 
 export function createInitialFlowState(): FlowState {
@@ -409,7 +414,12 @@ export function getFlowStatus(state: FlowState): 'idle' | 'running' | 'complete'
 export function getFlowActivity(state: FlowState): string {
   if (!state.currentStep) return '';
   const meta = STEP_META[state.currentStep];
-  return meta ? `${meta.label}...` : '';
+  if (!meta) return '';
+  const chunkSteps = ['step_start_audio_streaming', 'step_transcribe_chunks', 'step_mark_ad_locations', 'step_build_skip_map'];
+  if (state.chunkProgress && chunkSteps.includes(state.currentStep)) {
+    return `${meta.label} (${state.chunkProgress.currentChunk}/${state.chunkProgress.totalChunks})...`;
+  }
+  return `${meta.label}...`;
 }
 
 /** Export step order for consumers */
