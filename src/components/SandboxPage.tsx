@@ -5,6 +5,7 @@ import {
   sandboxAnalyze,
   parseDuration,
   formatTime,
+  formatTimestamp,
   type SandboxResult,
   type SandboxAdBlock,
   type SandboxLine,
@@ -257,6 +258,35 @@ function StepTranscribeChunks({ result }: { result: SandboxResult }) {
           Audio transcription did not produce the final transcript. Source used: {result.transcriptSource}
         </div>
       )}
+
+      {/* Full transcript text with hh:mm:ss timestamps */}
+      <h3 className="sb-sub-heading">Full Transcript</h3>
+      <div className="sb-qa-callout">
+        Verify the transcript is complete and readable. Each line is one sentence with a timestamp.
+        This is the input that Step 6 uses for ad classification.
+      </div>
+      <div className="sb-parsed-lines">
+        {result.transcript.lines.map(l => {
+          const totalWords = result.transcript.lines.length > 0
+            ? result.transcript.lines[result.transcript.lines.length - 1].cumulativeWords
+            : 0;
+          const dur = result.episode.durationSec;
+          const approxTime = dur > 0 && totalWords > 0
+            ? (l.cumulativeWords / totalWords) * dur
+            : 0;
+          return (
+            <div key={l.lineNum} className="sb-parsed-line">
+              <span className="sb-pl-time">{formatTimestamp(approxTime)}</span>
+              <span className="sb-pl-num">[{l.lineNum}]</span>
+              <span className="sb-pl-text">
+                {l.speaker && <strong>{l.speaker}: </strong>}
+                {l.text}
+              </span>
+              <span className="sb-pl-wc">{l.wordCount}w</span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
