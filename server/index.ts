@@ -1168,17 +1168,67 @@ app.post('/api/sandbox/analyze', async (req, res) => {
     let lines: SandboxLine[] = [];
     let transcriptSource = 'html';
 
-    // Step 1: PREFERRED — Transcribe the actual audio file (captures dynamic ads)
+    // Track audio pipeline details for sandbox step-by-step display
+    let audioDetails: {
+      available: boolean;
+      originalUrl: string;
+      resolvedUrl: string;
+      contentType: string;
+      contentLengthBytes: number;
+      downloadSizeMb: string;
+      segmentCount: number;
+      transcriptionModel: string;
+      audioDurationSec: number;
+      error: string | null;
+    } = {
+      available: !!audioUrl,
+      originalUrl: audioUrl || '',
+      resolvedUrl: '',
+      contentType: '',
+      contentLengthBytes: 0,
+      downloadSizeMb: '0',
+      segmentCount: 0,
+      transcriptionModel: 'gpt-4o-mini-transcribe',
+      audioDurationSec: 0,
+      error: null,
+    };
+
+    // Audio pipeline: resolve → stream → transcribe (captures dynamic ads)
     if (audioUrl && lines.length === 0) {
       try {
+        // Step 3: Resolve Audio Stream — HEAD request to follow redirects, get metadata
+        console.log(`[sandbox] Resolving audio URL: ${audioUrl.slice(0, 80)}...`);
+        const headRes = await fetch(audioUrl, {
+          method: 'HEAD',
+          headers: { 'User-Agent': 'NPR-Podcast-Player/1.0' },
+          redirect: 'follow',
+        });
+        audioDetails.resolvedUrl = headRes.url || audioUrl;
+        audioDetails.contentType = headRes.headers.get('content-type') || 'audio/mpeg';
+        const cl = headRes.headers.get('content-length');
+        audioDetails.contentLengthBytes = cl ? parseInt(cl, 10) : 0;
+        console.log(`[sandbox] Audio resolved: ${audioDetails.resolvedUrl.slice(0, 80)}, ${audioDetails.contentType}, ${audioDetails.contentLengthBytes} bytes`);
+
+        // Steps 4-5: Stream + Transcribe audio
         console.log(`[sandbox] Transcribing audio for "${episodeTitle}"...`);
         const transcription = await transcribeAudioFromUrl(audioUrl);
         lines = transcription.lines;
         transcriptSource = 'audio-transcription';
-        html = transcription.text; // Store raw text for reference
+        html = transcription.text;
         rawHtmlLength = transcription.text.length;
-        console.log(`[sandbox] Audio transcription: ${lines.length} lines, ${transcription.lines.length > 0 ? transcription.lines[transcription.lines.length - 1].cumulativeWords : 0} words`);
+
+        audioDetails.downloadSizeMb = (rawHtmlLength > 0 ? rawHtmlLength / 1024 / 1024 : 0).toFixed(1);
+        audioDetails.segmentCount = transcription.segments.length;
+        audioDetails.audioDurationSec = transcription.durationSec;
+
+        // Recalculate download size from actual audio fetch (estimate from content-length)
+        if (audioDetails.contentLengthBytes > 0) {
+          audioDetails.downloadSizeMb = (audioDetails.contentLengthBytes / 1024 / 1024).toFixed(1);
+        }
+
+        console.log(`[sandbox] Audio transcription: ${lines.length} lines, ${transcription.lines.length > 0 ? transcription.lines[transcription.lines.length - 1].cumulativeWords : 0} words, ${transcription.segments.length} segments`);
       } catch (sttErr: any) {
+        audioDetails.error = sttErr.message;
         console.warn(`[sandbox] Audio transcription failed: ${sttErr.message} — falling back to text transcript`);
       }
     }
@@ -1403,6 +1453,7 @@ Return JSON:
       prompts: { system: systemPrompt, user: userPrompt },
       llmResponse: llmRaw,
       skipMap,
+      audioDetails,
     });
   } catch (err: any) {
     console.error('Sandbox analyze error:', err.message);

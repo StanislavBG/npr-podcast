@@ -9,12 +9,13 @@ import {
   type SandboxAdBlock,
   type SandboxLine,
 } from '../services/api';
+import { STEP_ORDER, STEP_META } from '../workflows/podcastFlow';
 
 interface Props {
   onBack: () => void;
 }
 
-// ─── Step definitions (mirrors podcastFlow.ts pipeline) ─────────────────────
+// ─── Step definitions: derived from podcastFlow.ts (single source of truth) ──
 
 interface StepDef {
   id: string;
@@ -23,14 +24,22 @@ interface StepDef {
   type: string;
 }
 
-const STEPS: StepDef[] = [
-  { id: 'fetch-rss',             label: 'Fetch RSS Feed',       subtitle: 'Pull podcast feed',         type: 'http.request' },
-  { id: 'parse-episodes',       label: 'Parse Episodes',        subtitle: 'Extract episode metadata',  type: 'http.request' },
-  { id: 'fetch-transcript',     label: 'Fetch Transcript',      subtitle: 'Get transcript content',    type: 'http.request' },
-  { id: 'llm-parse-transcript', label: 'LLM Parse Transcript',  subtitle: 'Extract structured segments', type: 'ai.generate-text' },
-  { id: 'llm-detect-ads',       label: 'LLM Detect Ads',        subtitle: 'Identify ad time ranges',   type: 'ai.generate-text' },
-  { id: 'llm-prepare-player',   label: 'LLM Prepare Player',    subtitle: 'Build skip-map + summary',  type: 'ai.summarize' },
-];
+const STEPS: StepDef[] = STEP_ORDER.map(id => ({
+  id,
+  label: STEP_META[id].label,
+  type: STEP_META[id].type,
+  subtitle: {
+    step_fetch_rss:             'Pull podcast RSS feed from NPR',
+    step_parse_episodes:        'Extract episode metadata from feed',
+    step_resolve_audio_stream:  'Resolve CDN URL, get audio metadata',
+    step_start_audio_streaming: 'Stream audio chunks ahead of playback',
+    step_transcribe_chunks:     'Speech-to-text on audio via OpenAI',
+    step_mark_ad_locations:     'LLM classifies segments as content or ad',
+    step_build_skip_map:        'Merge adjacent ad segments into skip ranges',
+    step_fetch_html_transcript: 'Fetch NPR HTML transcript for cross-reference',
+    step_finalize_playback:     'Reconcile + summary + build player config',
+  }[id] || '',
+}));
 
 // ─── Step content renderers ──────────────────────────────────────────────────
 
@@ -51,12 +60,14 @@ function StepFetchRss({ podcastName, podcastId }: { podcastName: string; podcast
 
 function StepParseEpisodes({ result }: { result: SandboxResult }) {
   const { episode, summary } = result;
+  const audio = result.audioDetails;
   return (
     <div className="sb-step-body">
       <h2 className="sb-step-heading">{episode.title}</h2>
       <div className="sb-kv-grid">
         <div className="sb-kv"><span className="sb-kv-k">Duration</span><span className="sb-kv-v">{formatTime(episode.durationSec)} ({episode.durationSec}s)</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Transcript URL</span><span className="sb-kv-v sb-kv-url">{episode.transcriptUrl || '(none)'}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Audio available</span><span className="sb-kv-v">{audio?.available ? 'Yes' : 'No'}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Strategy</span><span className="sb-kv-v">{summary.strategy}</span></div>
       </div>
       <Timeline result={result} />
@@ -64,9 +75,297 @@ function StepParseEpisodes({ result }: { result: SandboxResult }) {
   );
 }
 
-function StepFetchTranscript({ result }: { result: SandboxResult }) {
+function StepResolveAudioStream({ result }: { result: SandboxResult }) {
+  const audio = result.audioDetails;
+  if (!audio || !audio.available) {
+    return (
+      <div className="sb-step-body">
+        <div className="sb-qa-alert">
+          No audio URL available for this episode. Audio pipeline skipped — falling back to text transcript.
+        </div>
+        <div className="sb-qa-callout">
+          The main flow skips steps 3-5 when no audio URL is present in the RSS feed.
+          This happens when the episode only provides an HTML transcript link.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        <strong>HEAD request</strong> follows podtrac/megaphone redirects to resolve the final CDN URL
+        and retrieve audio metadata (Content-Type, Content-Length, Accept-Ranges).
+      </div>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Original URL</span><span className="sb-kv-v sb-kv-url">{audio.originalUrl}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Resolved URL</span><span className="sb-kv-v sb-kv-url">{audio.resolvedUrl || '(same)'}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Content-Type</span><span className="sb-kv-v">{audio.contentType || '(unknown)'}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Content-Length</span><span className="sb-kv-v">{audio.contentLengthBytes > 0 ? `${audio.downloadSizeMb} MB (${audio.contentLengthBytes.toLocaleString()} bytes)` : '(unknown)'}</span></div>
+      </div>
+      {audio.resolvedUrl && audio.resolvedUrl !== audio.originalUrl && (
+        <div className="sb-qa-ok">
+          URL redirected — final CDN endpoint resolved successfully.
+        </div>
+      )}
+      {audio.error && (
+        <div className="sb-qa-alert">
+          Audio resolution failed: {audio.error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StepStreamAudioChunks({ result }: { result: SandboxResult }) {
+  const audio = result.audioDetails;
+  if (!audio || !audio.available) {
+    return (
+      <div className="sb-step-body">
+        <div className="sb-qa-alert">
+          Audio pipeline skipped — no audio URL available.
+        </div>
+      </div>
+    );
+  }
+
+  if (audio.error) {
+    return (
+      <div className="sb-step-body">
+        <div className="sb-qa-alert">
+          Audio streaming failed: {audio.error}
+        </div>
+        <div className="sb-qa-callout">
+          The pipeline falls back to HTML transcript when audio streaming fails.
+        </div>
+      </div>
+    );
+  }
+
+  const chunkSizeBytes = 480_000; // ~30s at 128kbps
+  const estimatedChunks = audio.contentLengthBytes > 0
+    ? Math.ceil(audio.contentLengthBytes / chunkSizeBytes)
+    : 0;
+
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        <strong>Audio is downloaded</strong> from the resolved CDN URL. In the streaming pipeline,
+        this would be chunked into ~30-second segments via HTTP Range requests, staying ~90 seconds
+        ahead of playback position.
+      </div>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Download size</span><span className="sb-kv-v">{audio.downloadSizeMb} MB</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Format</span><span className="sb-kv-v">{audio.contentType}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Chunk strategy</span><span className="sb-kv-v">~30s per chunk ({(chunkSizeBytes / 1024).toFixed(0)} KB at 128kbps)</span></div>
+        {estimatedChunks > 0 && (
+          <div className="sb-kv"><span className="sb-kv-k">Estimated chunks</span><span className="sb-kv-v">{estimatedChunks}</span></div>
+        )}
+        <div className="sb-kv"><span className="sb-kv-k">Lookahead</span><span className="sb-kv-v">3 chunks (~90s ahead of playback)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Parallel downloads</span><span className="sb-kv-v">2</span></div>
+      </div>
+      <div className="sb-qa-ok">
+        Audio downloaded successfully. Chunks are fed into the transcription pipeline.
+      </div>
+    </div>
+  );
+}
+
+function StepTranscribeChunks({ result }: { result: SandboxResult }) {
+  const audio = result.audioDetails;
+  const isAudioSource = result.transcriptSource === 'audio-transcription';
+
+  if (!audio || !audio.available) {
+    return (
+      <div className="sb-step-body">
+        <div className="sb-qa-alert">
+          Audio transcription skipped — no audio URL available.
+        </div>
+        <div className="sb-qa-callout">
+          Transcript was obtained from: <strong>{result.transcriptSource || 'html'}</strong>
+        </div>
+      </div>
+    );
+  }
+
+  if (audio.error) {
+    return (
+      <div className="sb-step-body">
+        <div className="sb-qa-alert">
+          Audio transcription failed: {audio.error}
+        </div>
+        <div className="sb-qa-callout">
+          Fell back to text transcript source: <strong>{result.transcriptSource || 'html'}</strong>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        Each audio chunk is sent to <strong>OpenAI {audio.transcriptionModel}</strong> for
+        speech-to-text with <code>verbose_json</code> format to get segment-level timestamps.
+        {isAudioSource && (
+          <> Audio transcription captures <strong>dynamic ads</strong> inserted by Megaphone
+          that never appear in text transcripts.</>
+        )}
+      </div>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Model</span><span className="sb-kv-v">{audio.transcriptionModel}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Response format</span><span className="sb-kv-v">verbose_json (segment timestamps)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Segments returned</span><span className="sb-kv-v">{audio.segmentCount}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Audio duration (STT)</span><span className="sb-kv-v">{audio.audioDurationSec > 0 ? `${formatTime(audio.audioDurationSec)} (${audio.audioDurationSec.toFixed(1)}s)` : '(not reported)'}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Lines produced</span><span className="sb-kv-v">{result.transcript.lineCount}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{result.transcript.totalWords.toLocaleString()}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Transcript source used</span><span className="sb-kv-v">{isAudioSource ? 'Audio transcription (STT)' : result.transcriptSource || 'html'}</span></div>
+      </div>
+      {isAudioSource ? (
+        <div className="sb-qa-ok">
+          Audio transcription succeeded — this captures dynamic ads in the audio stream.
+        </div>
+      ) : (
+        <div className="sb-qa-alert">
+          Audio transcription did not produce the final transcript. Source used: {result.transcriptSource}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StepMarkAdLocations({ result }: { result: SandboxResult }) {
+  const { adBlocks, episode, summary } = result;
+  let parsed: any = null;
+  try { parsed = JSON.parse(result.llmResponse); } catch { /* not JSON */ }
+
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        Numbered transcript lines are sent to the LLM. It identifies contiguous line ranges
+        that are ads, sponsor reads, funding credits, or promos.
+      </div>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Ad blocks found</span><span className="sb-kv-v">{summary.totalAdBlocks}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Ad word %</span><span className="sb-kv-v">{summary.adWordPercent}%</span></div>
+      </div>
+
+      {adBlocks.length === 0 ? (
+        <div className="sb-qa-alert">
+          No ad blocks detected. The transcript may not contain any ad-like content,
+          or ads are dynamically inserted into the audio stream only.
+        </div>
+      ) : (
+        <>
+          <Timeline result={result} />
+          <div className="sb-ad-list">
+            {adBlocks.map((b, i) => (
+              <AdBlockCard key={i} block={b} index={i} durationSec={episode.durationSec} />
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Annotated transcript */}
+      <h3 className="sb-sub-heading">Annotated Transcript</h3>
+      <div className="sb-qa-callout">
+        Lines highlighted in red are detected ad blocks. Scan for any the LLM may have missed.
+      </div>
+      <TranscriptViewer
+        lines={result.transcript.lines}
+        adBlocks={result.adBlocks}
+        durationSec={result.episode.durationSec}
+      />
+
+      {/* LLM response detail */}
+      <h3 className="sb-sub-heading">System Prompt</h3>
+      <pre className="sb-code-block sb-prompt-text">{result.prompts.system}</pre>
+
+      <h3 className="sb-sub-heading">User Prompt</h3>
+      <pre className="sb-code-block sb-prompt-text">{result.prompts.user}</pre>
+
+      <h3 className="sb-sub-heading">Raw LLM Response</h3>
+      {parsed && parsed.adBlocks?.length === 0 && (
+        <div className="sb-qa-alert">
+          The LLM returned zero ad blocks.
+        </div>
+      )}
+      <pre className="sb-code-block sb-json-text">{result.llmResponse}</pre>
+    </div>
+  );
+}
+
+function StepBuildSkipMap({ result }: { result: SandboxResult }) {
+  const { adBlocks, episode } = result;
+  const totalWords = result.transcript.lines.length > 0
+    ? result.transcript.lines[result.transcript.lines.length - 1].cumulativeWords
+    : 0;
+  const dur = episode.durationSec;
+
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        <strong>Pure computation</strong> — no external calls. Adjacent ad segments are merged,
+        padding is added (0.5s before, 0.3s after), and line ranges are mapped to timestamps
+        using proportional word position.
+      </div>
+
+      <h3 className="sb-sub-heading">Timestamp Mapping</h3>
+      <div className="sb-qa-math">
+        <div className="sb-qa-row">
+          <span className="sb-qa-label">Total transcript words</span>
+          <span className="sb-qa-val">{totalWords.toLocaleString()}</span>
+        </div>
+        <div className="sb-qa-row">
+          <span className="sb-qa-label">Audio duration</span>
+          <span className="sb-qa-val">{formatTime(dur)} ({dur}s)</span>
+        </div>
+        <div className="sb-qa-row">
+          <span className="sb-qa-label">Mapping formula</span>
+          <span className="sb-qa-val">timeSec = (cumulativeWords / totalWords) * duration</span>
+        </div>
+      </div>
+
+      {adBlocks.length > 0 && (
+        <>
+          <h3 className="sb-sub-heading">Ad Block Mappings</h3>
+          <div className="sb-ad-list">
+            {adBlocks.map((b, i) => (
+              <div key={i} className="sb-ad-card">
+                <div className="sb-ad-card-header">
+                  <span className="sb-ad-badge">AD {i + 1}</span>
+                  <span className="sb-ad-lines">Lines {b.startLine}--{b.endLine}</span>
+                  <span className="sb-ad-time">Words {b.startWord}--{b.endWord}</span>
+                </div>
+                <div className="sb-qa-math" style={{ marginTop: '0.5rem' }}>
+                  <div className="sb-qa-row">
+                    <span className="sb-qa-label">Start</span>
+                    <span className="sb-qa-val">{b.startWord}/{totalWords} words = {formatTime(b.startTimeSec)} ({b.startTimeSec.toFixed(1)}s)</span>
+                  </div>
+                  <div className="sb-qa-row">
+                    <span className="sb-qa-label">End</span>
+                    <span className="sb-qa-val">{b.endWord}/{totalWords} words = {formatTime(b.endTimeSec)} ({b.endTimeSec.toFixed(1)}s)</span>
+                  </div>
+                  <div className="sb-qa-row sb-qa-highlight">
+                    <span className="sb-qa-label">Duration</span>
+                    <span className="sb-qa-val">{(b.endTimeSec - b.startTimeSec).toFixed(1)}s</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <Timeline result={result} />
+    </div>
+  );
+}
+
+function StepFetchHtmlTranscript({ result }: { result: SandboxResult }) {
   const { rawHtml, transcript, qa } = result;
   const source = result.transcriptSource || 'html';
+  const isAudioSource = source === 'audio-transcription';
   const sourceLabels: Record<string, string> = {
     'audio-transcription': 'Audio Transcription (speech-to-text)',
     'srt': 'SRT subtitle file',
@@ -82,6 +381,12 @@ function StepFetchTranscript({ result }: { result: SandboxResult }) {
 
   return (
     <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        Runs in <strong>parallel</strong> with the audio pipeline (steps 3-7).
+        {isAudioSource
+          ? ' Since audio transcription succeeded, this HTML transcript serves as a cross-reference for validation in step 9.'
+          : ' This is the primary transcript source for this episode.'}
+      </div>
       <div className="sb-kv-grid">
         <div className="sb-kv"><span className="sb-kv-k">Source</span><span className="sb-kv-v">{sourceLabels[source] || source}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Content size</span><span className="sb-kv-v">{(rawHtml.length / 1024).toFixed(1)} KB ({rawHtml.length.toLocaleString()} chars)</span></div>
@@ -97,13 +402,6 @@ function StepFetchTranscript({ result }: { result: SandboxResult }) {
         <div className="sb-qa-alert">
           Zero &lt;p&gt; tags found. The transcript HTML may have changed structure,
           or NPR may be blocking the request.
-        </div>
-      )}
-
-      {source === 'audio-transcription' && (
-        <div className="sb-qa-ok">
-          Audio transcription captures dynamic ads injected into the audio stream
-          that don't appear in text transcripts.
         </div>
       )}
 
@@ -152,103 +450,15 @@ function StepFetchTranscript({ result }: { result: SandboxResult }) {
   );
 }
 
-function StepLlmParseTranscript({ result }: { result: SandboxResult }) {
-  const { lines } = result.transcript;
-  const speakers = new Set(lines.filter(l => l.speaker).map(l => l.speaker));
-
-  return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        <strong>LLM extracts structured segments</strong> with speaker attribution
-        from the raw transcript content.
-      </div>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Total lines</span><span className="sb-kv-v">{lines.length}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Lines with speaker</span><span className="sb-kv-v">{result.qa.linesWithSpeaker}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Lines without speaker</span><span className="sb-kv-v">{result.qa.linesWithoutSpeaker}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Unique speakers</span><span className="sb-kv-v">{speakers.size}</span></div>
-      </div>
-
-      {speakers.size > 0 && (
-        <>
-          <h3 className="sb-sub-heading">Speakers</h3>
-          <div className="sb-kv-grid">
-            {[...speakers].map(s => (
-              <div key={s} className="sb-kv">
-                <span className="sb-kv-k">{s}</span>
-                <span className="sb-kv-v">{lines.filter(l => l.speaker === s).length} lines</span>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-
-      <h3 className="sb-sub-heading">System Prompt</h3>
-      <pre className="sb-code-block sb-prompt-text">{result.prompts.system}</pre>
-    </div>
-  );
-}
-
-function StepLlmDetectAds({ result }: { result: SandboxResult }) {
-  const { adBlocks, episode, summary } = result;
-  let parsed: any = null;
-  try { parsed = JSON.parse(result.llmResponse); } catch { /* not JSON */ }
-
-  return (
-    <div className="sb-step-body">
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Ad blocks found</span><span className="sb-kv-v">{summary.totalAdBlocks}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Ad word %</span><span className="sb-kv-v">{summary.adWordPercent}%</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">LLM-detected ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
-      </div>
-
-      {adBlocks.length === 0 ? (
-        <div className="sb-qa-alert">
-          No ad blocks detected. The transcript may not contain any ad-like content,
-          or ads are dynamically inserted into the audio stream only.
-        </div>
-      ) : (
-        <>
-          <Timeline result={result} />
-          <div className="sb-ad-list">
-            {adBlocks.map((b, i) => (
-              <AdBlockCard key={i} block={b} index={i} durationSec={episode.durationSec} />
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* Annotated transcript */}
-      <h3 className="sb-sub-heading">Annotated Transcript</h3>
-      <div className="sb-qa-callout">
-        Lines highlighted in red are detected ad blocks. Scan for any the LLM may have missed.
-      </div>
-      <TranscriptViewer
-        lines={result.transcript.lines}
-        adBlocks={result.adBlocks}
-        durationSec={result.episode.durationSec}
-      />
-
-      {/* LLM response detail */}
-      <h3 className="sb-sub-heading">User Prompt</h3>
-      <pre className="sb-code-block sb-prompt-text">{result.prompts.user}</pre>
-
-      <h3 className="sb-sub-heading">Raw LLM Response</h3>
-      {parsed && parsed.adBlocks?.length === 0 && (
-        <div className="sb-qa-alert">
-          The LLM returned zero ad blocks.
-        </div>
-      )}
-      <pre className="sb-code-block sb-json-text">{result.llmResponse}</pre>
-    </div>
-  );
-}
-
-function StepLlmPreparePlayer({ result }: { result: SandboxResult }) {
+function StepFinalizePlayback({ result }: { result: SandboxResult }) {
   const { summary } = result;
   return (
     <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        Waits for <strong>both</strong> the audio pipeline (steps 3-7) and the HTML transcript
+        (step 8). Cross-references audio-detected ads against editorial transcript, validates
+        skip map, and produces episode summary + final playback config.
+      </div>
       <div className="sb-kv-grid">
         <div className="sb-kv"><span className="sb-kv-k">Total ad blocks</span><span className="sb-kv-v">{summary.totalAdBlocks}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
@@ -449,9 +659,9 @@ export function SandboxPage({ onBack }: Props) {
           return;
         }
 
-        setStatus(`Fetching transcript: ${ep.title}...`);
+        setStatus(`Analyzing: ${ep.title}...`);
 
-        // 3. Run analysis (prefer audio transcription when audioUrl available)
+        // 3. Run full analysis (all 9 steps happen server-side)
         const res = await sandboxAnalyze(
           ep.transcriptUrl || '',
           ep.title,
@@ -498,6 +708,7 @@ export function SandboxPage({ onBack }: Props) {
   const goLeft = () => setStep(s => Math.max(s - 1, 0));
   const goRight = () => setStep(s => Math.min(s + 1, STEPS.length - 1));
   const current = STEPS[step];
+  const currentStepId = STEP_ORDER[step];
 
   // ─── Render ──────────────────────────────────────────────────────────────
 
@@ -507,7 +718,7 @@ export function SandboxPage({ onBack }: Props) {
       <header className="sb-header">
         <button className="sb-back" onClick={onBack}>Back</button>
         <div className="sb-header-center">
-          <h1 className="sb-title">Ad Detection QA</h1>
+          <h1 className="sb-title">Pipeline Inspector</h1>
           {result && (
             <span className="sb-header-ep">{result.episode.title}</span>
           )}
@@ -562,12 +773,15 @@ export function SandboxPage({ onBack }: Props) {
               <p className="sb-step-subtitle">{current.subtitle}</p>
             </div>
 
-            {step === 0 && <StepFetchRss podcastName={podcastInfo.name} podcastId={podcastInfo.id} />}
-            {step === 1 && <StepParseEpisodes result={result} />}
-            {step === 2 && <StepFetchTranscript result={result} />}
-            {step === 3 && <StepLlmParseTranscript result={result} />}
-            {step === 4 && <StepLlmDetectAds result={result} />}
-            {step === 5 && <StepLlmPreparePlayer result={result} />}
+            {currentStepId === 'step_fetch_rss' && <StepFetchRss podcastName={podcastInfo.name} podcastId={podcastInfo.id} />}
+            {currentStepId === 'step_parse_episodes' && <StepParseEpisodes result={result} />}
+            {currentStepId === 'step_resolve_audio_stream' && <StepResolveAudioStream result={result} />}
+            {currentStepId === 'step_start_audio_streaming' && <StepStreamAudioChunks result={result} />}
+            {currentStepId === 'step_transcribe_chunks' && <StepTranscribeChunks result={result} />}
+            {currentStepId === 'step_mark_ad_locations' && <StepMarkAdLocations result={result} />}
+            {currentStepId === 'step_build_skip_map' && <StepBuildSkipMap result={result} />}
+            {currentStepId === 'step_fetch_html_transcript' && <StepFetchHtmlTranscript result={result} />}
+            {currentStepId === 'step_finalize_playback' && <StepFinalizePlayback result={result} />}
           </div>
 
           {/* Bottom nav */}
