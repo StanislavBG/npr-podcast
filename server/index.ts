@@ -1207,6 +1207,10 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         audioDetails.contentType = headRes.headers.get('content-type') || 'audio/mpeg';
         const cl = headRes.headers.get('content-length');
         audioDetails.contentLengthBytes = cl ? parseInt(cl, 10) : 0;
+        // Compute download size immediately from HEAD (available even if transcription fails)
+        if (audioDetails.contentLengthBytes > 0) {
+          audioDetails.downloadSizeMb = (audioDetails.contentLengthBytes / 1024 / 1024).toFixed(1);
+        }
         console.log(`[sandbox] Audio resolved: ${audioDetails.resolvedUrl.slice(0, 80)}, ${audioDetails.contentType}, ${audioDetails.contentLengthBytes} bytes`);
 
         // Steps 4-5: Stream + Transcribe audio
@@ -1217,14 +1221,8 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         html = transcription.text;
         rawHtmlLength = transcription.text.length;
 
-        audioDetails.downloadSizeMb = (rawHtmlLength > 0 ? rawHtmlLength / 1024 / 1024 : 0).toFixed(1);
         audioDetails.segmentCount = transcription.segments.length;
         audioDetails.audioDurationSec = transcription.durationSec;
-
-        // Recalculate download size from actual audio fetch (estimate from content-length)
-        if (audioDetails.contentLengthBytes > 0) {
-          audioDetails.downloadSizeMb = (audioDetails.contentLengthBytes / 1024 / 1024).toFixed(1);
-        }
 
         console.log(`[sandbox] Audio transcription: ${lines.length} lines, ${transcription.lines.length > 0 ? transcription.lines[transcription.lines.length - 1].cumulativeWords : 0} words, ${transcription.segments.length} segments`);
       } catch (sttErr: any) {

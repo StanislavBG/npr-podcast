@@ -59,7 +59,7 @@ function StepFetchRss({ podcastName, podcastId }: { podcastName: string; podcast
 }
 
 function StepParseEpisodes({ result }: { result: SandboxResult }) {
-  const { episode, summary } = result;
+  const { episode } = result;
   const audio = result.audioDetails;
   return (
     <div className="sb-step-body">
@@ -67,8 +67,10 @@ function StepParseEpisodes({ result }: { result: SandboxResult }) {
       <div className="sb-kv-grid">
         <div className="sb-kv"><span className="sb-kv-k">Duration</span><span className="sb-kv-v">{formatTime(episode.durationSec)} ({episode.durationSec}s)</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Transcript URL</span><span className="sb-kv-v sb-kv-url">{episode.transcriptUrl || '(none)'}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Audio available</span><span className="sb-kv-v">{audio?.available ? 'Yes' : 'No'}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Strategy</span><span className="sb-kv-v">{summary.strategy}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Audio URL</span><span className="sb-kv-v">{audio?.available ? 'Yes' : 'No'}</span></div>
+      </div>
+      <div className="sb-qa-callout">
+        Episode metadata extracted from RSS feed. Next step: resolve the audio stream URL.
       </div>
     </div>
   );
@@ -90,6 +92,13 @@ function StepResolveAudioStream({ result }: { result: SandboxResult }) {
     );
   }
 
+  // HEAD request succeeded if we have a resolvedUrl or contentType
+  const headSucceeded = !!(audio.resolvedUrl || audio.contentType);
+  const fileSizeMb = audio.contentLengthBytes > 0
+    ? (audio.contentLengthBytes / 1024 / 1024).toFixed(1)
+    : audio.downloadSizeMb;
+  const tooLarge = audio.contentLengthBytes > 25 * 1024 * 1024; // OpenAI Whisper 25MB limit
+
   return (
     <div className="sb-step-body">
       <div className="sb-qa-callout">
@@ -100,16 +109,22 @@ function StepResolveAudioStream({ result }: { result: SandboxResult }) {
         <div className="sb-kv"><span className="sb-kv-k">Original URL</span><span className="sb-kv-v sb-kv-url">{audio.originalUrl}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Resolved URL</span><span className="sb-kv-v sb-kv-url">{audio.resolvedUrl || '(same)'}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Content-Type</span><span className="sb-kv-v">{audio.contentType || '(unknown)'}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Content-Length</span><span className="sb-kv-v">{audio.contentLengthBytes > 0 ? `${audio.downloadSizeMb} MB (${audio.contentLengthBytes.toLocaleString()} bytes)` : '(unknown)'}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Content-Length</span><span className="sb-kv-v">{audio.contentLengthBytes > 0 ? `${fileSizeMb} MB (${audio.contentLengthBytes.toLocaleString()} bytes)` : '(unknown)'}</span></div>
       </div>
-      {audio.resolvedUrl && audio.resolvedUrl !== audio.originalUrl && (
+      {headSucceeded && audio.resolvedUrl !== audio.originalUrl && (
         <div className="sb-qa-ok">
           URL redirected — final CDN endpoint resolved successfully.
         </div>
       )}
-      {audio.error && (
+      {headSucceeded && !audio.resolvedUrl && (
+        <div className="sb-qa-ok">
+          Audio URL resolved (no redirect).
+        </div>
+      )}
+      {tooLarge && (
         <div className="sb-qa-alert">
-          Audio resolution failed: {audio.error}
+          Audio file is {fileSizeMb} MB — exceeds OpenAI Whisper's 25 MB upload limit.
+          Transcription in step 5 will likely fail with a 413 error unless chunking is used.
         </div>
       )}
     </div>
@@ -128,44 +143,46 @@ function StepStreamAudioChunks({ result }: { result: SandboxResult }) {
     );
   }
 
-  if (audio.error) {
-    return (
-      <div className="sb-step-body">
-        <div className="sb-qa-alert">
-          Audio streaming failed: {audio.error}
-        </div>
-        <div className="sb-qa-callout">
-          The pipeline falls back to HTML transcript when audio streaming fails.
-        </div>
-      </div>
-    );
-  }
-
   const chunkSizeBytes = 480_000; // ~30s at 128kbps
+  const fileSizeMb = audio.contentLengthBytes > 0
+    ? (audio.contentLengthBytes / 1024 / 1024).toFixed(1)
+    : audio.downloadSizeMb;
   const estimatedChunks = audio.contentLengthBytes > 0
     ? Math.ceil(audio.contentLengthBytes / chunkSizeBytes)
     : 0;
+  const tooLarge = audio.contentLengthBytes > 25 * 1024 * 1024;
+  const is413 = audio.error?.includes('413');
 
   return (
     <div className="sb-step-body">
       <div className="sb-qa-callout">
-        <strong>Audio is downloaded</strong> from the resolved CDN URL. In the streaming pipeline,
-        this would be chunked into ~30-second segments via HTTP Range requests, staying ~90 seconds
-        ahead of playback position.
+        Audio is fetched from the resolved CDN URL. Currently downloads the full file
+        in one request. The streaming pipeline would chunk into ~30s segments via HTTP Range requests.
       </div>
       <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Download size</span><span className="sb-kv-v">{audio.downloadSizeMb} MB</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">File size</span><span className="sb-kv-v">{fileSizeMb} MB ({audio.contentLengthBytes.toLocaleString()} bytes)</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Format</span><span className="sb-kv-v">{audio.contentType}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Chunk strategy</span><span className="sb-kv-v">~30s per chunk ({(chunkSizeBytes / 1024).toFixed(0)} KB at 128kbps)</span></div>
         {estimatedChunks > 0 && (
           <div className="sb-kv"><span className="sb-kv-k">Estimated chunks</span><span className="sb-kv-v">{estimatedChunks}</span></div>
         )}
         <div className="sb-kv"><span className="sb-kv-k">Lookahead</span><span className="sb-kv-v">3 chunks (~90s ahead of playback)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Parallel downloads</span><span className="sb-kv-v">2</span></div>
       </div>
-      <div className="sb-qa-ok">
-        Audio downloaded successfully. Chunks are fed into the transcription pipeline.
-      </div>
+      {audio.error ? (
+        <div className="sb-qa-alert">
+          Audio download/processing failed: {audio.error}
+          {is413 && tooLarge && (
+            <div style={{ marginTop: '0.5rem' }}>
+              File is {fileSizeMb} MB but OpenAI Whisper accepts max 25 MB.
+              Chunked streaming would solve this by sending ~30s segments individually.
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="sb-qa-ok">
+          Audio downloaded successfully ({fileSizeMb} MB). Feeding into transcription pipeline.
+        </div>
+      )}
     </div>
   );
 }
