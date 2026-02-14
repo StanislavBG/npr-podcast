@@ -738,41 +738,85 @@ app.post('/api/audio/detect-ads', async (req, res) => {
   }
 
   try {
-    // Build numbered transcript for the LLM — each line is one Whisper segment
-    const numberedTranscript = segments.map((s, i) =>
-      `[${i + 1}] (${s.start.toFixed(1)}s – ${s.end.toFixed(1)}s) ${s.text}`
+    // Split large segments into sentences so the LLM can identify individual
+    // ad sentences — Whisper often returns huge segments (800+ words each)
+    interface SplitLine { idx: number; start: number; end: number; text: string }
+    const splitLines: SplitLine[] = [];
+    let lineIdx = 0;
+
+    for (const seg of segments) {
+      if (!seg.text) continue;
+      const wordCount = seg.text.split(/\s+/).filter(Boolean).length;
+
+      if (wordCount <= 80) {
+        // Short segment — keep as-is
+        lineIdx++;
+        splitLines.push({ idx: lineIdx, start: seg.start, end: seg.end, text: seg.text });
+      } else {
+        // Long segment — split into sentences, interpolate timestamps
+        const sentences = seg.text.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
+        const totalWords = seg.text.split(/\s+/).filter(Boolean).length;
+        const segDuration = seg.end - seg.start;
+        let wordsProcessed = 0;
+
+        for (const sent of sentences) {
+          const sentWords = sent.trim().split(/\s+/).filter(Boolean).length;
+          const sentStart = seg.start + (wordsProcessed / totalWords) * segDuration;
+          wordsProcessed += sentWords;
+          const sentEnd = seg.start + (wordsProcessed / totalWords) * segDuration;
+
+          lineIdx++;
+          splitLines.push({ idx: lineIdx, start: sentStart, end: sentEnd, text: sent.trim() });
+        }
+      }
+    }
+
+    // Build numbered transcript for the LLM — each line is one sentence
+    const numberedTranscript = splitLines.map(l =>
+      `[${l.idx}] (${l.start.toFixed(1)}s – ${l.end.toFixed(1)}s) ${l.text}`
     ).join('\n');
 
-    const systemPrompt = `You are an expert ad detector for podcast transcripts. You will receive the full transcript of a podcast episode with numbered, timestamped sentences.
+    const systemPrompt = `You are an expert ad detector for NPR podcast transcripts. You will receive the full transcript of a podcast episode, split into numbered, timestamped sentences.
 
-Your job: find the COMPLETE SENTENCES that are advertisements, sponsor reads, or funding credits — NOT part of the actual podcast editorial content.
+Your job: find the SPECIFIC SENTENCES that are advertisements, sponsor reads, or funding credits — content that is NOT part of the actual podcast editorial discussion.
 
-WHAT TO LOOK FOR (these are complete sentences or runs of sentences):
-- Sponsor reads: "Support for this podcast comes from [Company]..." followed by a description of their product/service
-- Funding credits: "Support for NPR comes from..."
-- Calls to action: sentences containing "visit [website]", "use promo code", "download the app", "sign up at"
-- NPR promos: promotions for other NPR shows ("Coming up on All Things Considered...")
-- Dynamically inserted ads: abrupt topic changes to promotional content with different tone/speaker
+WHAT AD SECTIONS LOOK LIKE — they are short interruptions (typically 2-8 sentences) that break away from the podcast's editorial topic:
 
-WHAT IS NOT AN AD (do NOT flag these):
-- The podcast's own editorial content, even if it discusses companies, products, or money
-- Interview segments, even with business leaders
-- The host's own commentary or opinions
-- Topic transitions within the editorial content
+1. SPONSOR READS: The host pauses the editorial discussion to read a sponsor message.
+   - Usually starts with: "Support for this podcast comes from...", "This message comes from..."
+   - Contains a company/product name and description of what they offer
+   - Often ends with a call to action: "visit [website]", "use promo code [code]"
+   - Then the host returns to the editorial topic
+
+2. NPR FUNDING CREDITS: Short institutional credits.
+   - "Support for NPR comes from..."
+   - Usually 1-3 sentences
+
+3. SHOW PROMOS: Promotions for other NPR shows.
+   - "Coming up on [show name]...", "Check out [show name]..."
+
+4. DYNAMICALLY INSERTED ADS: Ads that sound different from the editorial content.
+   - Abrupt topic change to a product/service unrelated to the episode
+   - Usually 3-8 sentences
+
+WHAT IS NOT AN AD (do NOT flag these — this is critical):
+- The podcast's own editorial content, even if it discusses companies, products, money, or economics
+- Interview segments with guests, even if the guest works at a company
+- The host's own analysis, commentary, or opinions
+- Topic transitions within the editorial content ("Now let's talk about...")
 - Episode introductions or sign-offs by the hosts
 
-CRITICAL RULES:
-1. Return the EXACT segment numbers (start and end inclusive) for each ad block
-2. An ad block is a contiguous run of segments — every segment in the range must be ad content
-3. Be precise: if only segments 45-48 are an ad, do NOT include segment 44 or 49
-4. Most podcast episodes have 0-4 ad breaks, each lasting 15-60 seconds
-5. If you're unsure whether something is an ad, do NOT flag it
+IMPORTANT RULES:
+1. A typical NPR podcast (10-30 min) has only 1-4 ad breaks, each lasting 15-60 seconds (2-8 sentences)
+2. Total ad content is usually 5-15% of the episode, NEVER more than 20%
+3. If you're unsure, do NOT flag it — only flag obvious ad/sponsor content
+4. Return the EXACT sentence numbers (first and last inclusive) for each ad block
 
 Return ONLY valid JSON.`;
 
-    const userPrompt = `Here is the full transcript of "${episodeTitle}" (${Math.round(durationSec / 60)} minutes, ${segments.length} segments).
+    const userPrompt = `Here is the full transcript of "${episodeTitle}" (${Math.round(durationSec / 60)} minutes, ${splitLines.length} sentences).
 
-Find all advertisement segments. For each ad block, return the first and last segment numbers (inclusive).
+Find the ad sections — short interruptions where the editorial content pauses for sponsor reads, funding credits, or promos.
 
 TRANSCRIPT:
 ${numberedTranscript}
@@ -781,31 +825,30 @@ Return JSON:
 {
   "adBlocks": [
     {
-      "firstSegment": <number - first segment number in the ad>,
-      "lastSegment": <number - last segment number in the ad>,
-      "reason": "<short explanation of why this is an ad>"
+      "firstSegment": <first sentence number of the ad>,
+      "lastSegment": <last sentence number of the ad>,
+      "reason": "<short explanation>"
     }
   ]
 }`;
 
-    console.log(`[detect-ads] Analyzing ${segments.length} segments for "${episodeTitle}"`);
+    console.log(`[detect-ads] Analyzing ${splitLines.length} sentences (from ${segments.length} segments) for "${episodeTitle}"`);
     const { parsed } = await callLLM(systemPrompt, userPrompt, 0, 2048);
     const result = parsed as { adBlocks: Array<{ firstSegment: number; lastSegment: number; reason: string }> };
 
     const adBlocks = result.adBlocks || [];
     console.log(`[detect-ads] Found ${adBlocks.length} ad blocks`);
 
-    // Map segment ranges back to timestamps
+    // Map sentence ranges back to timestamps
     const adSegments = adBlocks.map(block => {
-      // Segment numbers are 1-indexed in the prompt
-      const firstIdx = block.firstSegment - 1;
-      const lastIdx = block.lastSegment - 1;
+      // Sentence numbers are 1-indexed in the prompt
+      const firstLine = splitLines.find(l => l.idx === block.firstSegment);
+      const lastLine = splitLines.find(l => l.idx === block.lastSegment);
 
-      const startSeg = segments[Math.max(0, Math.min(firstIdx, segments.length - 1))];
-      const endSeg = segments[Math.max(0, Math.min(lastIdx, segments.length - 1))];
+      if (!firstLine || !lastLine) return null;
 
-      const startTime = Math.round(startSeg.start);
-      const endTime = Math.round(endSeg.end);
+      const startTime = Math.round(firstLine.start);
+      const endTime = Math.round(lastLine.end);
       const midpoint = (startTime + endTime) / 2;
 
       let type: 'pre-roll' | 'mid-roll' | 'post-roll' | 'sponsor-mention' = 'mid-roll';
@@ -815,8 +858,10 @@ Return JSON:
       }
 
       // Collect the actual ad text for logging
-      const adText = segments.slice(firstIdx, lastIdx + 1).map(s => s.text).join(' ');
-      console.log(`[detect-ads]   ${type} [${startTime}s-${endTime}s]: "${adText.slice(0, 100)}..."`);
+      const adText = splitLines
+        .filter(l => l.idx >= block.firstSegment && l.idx <= block.lastSegment)
+        .map(l => l.text).join(' ');
+      console.log(`[detect-ads]   ${type} [${startTime}s-${endTime}s]: "${adText.slice(0, 120)}..."`);
 
       return {
         startTime,
@@ -825,7 +870,7 @@ Return JSON:
         confidence: 0.9,
         reason: block.reason,
       };
-    });
+    }).filter(Boolean) as Array<{ startTime: number; endTime: number; type: string; confidence: number; reason: string }>;
 
     res.json({ adSegments });
   } catch (err: any) {
@@ -1655,25 +1700,45 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           }
         }
 
-        // Build lines from all segments
+        // Build lines from all segments — split large segments into sentences
+        // so the LLM can identify individual ad sentences, not 800-word blobs
         let cumW = 0;
         let lineN = 0;
         for (const seg of allSegments) {
           if (!seg.text) continue;
-          let speaker = '';
-          let content = seg.text;
-          const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
-          if (speakerMatch) { speaker = speakerMatch[1].trim(); content = content.slice(speakerMatch[0].length).trim(); }
-          if (!content) continue;
-          lineN++;
-          const wc = content.split(/\s+/).filter(Boolean).length;
-          cumW += wc;
-          lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW });
+          const segWords = seg.text.split(/\s+/).filter(Boolean).length;
+
+          // If segment is short enough (<80 words), keep it as one line
+          if (segWords <= 80) {
+            let speaker = '';
+            let content = seg.text;
+            const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+            if (speakerMatch) { speaker = speakerMatch[1].trim(); content = content.slice(speakerMatch[0].length).trim(); }
+            if (!content) continue;
+            lineN++;
+            const wc = content.split(/\s+/).filter(Boolean).length;
+            cumW += wc;
+            lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW });
+          } else {
+            // Split long segments into sentences
+            const sentences = seg.text.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
+            for (const sent of sentences) {
+              let speaker = '';
+              let content = sent.trim();
+              const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+              if (speakerMatch) { speaker = speakerMatch[1].trim(); content = content.slice(speakerMatch[0].length).trim(); }
+              if (!content) continue;
+              lineN++;
+              const wc = content.split(/\s+/).filter(Boolean).length;
+              cumW += wc;
+              lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW });
+            }
+          }
         }
 
-        // If segments produced no lines but we have accumulated text, split it into lines
+        // If segments produced no lines but we have accumulated text, split it into sentences
         if (lines.length === 0 && allText.trim().length > 50) {
-          console.log(`[sandbox] No segments but got raw text (${allText.trim().split(/\s+/).length} words) — splitting into lines`);
+          console.log(`[sandbox] No segments but got raw text (${allText.trim().split(/\s+/).length} words) — splitting into sentences`);
           const sentences = allText.trim().split(/(?<=[.!?])\s+/);
           cumW = 0;
           lineN = 0;
@@ -1786,25 +1851,50 @@ app.post('/api/sandbox/analyze', async (req, res) => {
       return `[${l.lineNum}] ${spk}${l.text}`;
     }).join('\n');
 
-    const systemPrompt = `You are an ad-block detector for podcast transcripts. You read the full transcript and identify contiguous blocks of lines that are advertisements, sponsor reads, funding credits, or promotional content — NOT editorial content.
+    const systemPrompt = `You are an expert ad detector for NPR podcast transcripts. You will receive the full transcript of a podcast episode, split into numbered lines (one sentence per line).
 
-IMPORTANT: You are looking for OBVIOUS ad blocks. These are contiguous runs of lines where the content is clearly commercial/promotional. Typical patterns:
-- "Support for this podcast comes from..."
-- "This message comes from..."
-- Sponsor descriptions with calls-to-action ("visit example.com", "use promo code...")
-- NPR funding credits ("Support for NPR comes from...")
-- Show promos ("Coming up on..." for a different show)
+Your job: find the SPECIFIC SENTENCES that are advertisements, sponsor reads, or funding credits — content that is NOT part of the actual podcast editorial discussion.
 
-These ad blocks are typically 1-5 lines long and there are at most a few per episode. They are VERY obvious — a human would spot them instantly.
+WHAT AD SECTIONS LOOK LIKE — they are short interruptions (typically 2-8 sentences) that break away from the podcast's editorial topic:
 
-Do NOT flag: regular editorial discussion about economics/business/companies, interview content, the host's own commentary, or transitions between topics.
+1. SPONSOR READS: The host pauses the editorial discussion to read a sponsor message.
+   - Usually starts with a transition phrase: "Support for this podcast comes from...", "This message comes from...", "And now a word from our sponsor..."
+   - Contains a company/product name and description of what they offer
+   - Often ends with a call to action: "visit [website]", "use promo code [code]", "download the app at..."
+   - Then the host returns to the editorial topic
+
+2. NPR FUNDING CREDITS: Short institutional credits.
+   - "Support for NPR comes from..."
+   - Usually 1-3 sentences, very formulaic
+
+3. SHOW PROMOS: Promotions for other NPR shows.
+   - "Coming up on [show name]...", "Check out [show name]..."
+   - Usually 1-2 sentences
+
+4. DYNAMICALLY INSERTED ADS: Ads that sound different from the editorial content.
+   - Abrupt topic change to a product/service unrelated to the episode
+   - Different speaker or tone from the editorial hosts
+   - Usually 3-8 sentences
+
+WHAT IS NOT AN AD (do NOT flag these — this is critical):
+- The podcast's own editorial content, even if it discusses companies, products, money, economics, or business
+- Interview segments with guests, even if the guest works at a company
+- The host's own opinions, analysis, or commentary
+- Topic transitions within the editorial content ("Now let's talk about...")
+- Episode introductions or sign-offs by the hosts
+- Questions from the host to a guest
+
+IMPORTANT RULES:
+1. A typical NPR podcast episode (10-30 minutes) has only 1-4 ad breaks, each lasting 15-60 seconds (2-8 sentences)
+2. Total ad content is usually 5-15% of the episode, NEVER more than 20%
+3. If you're unsure whether something is an ad, do NOT flag it — only flag obvious ads
+4. Be precise with line numbers: only include lines that are actually ad content
 
 Return ONLY valid JSON.`;
 
-    const userPrompt = `Here is the full transcript of "${episodeTitle || 'Unknown Episode'}" with numbered lines.
-Find all ad blocks — contiguous ranges of lines that are ads/sponsors/funding credits.
+    const userPrompt = `Here is the full transcript of "${episodeTitle || 'Unknown Episode'}" (${Math.round((durationSec || 0) / 60)} minutes) with numbered lines. Each line is one sentence.
 
-For each block, return the start and end line numbers (inclusive) and a short reason.
+Find the ad sections — short interruptions where the editorial content pauses for sponsor reads, funding credits, or promos.
 
 TRANSCRIPT:
 ${numberedText}
@@ -1812,7 +1902,7 @@ ${numberedText}
 Return JSON:
 {
   "adBlocks": [
-    { "startLine": number, "endLine": number, "reason": "short explanation" }
+    { "startLine": <first line number of the ad>, "endLine": <last line number of the ad>, "reason": "short explanation" }
   ]
 }`;
 
