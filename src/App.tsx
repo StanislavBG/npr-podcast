@@ -12,6 +12,7 @@ import {
   type Episode,
   type SandboxResult,
   type SandboxProgressEvent,
+  type PartialAdsEvent,
 } from './services/api';
 import type { AdDetectionResult, AdSegment } from './services/adDetector';
 import { STEP_ORDER, STEP_META } from './workflows/podcastFlow';
@@ -72,15 +73,18 @@ function getInitialPage(): 'app' | 'sandbox' {
 
 // ─── Inline flow visualizer (replaces bilko-flow dependency) ─────────────────
 
-function FlowTracker({ steps, visible }: { steps: PipelineStep[]; visible: boolean }) {
-  if (!visible) return null;
+function FlowTracker({ steps }: { steps: PipelineStep[] }) {
   const anyActive = steps.some(s => s.status === 'active');
   const allPending = steps.every(s => s.status === 'pending');
   if (allPending) return null;
 
+  const allDone = steps.every(s => s.status === 'done' || s.status === 'skipped');
+
   return (
-    <div className="flow-widget">
-      <div className="flow-label">Pipeline Progress</div>
+    <div className={`flow-widget ${allDone ? 'flow-complete' : ''}`}>
+      <div className="flow-label">
+        {allDone ? 'Pipeline Complete' : 'Pipeline Progress'}
+      </div>
       <div className="flow-steps">
         {steps.map((step, i) => (
           <div key={step.id} className={`flow-step flow-step-${step.status}`}>
@@ -121,7 +125,6 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pipelineSteps, setPipelineSteps] = useState<PipelineStep[]>(createInitialSteps());
-  const [pipelineActive, setPipelineActive] = useState(false);
 
   useEffect(() => {
     fetchPodcasts()
@@ -151,7 +154,6 @@ export default function App() {
       setAds(null);
       setError(null);
       setPipelineSteps(createInitialSteps());
-      setPipelineActive(true);
 
       // Steps 1-2: Fetch RSS and parse episodes (client-side)
       updateStep('step_fetch_rss', { status: 'active', message: 'Loading...' });
@@ -164,7 +166,6 @@ export default function App() {
       } catch {
         updateStep('step_fetch_rss', { status: 'error', message: 'Failed' });
         setError('Could not load episodes. Check your connection.');
-        setPipelineActive(false);
       } finally {
         setLoading(false);
       }
@@ -188,7 +189,6 @@ export default function App() {
     steps[1].status = 'done';
     steps[1].message = ep.title;
     setPipelineSteps(steps);
-    setPipelineActive(true);
 
     const durationSec = parseDuration(ep.duration);
 
@@ -204,6 +204,26 @@ export default function App() {
         }
       };
 
+      // Handle early ad detection — apply partial results to the player immediately
+      const handlePartialAds = (evt: PartialAdsEvent) => {
+        if (evt.skipMap && evt.skipMap.length > 0) {
+          const segments: AdSegment[] = evt.skipMap.map(s => ({
+            startTime: s.startTime,
+            endTime: s.endTime,
+            type: (s.type || 'mid-roll') as AdSegment['type'],
+            confidence: s.confidence,
+            reason: s.reason,
+          }));
+          const totalAdTime = segments.reduce((sum, seg) => sum + (seg.endTime - seg.startTime), 0);
+          setAds({
+            segments,
+            totalAdTime,
+            contentDuration: durationSec - totalAdTime,
+            strategy: `early-${evt.source}`,
+          });
+        }
+      };
+
       const result: SandboxResult = await sandboxAnalyzeStream(
         ep.transcriptUrl || '',
         ep.title,
@@ -211,9 +231,10 @@ export default function App() {
         handleProgress,
         ep.podcastTranscripts,
         ep.audioUrl || undefined,
+        handlePartialAds,
       );
 
-      // Convert sandbox result to the AdDetectionResult the Player expects
+      // Final result replaces any partial ads with the full topic-aware classification
       const adResult = sandboxResultToAdDetection(result);
       setAds(adResult);
 
@@ -223,7 +244,6 @@ export default function App() {
           ? { ...s, status: 'done' as const, message: s.message || 'Complete' }
           : s
       ));
-      setPipelineActive(false);
     } catch (err: any) {
       console.error('Pipeline failed:', err);
       setPipelineSteps(prev => prev.map(s =>
@@ -231,7 +251,6 @@ export default function App() {
           ? { ...s, status: 'error' as const, message: err.message || 'Failed' }
           : s
       ));
-      setPipelineActive(false);
     }
   }, []);
 
@@ -285,7 +304,7 @@ export default function App() {
             />
           )}
 
-          <FlowTracker steps={pipelineSteps} visible={pipelineActive} />
+          <FlowTracker steps={pipelineSteps} />
         </main>
 
         {/* Player dock pinned to bottom */}

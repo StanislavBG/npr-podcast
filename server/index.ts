@@ -1555,6 +1555,177 @@ function validateTranscript(lines: SandboxLine[], durationSec: number): {
   return { isValid: true, reason: 'Transcript looks valid', details };
 }
 
+// ─── Reusable helpers for ad classification ──────────────────────────────────
+
+/** Build SandboxLine[] from Whisper segments, splitting large segments into sentences */
+function buildLinesFromSegments(
+  segments: Array<{ start: number; end: number; text: string }>,
+): SandboxLine[] {
+  const lines: SandboxLine[] = [];
+  let cumW = 0;
+  let lineN = 0;
+  for (const seg of segments) {
+    if (!seg.text) continue;
+    const segWords = seg.text.split(/\s+/).filter(Boolean).length;
+    if (segWords <= 80) {
+      let speaker = '';
+      let content = seg.text;
+      const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+      if (speakerMatch) { speaker = speakerMatch[1].trim(); content = content.slice(speakerMatch[0].length).trim(); }
+      if (!content) continue;
+      lineN++;
+      const wc = content.split(/\s+/).filter(Boolean).length;
+      cumW += wc;
+      lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW });
+    } else {
+      const sentences = seg.text.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
+      for (const sent of sentences) {
+        let speaker = '';
+        let content = sent.trim();
+        const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+        if (speakerMatch) { speaker = speakerMatch[1].trim(); content = content.slice(speakerMatch[0].length).trim(); }
+        if (!content) continue;
+        lineN++;
+        const wc = content.split(/\s+/).filter(Boolean).length;
+        cumW += wc;
+        lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW });
+      }
+    }
+  }
+  return lines;
+}
+
+/** Build the ad classification system prompt with optional topic context */
+function buildAdClassificationPrompt(episodeTitle: string, topicContext?: string): string {
+  let prompt = `You are a sentence-level classifier for podcast transcripts. Your task is to read each sentence and decide: is this sentence part of an ADVERTISEMENT or part of the EDITORIAL CONTENT?`;
+
+  if (topicContext) {
+    prompt += `
+
+## Episode context
+
+This episode is titled "${episodeTitle}".
+Based on the transcript, the main topic is: ${topicContext}
+
+Any discussion of this topic — including companies, products, people, or events related to it — is EDITORIAL CONTENT, not advertising. Only classify sentences as AD when they are clearly promoting an UNRELATED product/service in a commercial break.`;
+  }
+
+  prompt += `
+
+## How to classify each sentence
+
+Read every sentence in the transcript. For each sentence, ask yourself:
+- Is this sentence part of the podcast's actual topic/discussion/interview? → CONTENT (skip it)
+- Is this sentence selling a product, promoting a service, or reading a sponsor credit? → AD
+
+## What ad blocks look like in a podcast
+
+Ads are COMPLETE BLOCKS of consecutive sentences — typically 3 to 10 sentences long — that form a coherent promotional message. They are NOT single words or phrases. A single sentence alone is rarely an ad; ads are paragraphs.
+
+Common ad block patterns:
+- SPONSOR READ: A block that opens with "Support for this podcast comes from..." or "This message comes from...", describes a company/product across several sentences, and ends with a call to action ("visit example.com", "use promo code X"). Then the editorial content resumes.
+- FUNDING CREDIT: 1-3 sentences like "Support for NPR comes from [Company], providing [service]. Learn more at [website]."
+- INSERTED AD: A block of sentences about a product/service that has nothing to do with the episode's editorial topic — it's clearly a commercial break.
+
+## What is NOT an ad (critical — do not classify these as ads)
+
+- ALL editorial discussion, even about companies, money, economics, products, or business deals
+- Interviews, even with CEOs or business leaders
+- Host commentary, analysis, opinions, jokes
+- Topic transitions ("Now let's turn to...", "Coming up after the break...")
+- Episode intros and sign-offs
+- Any content that relates to the episode's topic
+
+## Output format
+
+Return the sentence numbers that are ads, grouped into contiguous blocks. A typical 10-30 minute NPR episode has 1-4 ad blocks. If no ads are found, return an empty array.
+
+Return ONLY valid JSON.`;
+  return prompt;
+}
+
+/** Run ad classification on lines and return ad blocks with timestamps */
+async function classifyAdsFromLines(
+  lines: SandboxLine[],
+  episodeTitle: string,
+  durationSec: number,
+  topicContext?: string,
+): Promise<{ adBlocks: SandboxAdBlock[]; llmRaw: string; systemPrompt: string; userPrompt: string }> {
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+  const dur = durationSec || 0;
+
+  const numberedText = lines.map(l => {
+    const spk = l.speaker ? `${l.speaker}: ` : '';
+    const approxTime = dur > 0 && totalWords > 0 ? (l.cumulativeWords / totalWords) * dur : 0;
+    return `[${l.lineNum}] (${fmtTs(approxTime)}) ${spk}${l.text}`;
+  }).join('\n');
+
+  const systemPrompt = buildAdClassificationPrompt(episodeTitle, topicContext);
+
+  const userPrompt = `Classify each sentence in this transcript of "${episodeTitle || 'Unknown Episode'}" (${Math.round(dur / 60)} min, ${lines.length} sentences).
+
+For each ad block, return the first and last sentence numbers (inclusive) that form the ad.
+
+TRANSCRIPT:
+${numberedText}
+
+Return JSON:
+{
+  "adBlocks": [
+    { "startLine": <first sentence number>, "endLine": <last sentence number>, "reason": "<what is being advertised>" }
+  ]
+}`;
+
+  let adBlocks: SandboxAdBlock[] = [];
+  let llmRaw = '';
+
+  if (LLM_API_KEY) {
+    const { parsed, rawText } = await callLLM(systemPrompt, userPrompt, 0, 2048);
+    const result = parsed as { adBlocks: Array<{ startLine: number; endLine: number; reason: string }> };
+    llmRaw = rawText;
+    adBlocks = (result.adBlocks || []).map(b => ({
+      startLine: b.startLine,
+      endLine: b.endLine,
+      reason: b.reason,
+      textPreview: lines
+        .filter(l => l.lineNum >= b.startLine && l.lineNum <= b.endLine)
+        .map(l => l.text)
+        .join(' ')
+        .slice(0, 300),
+      startWord: 0, endWord: 0, startTimeSec: 0, endTimeSec: 0,
+    }));
+  } else {
+    llmRaw = '(no LLM key — using keyword heuristic)';
+    for (const l of lines) {
+      const lower = l.text.toLowerCase();
+      if (
+        lower.includes('support for this podcast') ||
+        lower.includes('this message comes from') ||
+        lower.includes('support for npr') ||
+        lower.match(/sponsor(?:ed by|s?\b)/)
+      ) {
+        adBlocks.push({
+          startLine: l.lineNum, endLine: l.lineNum,
+          reason: 'Keyword match (no LLM): ' + l.text.slice(0, 60),
+          textPreview: l.text.slice(0, 300),
+          startWord: 0, endWord: 0, startTimeSec: 0, endTimeSec: 0,
+        });
+      }
+    }
+  }
+
+  adBlocks = mapAdBlocksToTimestamps(adBlocks, lines, dur);
+  return { adBlocks, llmRaw, systemPrompt, userPrompt };
+}
+
+/** Derive a topic summary from the episode title and first ~200 words of transcript (no LLM call) */
+function deriveTopicContext(episodeTitle: string, lines: SandboxLine[]): string {
+  // Take the first ~200 words of actual content
+  const opening = lines.slice(0, 20).map(l => l.text).join(' ');
+  const openingWords = opening.split(/\s+/).slice(0, 200).join(' ');
+  return `${openingWords}`;
+}
+
 function mapAdBlocksToTimestamps(
   blocks: SandboxAdBlock[],
   lines: SandboxLine[],
@@ -1698,6 +1869,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
 
         // Step 5: Transcribe each chunk
         sendEvent('progress', { step: 'step_transcribe_chunks', message: `Transcribing ${numChunks} chunks...`, chunk: 0, totalChunks: numChunks });
+        let earlyAdsSent = false;
         for (let ci = 0; ci < numChunks; ci++) {
           const chunk = mp3Chunks[ci]!;
           const chunkMB = (chunk.buffer.length / 1024 / 1024).toFixed(1);
@@ -1725,62 +1897,57 @@ app.post('/api/sandbox/analyze', async (req, res) => {
               const plainText = await speechToText(chunk.buffer, 'mp3');
               if (plainText) {
                 allText += plainText + ' ';
-                // Create a single segment for the whole chunk
                 allSegments.push({ start: chunk.offsetSec, end: chunk.offsetSec + chunk.durationSec, text: plainText.trim() });
               }
             } catch { /* skip chunk */ }
           }
-        }
 
-        // Build lines from all segments — split large segments into sentences
-        // so the LLM can identify individual ad sentences, not 800-word blobs
-        let cumW = 0;
-        let lineN = 0;
-        for (const seg of allSegments) {
-          if (!seg.text) continue;
-          const segWords = seg.text.split(/\s+/).filter(Boolean).length;
-
-          // If segment is short enough (<80 words), keep it as one line
-          if (segWords <= 80) {
-            let speaker = '';
-            let content = seg.text;
-            const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
-            if (speakerMatch) { speaker = speakerMatch[1].trim(); content = content.slice(speakerMatch[0].length).trim(); }
-            if (!content) continue;
-            lineN++;
-            const wc = content.split(/\s+/).filter(Boolean).length;
-            cumW += wc;
-            lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW });
-          } else {
-            // Split long segments into sentences
-            const sentences = seg.text.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
-            for (const sent of sentences) {
-              let speaker = '';
-              let content = sent.trim();
-              const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
-              if (speakerMatch) { speaker = speakerMatch[1].trim(); content = content.slice(speakerMatch[0].length).trim(); }
-              if (!content) continue;
-              lineN++;
-              const wc = content.split(/\s+/).filter(Boolean).length;
-              cumW += wc;
-              lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW });
+          // ── Early ad detection: after first chunk, immediately classify what we have ──
+          // This gets ad data to the player ASAP — critical for ads at the start of an episode.
+          if (ci === 0 && !earlyAdsSent && allSegments.length > 0) {
+            earlyAdsSent = true;
+            const earlyLines = buildLinesFromSegments(allSegments);
+            if (earlyLines.length >= 3) {
+              console.log(`[sandbox] Running early ad detection on first chunk: ${earlyLines.length} sentences`);
+              try {
+                const earlyResult = await classifyAdsFromLines(earlyLines, episodeTitle, estDuration);
+                if (earlyResult.adBlocks.length > 0) {
+                  const earlySkipMap = earlyResult.adBlocks.map(b => ({
+                    startTime: Math.round(b.startTimeSec),
+                    endTime: Math.round(b.endTimeSec),
+                    type: 'mid-roll',
+                    confidence: 0.8,
+                    reason: b.reason,
+                  }));
+                  sendEvent('partial_ads', { skipMap: earlySkipMap, source: 'early-chunk-0' });
+                  console.log(`[sandbox] Early ad detection: ${earlyResult.adBlocks.length} blocks sent to player`);
+                } else {
+                  sendEvent('partial_ads', { skipMap: [], source: 'early-chunk-0' });
+                }
+              } catch (earlyErr: any) {
+                console.warn(`[sandbox] Early ad detection failed (non-fatal): ${earlyErr.message}`);
+              }
             }
           }
         }
 
-        // If segments produced no lines but we have accumulated text, split it into sentences
+        // Build lines from all segments using the shared helper
+        lines = buildLinesFromSegments(allSegments);
+        const cumW = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+
+        // If segments produced no lines but we have accumulated text, split into sentences
         if (lines.length === 0 && allText.trim().length > 50) {
           console.log(`[sandbox] No segments but got raw text (${allText.trim().split(/\s+/).length} words) — splitting into sentences`);
           const sentences = allText.trim().split(/(?<=[.!?])\s+/);
-          cumW = 0;
-          lineN = 0;
+          let cw = 0;
+          let ln = 0;
           for (const sent of sentences) {
             const trimmed = sent.trim();
             if (!trimmed) continue;
-            lineN++;
+            ln++;
             const wc = trimmed.split(/\s+/).filter(Boolean).length;
-            cumW += wc;
-            lines.push({ lineNum: lineN, speaker: '', text: trimmed, wordCount: wc, cumulativeWords: cumW });
+            cw += wc;
+            lines.push({ lineNum: ln, speaker: '', text: trimmed, wordCount: wc, cumulativeWords: cw });
           }
         }
 
@@ -1890,110 +2057,19 @@ app.post('/api/sandbox/analyze', async (req, res) => {
       console.warn(`Transcript validation failed for "${episodeTitle}": ${validation.reason}`);
     }
 
-    // Build numbered transcript for LLM — with hh:mm:ss timestamps
+    // Derive topic context from title + opening content (no extra LLM call)
     const dur = durationSec || 0;
-    const numberedText = lines.map(l => {
-      const spk = l.speaker ? `${l.speaker}: ` : '';
-      const approxTime = dur > 0 && totalWords > 0
-        ? (l.cumulativeWords / totalWords) * dur
-        : 0;
-      return `[${l.lineNum}] (${fmtTs(approxTime)}) ${spk}${l.text}`;
-    }).join('\n');
+    const topicContext = deriveTopicContext(episodeTitle, lines);
+    console.log(`[sandbox] Topic context: "${topicContext.slice(0, 120)}..."`);
 
-    const systemPrompt = `You are a sentence-level classifier for podcast transcripts. Your task is to read each sentence and decide: is this sentence part of an ADVERTISEMENT or part of the EDITORIAL CONTENT?
+    // Step 6: Call LLM for topic-aware ad classification
+    sendEvent('progress', { step: 'step_mark_ad_locations', message: 'Classifying sentences as content/ad via LLM (topic-aware)...' });
 
-## How to classify each sentence
-
-Read every sentence in the transcript. For each sentence, ask yourself:
-- Is this sentence part of the podcast's actual topic/discussion/interview? → CONTENT (skip it)
-- Is this sentence selling a product, promoting a service, or reading a sponsor credit? → AD
-
-## What ad blocks look like in a podcast
-
-Ads are COMPLETE BLOCKS of consecutive sentences — typically 3 to 10 sentences long — that form a coherent promotional message. They are NOT single words or phrases. A single sentence alone is rarely an ad; ads are paragraphs.
-
-Common ad block patterns:
-- SPONSOR READ: A block that opens with "Support for this podcast comes from..." or "This message comes from...", describes a company/product across several sentences, and ends with a call to action ("visit example.com", "use promo code X"). Then the editorial content resumes.
-- FUNDING CREDIT: 1-3 sentences like "Support for NPR comes from [Company], providing [service]. Learn more at [website]."
-- INSERTED AD: A block of sentences about a product/service that has nothing to do with the episode's editorial topic — it's clearly a commercial break.
-
-## What is NOT an ad (critical — do not classify these as ads)
-
-- ALL editorial discussion, even about companies, money, economics, products, or business deals
-- Interviews, even with CEOs or business leaders
-- Host commentary, analysis, opinions, jokes
-- Topic transitions ("Now let's turn to...", "Coming up after the break...")
-- Episode intros and sign-offs
-- Any content that relates to the episode's topic
-
-## Output format
-
-Return the sentence numbers that are ads, grouped into contiguous blocks. A typical 10-30 minute NPR episode has 1-4 ad blocks. If no ads are found, return an empty array.
-
-Return ONLY valid JSON.`;
-
-    const userPrompt = `Classify each sentence in this transcript of "${episodeTitle || 'Unknown Episode'}" (${Math.round((durationSec || 0) / 60)} min, ${lines.length} sentences).
-
-For each ad block, return the first and last sentence numbers (inclusive) that form the ad.
-
-TRANSCRIPT:
-${numberedText}
-
-Return JSON:
-{
-  "adBlocks": [
-    { "startLine": <first sentence number>, "endLine": <last sentence number>, "reason": "<what is being advertised>" }
-  ]
-}`;
-
-    // Step 6: Call LLM for ad classification (or fallback)
-    sendEvent('progress', { step: 'step_mark_ad_locations', message: 'Classifying sentences as content/ad via LLM...' });
-    let adBlocks: SandboxAdBlock[] = [];
-    let llmRaw = '';
-
-    if (LLM_API_KEY) {
-      const { parsed, rawText } = await callLLM(systemPrompt, userPrompt, 0, 2048);
-      const result = parsed as { adBlocks: Array<{ startLine: number; endLine: number; reason: string }> };
-
-      llmRaw = rawText;
-      adBlocks = (result.adBlocks || []).map(b => ({
-        startLine: b.startLine,
-        endLine: b.endLine,
-        reason: b.reason,
-        textPreview: lines
-          .filter(l => l.lineNum >= b.startLine && l.lineNum <= b.endLine)
-          .map(l => l.text)
-          .join(' ')
-          .slice(0, 300),
-        startWord: 0,
-        endWord: 0,
-        startTimeSec: 0,
-        endTimeSec: 0,
-      }));
-    } else {
-      // No-key heuristic: scan for obvious patterns
-      llmRaw = '(no LLM key — using keyword heuristic)';
-      for (const l of lines) {
-        const lower = l.text.toLowerCase();
-        if (
-          lower.includes('support for this podcast') ||
-          lower.includes('this message comes from') ||
-          lower.includes('support for npr') ||
-          lower.match(/sponsor(?:ed by|s?\b)/)
-        ) {
-          adBlocks.push({
-            startLine: l.lineNum,
-            endLine: l.lineNum,
-            reason: 'Keyword match (no LLM): ' + l.text.slice(0, 60),
-            textPreview: l.text.slice(0, 300),
-            startWord: 0,
-            endWord: 0,
-            startTimeSec: 0,
-            endTimeSec: 0,
-          });
-        }
-      }
-    }
+    const classifyResult = await classifyAdsFromLines(lines, episodeTitle, dur, topicContext);
+    let adBlocks = classifyResult.adBlocks;
+    const llmRaw = classifyResult.llmRaw;
+    const systemPrompt = classifyResult.systemPrompt;
+    const userPrompt = classifyResult.userPrompt;
 
     sendEvent('progress', {
       step: 'step_mark_ad_locations',
@@ -2002,9 +2078,8 @@ Return JSON:
       adBlockCount: adBlocks.length,
     });
 
-    // Step 7: Map to timestamps and build skip map
+    // Step 7: Build skip map (timestamps already mapped by classifyAdsFromLines)
     sendEvent('progress', { step: 'step_build_skip_map', message: 'Building skip map from ad blocks...' });
-    adBlocks = mapAdBlocksToTimestamps(adBlocks, lines, dur);
 
     // Build skip map
     const skipMap = adBlocks.map(b => ({
