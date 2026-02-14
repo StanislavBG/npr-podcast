@@ -1462,7 +1462,7 @@ if (fs.existsSync(path.join(distPath, 'index.html'))) {
     res.sendFile(path.join(distPath, 'index.html'));
   });
 }
-const PORT = parseInt(String(process.env.PORT || '5000'), 10);
+const PORT = parseInt(String(process.env.PORT || '3001'), 10);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`NPR Podcast server running on http://0.0.0.0:${PORT}`);
   console.log(`OpenAI model: ${LLM_MODEL}, key: ${LLM_API_KEY ? '***set***' : 'NOT SET (fallback mode)'}`);

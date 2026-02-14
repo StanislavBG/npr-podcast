@@ -16,6 +16,7 @@ export function Player({ episode, adDetection }: Props) {
   const [dur, setDur] = useState(0);
   const [skippedAd, setSkippedAd] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [audioError, setAudioError] = useState<string | null>(null);
 
   const src = episode.audioUrl ? getAudioProxyUrl(episode.audioUrl) : '';
 
@@ -39,11 +40,16 @@ export function Player({ episode, adDetection }: Props) {
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
+    setAudioError(null);
     const h = {
       loadedmetadata: () => setDur(a.duration),
       timeupdate: () => setTime(a.currentTime),
       play: () => setPlaying(true),
       pause: () => setPlaying(false),
+      error: () => {
+        const e = a.error;
+        setAudioError(e ? `Audio failed to load (${e.message || 'unknown error'})` : 'Audio failed to load');
+      },
     };
     (Object.keys(h) as (keyof typeof h)[]).forEach((e) => a.addEventListener(e, h[e]));
     return () => {
@@ -109,6 +115,9 @@ export function Player({ episode, adDetection }: Props) {
 
       {!src && (
         <div className="no-audio">No audio available for this episode</div>
+      )}
+      {audioError && (
+        <div className="no-audio">{audioError}</div>
       )}
 
       {/* Episode title above timeline */}
