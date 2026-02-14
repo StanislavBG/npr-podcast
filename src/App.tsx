@@ -1,47 +1,115 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { PodcastSelector } from './components/PodcastSelector';
 import { EpisodeList } from './components/EpisodeList';
 import { Player } from './components/Player';
-import { FlowVisualizer } from './components/FlowVisualizer';
 import { SandboxPage } from './components/SandboxPage';
 import {
   fetchPodcasts,
   fetchEpisodes,
-  fetchTranscriptHtml,
-  llmParseTranscript,
-  llmDetectAds,
-  llmPreparePlayback,
-  resolveAudio,
-  processAudioChunk,
-  detectAdsFromTranscript,
+  sandboxAnalyzeStream,
   parseDuration,
   type Podcast,
   type Episode,
-  type AudioMeta,
-  type ChunkResult,
+  type SandboxResult,
+  type SandboxProgressEvent,
 } from './services/api';
-import type { AdDetectionResult, PlaybackConfig } from './services/adDetector';
-import {
-  createInitialFlowState,
-  type FlowState,
-  type StepStatus,
-} from './workflows/podcastFlow';
+import type { AdDetectionResult, AdSegment } from './services/adDetector';
+import { STEP_ORDER, STEP_META } from './workflows/podcastFlow';
 
-function setStep(
-  prev: FlowState,
-  stepId: string,
-  status: StepStatus,
-): FlowState {
+// ─── Pipeline step tracking (same shape as SandboxPage) ──────────────────────
+
+interface PipelineStep {
+  id: string;
+  label: string;
+  status: 'pending' | 'active' | 'done' | 'error' | 'skipped';
+  message: string;
+}
+
+function createInitialSteps(): PipelineStep[] {
+  return STEP_ORDER.map(id => ({
+    id,
+    label: STEP_META[id].label,
+    status: 'pending' as const,
+    message: '',
+  }));
+}
+
+/** Convert SandboxResult skipMap + adBlocks into the AdDetectionResult the Player expects */
+function sandboxResultToAdDetection(result: SandboxResult): AdDetectionResult {
+  const segments: AdSegment[] = result.skipMap.map(s => ({
+    startTime: s.startTime,
+    endTime: s.endTime,
+    type: (s.type || 'mid-roll') as AdSegment['type'],
+    confidence: s.confidence,
+    reason: s.reason,
+  }));
+
+  // Also include adBlocks mapped to timestamps if skipMap is empty but adBlocks exist
+  if (segments.length === 0 && result.adBlocks.length > 0) {
+    for (const b of result.adBlocks) {
+      segments.push({
+        startTime: b.startTimeSec,
+        endTime: b.endTimeSec,
+        type: 'mid-roll',
+        confidence: 0.85,
+        reason: b.reason,
+      });
+    }
+  }
+
+  const totalAdTime = segments.reduce((s, seg) => s + (seg.endTime - seg.startTime), 0);
   return {
-    ...prev,
-    steps: { ...prev.steps, [stepId]: status },
-    currentStep: status === 'running' ? stepId : prev.currentStep,
+    segments,
+    totalAdTime,
+    contentDuration: result.episode.durationSec - totalAdTime,
+    strategy: result.summary.strategy,
   };
 }
 
 function getInitialPage(): 'app' | 'sandbox' {
   return window.location.pathname === '/sandbox' ? 'sandbox' : 'app';
 }
+
+// ─── Inline flow visualizer (replaces bilko-flow dependency) ─────────────────
+
+function FlowTracker({ steps, visible }: { steps: PipelineStep[]; visible: boolean }) {
+  if (!visible) return null;
+  const anyActive = steps.some(s => s.status === 'active');
+  const allPending = steps.every(s => s.status === 'pending');
+  if (allPending) return null;
+
+  return (
+    <div className="flow-widget">
+      <div className="flow-label">Pipeline Progress</div>
+      <div className="flow-steps">
+        {steps.map((step, i) => (
+          <div key={step.id} className={`flow-step flow-step-${step.status}`}>
+            <span className="flow-step-icon">
+              {step.status === 'done' && '\u2713'}
+              {step.status === 'active' && '\u25B6'}
+              {step.status === 'error' && '\u2717'}
+              {step.status === 'skipped' && '\u2013'}
+              {step.status === 'pending' && '\u2022'}
+            </span>
+            <span className="flow-step-name">
+              {i + 1}. {step.label}
+            </span>
+            {step.message && step.status !== 'pending' && (
+              <span className="flow-step-msg">{step.message}</span>
+            )}
+          </div>
+        ))}
+      </div>
+      {anyActive && (
+        <div className="flow-active-spinner">
+          <div className="sb-loading-spinner" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main App ────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [page, setPage] = useState<'app' | 'sandbox'>(getInitialPage);
@@ -50,11 +118,10 @@ export default function App() {
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [episode, setEpisode] = useState<Episode | null>(null);
   const [ads, setAds] = useState<AdDetectionResult | null>(null);
-  const [playback, setPlayback] = useState<PlaybackConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [flow, setFlow] = useState<FlowState>(createInitialFlowState());
-  const loaded = useRef<string | null>(null);
+  const [pipelineSteps, setPipelineSteps] = useState<PipelineStep[]>(createInitialSteps());
+  const [pipelineActive, setPipelineActive] = useState(false);
 
   useEffect(() => {
     fetchPodcasts()
@@ -70,324 +137,103 @@ export default function App() {
       );
   }, []);
 
+  // Helper: update a single pipeline step
+  const updateStep = (stepId: string, updates: Partial<PipelineStep>) => {
+    setPipelineSteps(prev => prev.map(s =>
+      s.id === stepId ? { ...s, ...updates } : s
+    ));
+  };
+
   const load = useCallback(
     async (id: string) => {
-      if (loaded.current === id && episodes.length > 0) return;
       setLoading(true);
       setEpisode(null);
       setAds(null);
-      setPlayback(null);
       setError(null);
+      setPipelineSteps(createInitialSteps());
+      setPipelineActive(true);
 
-      let fs = createInitialFlowState();
-      fs = setStep(fs, 'step_fetch_rss', 'running');
-      setFlow(fs);
+      // Steps 1-2: Fetch RSS and parse episodes (client-side)
+      updateStep('step_fetch_rss', { status: 'active', message: 'Loading...' });
 
       try {
         const data = await fetchEpisodes(id);
         setEpisodes(data.episodes);
-        loaded.current = id;
-
-        fs = setStep(fs, 'step_fetch_rss', 'completed');
-        fs = setStep(fs, 'step_parse_episodes', 'running');
-        setFlow(fs);
-
-        fs = setStep(fs, 'step_parse_episodes', 'completed');
-        setFlow(fs);
+        updateStep('step_fetch_rss', { status: 'done', message: 'RSS loaded' });
+        updateStep('step_parse_episodes', { status: 'done', message: `${data.episodes.length} episodes` });
       } catch {
-        fs = setStep(fs, 'step_fetch_rss', 'failed');
-        fs = { ...fs, error: 'RSS fetch failed' };
-        setFlow(fs);
+        updateStep('step_fetch_rss', { status: 'error', message: 'Failed' });
         setError('Could not load episodes. Check your connection.');
+        setPipelineActive(false);
       } finally {
         setLoading(false);
       }
     },
-    [episodes.length]
+    []
   );
 
   useEffect(() => {
     load(selected);
   }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Chunk processing refs (persist across renders) ──────────────
-  const audioMetaRef = useRef<AudioMeta | null>(null);
-  const chunksRef = useRef<Map<number, ChunkResult>>(new Map());
-  const processingRef = useRef<Set<number>>(new Set());
-  const trailingTextRef = useRef<Map<number, string>>(new Map());
-  const detectedAdsRef = useRef<AdDetectionResult | null>(null);
-
-  const processChunk = useCallback(async (
-    index: number,
-    meta: AudioMeta,
-    episodeTitle: string,
-  ): Promise<ChunkResult | null> => {
-    if (chunksRef.current.has(index) || processingRef.current.has(index)) return chunksRef.current.get(index) || null;
-    if (index < 0 || index >= meta.totalChunks) return null;
-
-    processingRef.current.add(index);
-    try {
-      const prevTrailing = index > 0 ? (trailingTextRef.current.get(index - 1) || '') : '';
-      const result = await processAudioChunk({
-        resolvedUrl: meta.resolvedUrl,
-        chunkIndex: index,
-        totalChunks: meta.totalChunks,
-        contentLength: meta.contentLength,
-        durationSec: meta.durationSec,
-        bitrate: meta.bitrate,
-        chunkDurationSec: meta.chunkDurationSec,
-        overlapSec: 10,
-        episodeTitle,
-        prevChunkTrailingText: prevTrailing,
-      });
-      chunksRef.current.set(index, result);
-      trailingTextRef.current.set(index, result.trailingText);
-
-      return result;
-    } catch (err) {
-      console.error(`Chunk ${index} failed:`, err);
-      return null;
-    } finally {
-      processingRef.current.delete(index);
-    }
-  }, []);
-
+  // ── Episode selection: run the unified sandbox pipeline ─────────────────────
   const pick = useCallback(async (ep: Episode) => {
     setEpisode(ep);
     setAds(null);
-    setPlayback(null);
 
-    // Reset chunk state
-    audioMetaRef.current = null;
-    chunksRef.current = new Map();
-    processingRef.current = new Set();
-    trailingTextRef.current = new Map();
-    detectedAdsRef.current = null;
+    const steps = createInitialSteps();
+    // Mark steps 1-2 as already done (episodes loaded)
+    steps[0].status = 'done';
+    steps[0].message = 'RSS loaded';
+    steps[1].status = 'done';
+    steps[1].message = ep.title;
+    setPipelineSteps(steps);
+    setPipelineActive(true);
 
     const durationSec = parseDuration(ep.duration);
-    let html = '';
-    let audioChunksSucceeded = false;
 
-    // ── Steps 3-7: Chunked Audio Pipeline ────────────────────────────
-    if (ep.audioUrl) {
-      // Step 3: Resolve audio stream
-      setFlow((prev) => setStep(prev, 'step_resolve_audio_stream', 'running'));
-
-      try {
-        const meta = await resolveAudio(ep.audioUrl);
-        audioMetaRef.current = meta;
-
-        setFlow((prev) => {
-          let fs = setStep(prev, 'step_resolve_audio_stream', 'completed');
-          fs = setStep(fs, 'step_start_audio_streaming', 'running');
-          return { ...fs, chunkProgress: { currentChunk: 0, totalChunks: meta.totalChunks } };
-        });
-
-        // Steps 4+5: Process ALL chunks sequentially (each needs previous trailing text)
-        for (let i = 0; i < meta.totalChunks; i++) {
-          await processChunk(i, meta, ep.title);
-          setFlow((prev) => ({
-            ...prev,
-            chunkProgress: { currentChunk: i + 1, totalChunks: meta.totalChunks },
-          }));
-        }
-
-        setFlow((prev) => {
-          let fs = setStep(prev, 'step_start_audio_streaming', 'completed');
-          fs = setStep(fs, 'step_transcribe_chunks', 'completed');
-          return { ...fs, chunkProgress: { currentChunk: meta.totalChunks, totalChunks: meta.totalChunks } };
-        });
-
-        // Build HTML from transcribed chunks for the LLM pipeline
-        const allText = Array.from(chunksRef.current.values())
-          .sort((a, b) => a.chunkIndex - b.chunkIndex)
-          .map(c => c.transcript.text)
-          .join(' ');
-
-        if (allText.length > 100) {
-          html = allText.split(/(?<=[.!?])\s+/).map((s: string) => `<p>${s}</p>`).join('\n');
-          audioChunksSucceeded = true;
-        }
-
-        // Step 6: Detect ads from the full assembled transcript (separate LLM call)
-        setFlow((prev) => setStep(prev, 'step_mark_ad_locations', 'running'));
-        try {
-          // Gather all segments from all chunks, sorted by time
-          const allSegments = Array.from(chunksRef.current.values())
-            .sort((a, b) => a.chunkIndex - b.chunkIndex)
-            .flatMap(c => c.transcript.segments);
-
-          if (allSegments.length > 0) {
-            const adResult = await detectAdsFromTranscript({
-              segments: allSegments,
-              episodeTitle: ep.title,
-              durationSec,
-            });
-
-            const adSegments = adResult.adSegments || [];
-            const totalAdTime = adSegments.reduce((s, seg) => s + (seg.endTime - seg.startTime), 0);
-            const adsResult: AdDetectionResult = {
-              segments: adSegments,
-              totalAdTime,
-              contentDuration: durationSec - totalAdTime,
-              strategy: 'full-transcript-llm',
-            };
-            detectedAdsRef.current = adsResult;
-            setAds(adsResult);
-          }
-
-          setFlow((prev) => {
-            let fs = setStep(prev, 'step_mark_ad_locations', 'completed');
-            fs = setStep(fs, 'step_build_skip_map', 'completed');
-            return fs;
-          });
-        } catch (adErr) {
-          console.error('Ad detection failed:', adErr);
-          setFlow((prev) => {
-            let fs = setStep(prev, 'step_mark_ad_locations', 'failed');
-            fs = setStep(fs, 'step_build_skip_map', 'skipped');
-            return fs;
-          });
-        }
-      } catch (err) {
-        console.warn('Audio chunked pipeline failed, falling back to HTML transcript:', err);
-        setFlow((prev) => {
-          let fs = prev;
-          if (fs.steps.step_resolve_audio_stream === 'running') fs = setStep(fs, 'step_resolve_audio_stream', 'failed');
-          if (fs.steps.step_start_audio_streaming !== 'completed') fs = setStep(fs, 'step_start_audio_streaming', 'skipped');
-          if (fs.steps.step_transcribe_chunks !== 'completed') fs = setStep(fs, 'step_transcribe_chunks', 'skipped');
-          if (fs.steps.step_mark_ad_locations !== 'completed') fs = setStep(fs, 'step_mark_ad_locations', 'skipped');
-          if (fs.steps.step_build_skip_map !== 'completed') fs = setStep(fs, 'step_build_skip_map', 'skipped');
-          return fs;
-        });
-      }
-    } else {
-      // No audio URL — skip audio pipeline
-      setFlow((prev) => {
-        let fs = setStep(prev, 'step_resolve_audio_stream', 'skipped');
-        fs = setStep(fs, 'step_start_audio_streaming', 'skipped');
-        fs = setStep(fs, 'step_transcribe_chunks', 'skipped');
-        fs = setStep(fs, 'step_mark_ad_locations', 'skipped');
-        fs = setStep(fs, 'step_build_skip_map', 'skipped');
-        return fs;
-      });
-    }
-
-    // ── Step 8: Fetch HTML Transcript (fallback / cross-reference) ───
-    if (!html && ep.transcriptUrl) {
-      setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', 'running'));
-      try {
-        const result = await fetchTranscriptHtml(ep.transcriptUrl);
-        html = result.html;
-        setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', 'completed'));
-      } catch {
-        setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', 'skipped'));
-      }
-    } else {
-      setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', audioChunksSucceeded ? 'skipped' : 'skipped'));
-    }
-
-    // If we have audio transcript, skip to finalize
-    if (audioChunksSucceeded) {
-      // ── Step 9: Finalize Playback ──────────────────────────────────
-      setFlow((prev) => setStep(prev, 'step_finalize_playback', 'running'));
-      try {
-        // Build a transcript result from the chunked audio text
-        const transcript = await llmParseTranscript(html || `<p>${ep.description}</p>`);
-        // Use ad segments from the dedicated detect-ads call (set by Step 6 above)
-        const currentAds: AdDetectionResult = detectedAdsRef.current || {
-          segments: [],
-          totalAdTime: 0,
-          contentDuration: durationSec,
-          strategy: 'full-transcript-llm',
-        };
-
-        const config = await llmPreparePlayback(transcript, currentAds, ep.title, ep.description);
-        setPlayback(config);
-        if (config.skipMap && config.skipMap.length > 0) {
-          setAds({
-            segments: config.skipMap,
-            totalAdTime: config.totalAdTime,
-            contentDuration: config.contentDuration,
-            strategy: 'llm-verified',
-          });
-        }
-        setFlow((prev) => {
-          const fs = setStep(prev, 'step_finalize_playback', 'completed');
-          return { ...fs, currentStep: null };
-        });
-      } catch (err) {
-        console.error('LLM prepare-playback failed:', err);
-        setFlow((prev) => {
-          const fs = setStep(prev, 'step_finalize_playback', 'skipped');
-          return { ...fs, currentStep: null };
-        });
-      }
-      return;
-    }
-
-    // ── Fallback: HTML-based ad detection (no audio) ─────────────────
-    // Step 6: Mark Ad Locations
-    setFlow((prev) => setStep(prev, 'step_mark_ad_locations', 'running'));
-    let transcript;
     try {
-      transcript = await llmParseTranscript(html || `<p>${ep.description}</p>`);
-    } catch (err) {
-      console.error('LLM parse failed:', err);
-      setFlow((prev) => {
-        let fs = setStep(prev, 'step_mark_ad_locations', 'failed');
-        fs = setStep(fs, 'step_build_skip_map', 'skipped');
-        fs = setStep(fs, 'step_finalize_playback', 'skipped');
-        return { ...fs, currentStep: null };
-      });
-      return;
-    }
+      const handleProgress = (evt: SandboxProgressEvent) => {
+        const stepId = evt.step;
+        if (evt.status === 'done') {
+          updateStep(stepId, { status: 'done', message: evt.message });
+        } else if (evt.status === 'error') {
+          updateStep(stepId, { status: 'error', message: evt.message });
+        } else {
+          updateStep(stepId, { status: 'active', message: evt.message });
+        }
+      };
 
-    let adResult: AdDetectionResult;
-    try {
-      adResult = await llmDetectAds(transcript, durationSec, ep.title);
+      const result: SandboxResult = await sandboxAnalyzeStream(
+        ep.transcriptUrl || '',
+        ep.title,
+        durationSec,
+        handleProgress,
+        ep.podcastTranscripts,
+        ep.audioUrl || undefined,
+      );
+
+      // Convert sandbox result to the AdDetectionResult the Player expects
+      const adResult = sandboxResultToAdDetection(result);
       setAds(adResult);
-      setFlow((prev) => setStep(prev, 'step_mark_ad_locations', 'completed'));
-    } catch (err) {
-      console.error('LLM ad detection failed:', err);
-      setFlow((prev) => {
-        let fs = setStep(prev, 'step_mark_ad_locations', 'failed');
-        fs = setStep(fs, 'step_build_skip_map', 'skipped');
-        fs = setStep(fs, 'step_finalize_playback', 'skipped');
-        return { ...fs, currentStep: null };
-      });
-      return;
-    }
 
-    // Step 7: Build Skip Map
-    setFlow((prev) => setStep(prev, 'step_build_skip_map', 'running'));
-    setFlow((prev) => setStep(prev, 'step_build_skip_map', 'completed'));
-
-    // Step 9: Finalize Playback
-    setFlow((prev) => setStep(prev, 'step_finalize_playback', 'running'));
-    try {
-      const config = await llmPreparePlayback(transcript, adResult, ep.title, ep.description);
-      setPlayback(config);
-      if (config.skipMap && config.skipMap.length > 0) {
-        setAds({
-          segments: config.skipMap,
-          totalAdTime: config.totalAdTime,
-          contentDuration: config.contentDuration,
-          strategy: 'llm-verified',
-        });
-      }
-      setFlow((prev) => {
-        const fs = setStep(prev, 'step_finalize_playback', 'completed');
-        return { ...fs, currentStep: null };
-      });
-    } catch (err) {
-      console.error('LLM prepare-playback failed:', err);
-      setFlow((prev) => {
-        const fs = setStep(prev, 'step_finalize_playback', 'skipped');
-        return { ...fs, currentStep: null };
-      });
+      // Mark all remaining steps as done
+      setPipelineSteps(prev => prev.map(s =>
+        s.status === 'pending' || s.status === 'active'
+          ? { ...s, status: 'done' as const, message: s.message || 'Complete' }
+          : s
+      ));
+      setPipelineActive(false);
+    } catch (err: any) {
+      console.error('Pipeline failed:', err);
+      setPipelineSteps(prev => prev.map(s =>
+        s.status === 'active'
+          ? { ...s, status: 'error' as const, message: err.message || 'Failed' }
+          : s
+      ));
+      setPipelineActive(false);
     }
-  }, [processChunk]);
+  }, []);
 
   const goToSandbox = useCallback(() => {
     window.history.pushState(null, '', '/sandbox');
@@ -439,10 +285,10 @@ export default function App() {
             />
           )}
 
-          <FlowVisualizer flowState={flow} />
+          <FlowTracker steps={pipelineSteps} visible={pipelineActive} />
         </main>
 
-        {/* Player dock pinned to bottom with progress bar at very bottom */}
+        {/* Player dock pinned to bottom */}
         {episode && (
           <div className="player-dock">
             <Player episode={episode} adDetection={ads} />

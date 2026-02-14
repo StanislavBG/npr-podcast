@@ -511,12 +511,143 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Flow Widget (vertical timeline layout) ── */
+/* ── Flow Widget (pipeline progress in main app) ── */
 .flow-widget {
   padding: 12px 16px;
   font-size: 12px;
   overflow-y: auto;
   overflow-x: hidden;
+}
+.flow-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+.flow-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.flow-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: opacity 0.2s, background 0.2s;
+}
+.flow-step-pending { opacity: 0.3; }
+.flow-step-active { background: rgba(52, 152, 219, 0.1); opacity: 1; }
+.flow-step-done { opacity: 0.6; }
+.flow-step-error { background: rgba(231, 76, 60, 0.1); opacity: 1; }
+.flow-step-skipped { opacity: 0.3; }
+.flow-step-icon {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+}
+.flow-step-done .flow-step-icon { color: #2ecc71; }
+.flow-step-active .flow-step-icon { color: #3498db; }
+.flow-step-error .flow-step-icon { color: #e74c3c; }
+.flow-step-name {
+  color: var(--fg2);
+  flex-shrink: 0;
+}
+.flow-step-msg {
+  color: var(--fg3);
+  font-size: 10px;
+  margin-left: auto;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+.flow-active-spinner {
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+/* ── Ad bar (below player controls) ── */
+.ad-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 18px 0;
+  gap: 8px;
+}
+.ad-bar-info {
+  font-size: 10px;
+  font-weight: 500;
+  color: rgba(239, 68, 68, 0.85);
+  letter-spacing: 0.02em;
+}
+.ad-playing-indicator {
+  font-size: 10px;
+  font-weight: 700;
+  color: #ef4444;
+  letter-spacing: 0.08em;
+  animation: ad-pulse 1s ease-in-out infinite;
+}
+@keyframes ad-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ── Auto-skip toggle ── */
+.ad-skip-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: 12px;
+  transition: background 0.2s;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.ad-skip-toggle:hover {
+  background: rgba(255,255,255,0.05);
+}
+.ad-skip-toggle-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg2);
+  white-space: nowrap;
+}
+.ad-skip-toggle-switch {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  transition: background 0.2s;
+}
+.ad-skip-toggle.on .ad-skip-toggle-switch {
+  background: #2ecc71;
+}
+.ad-skip-toggle.off .ad-skip-toggle-switch {
+  background: rgba(255,255,255,0.2);
+}
+.ad-skip-toggle-knob {
+  position: absolute;
+  top: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: white;
+  transition: left 0.2s;
+}
+.ad-skip-toggle.on .ad-skip-toggle-knob {
+  left: 14px;
+}
+.ad-skip-toggle.off .ad-skip-toggle-knob {
+  left: 2px;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
