@@ -624,16 +624,37 @@ function TranscriptViewer({
   return <div className="sb-transcript">{elements}</div>;
 }
 
+// ─── Collapsible step wrapper ────────────────────────────────────────────────
+
+function StepSection({ index, step, children, defaultOpen = true }: {
+  index: number;
+  step: StepDef;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section className={`sb-section ${open ? 'open' : 'collapsed'}`}>
+      <button className="sb-section-header" onClick={() => setOpen(o => !o)}>
+        <span className="sb-step-badge">Step {index + 1}</span>
+        <span className="sb-step-type">{step.type}</span>
+        <h2 className="sb-step-title">{step.label}</h2>
+        <span className="sb-section-toggle">{open ? '\u25B2' : '\u25BC'}</span>
+      </button>
+      <p className="sb-step-subtitle">{step.subtitle}</p>
+      {open && children}
+    </section>
+  );
+}
+
 // ─── Main SandboxPage ────────────────────────────────────────────────────────
 
 export function SandboxPage({ onBack }: Props) {
-  const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState('Loading podcasts...');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SandboxResult | null>(null);
   const [podcastInfo, setPodcastInfo] = useState<{ name: string; id: string }>({ name: '', id: '' });
-  const contentRef = useRef<HTMLDivElement>(null);
 
   // Auto-fetch single podcast + episode and analyze on mount
   useEffect(() => {
@@ -641,7 +662,6 @@ export function SandboxPage({ onBack }: Props) {
 
     async function run() {
       try {
-        // 1. Fetch podcasts
         setStatus('Fetching RSS feed...');
         let podcasts;
         try {
@@ -651,16 +671,13 @@ export function SandboxPage({ onBack }: Props) {
         }
         if (cancelled) return;
 
-        // Pick first podcast
         const podcastId = podcasts[0].id;
         setPodcastInfo({ name: podcasts[0].name, id: podcastId });
         setStatus(`Parsing episodes for ${podcasts[0].name}...`);
 
-        // 2. Fetch episodes
         const data = await fetchEpisodes(podcastId);
         if (cancelled) return;
 
-        // Pick first episode with any transcript source (audio, text, or HTML)
         const ep = data.episodes.find(e =>
           e.transcriptUrl ||
           e.audioUrl ||
@@ -674,7 +691,6 @@ export function SandboxPage({ onBack }: Props) {
 
         setStatus(`Analyzing: ${ep.title}...`);
 
-        // 3. Run full analysis (all 9 steps happen server-side)
         const res = await sandboxAnalyze(
           ep.transcriptUrl || '',
           ep.title,
@@ -698,50 +714,18 @@ export function SandboxPage({ onBack }: Props) {
     return () => { cancelled = true; };
   }, []);
 
-  // Keyboard navigation
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
-        e.preventDefault();
-        setStep(s => Math.min(s + 1, STEPS.length - 1));
-      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        setStep(s => Math.max(s - 1, 0));
-      }
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
-  // Scroll content to top when step changes
-  useEffect(() => {
-    contentRef.current?.scrollTo(0, 0);
-  }, [step]);
-
-  const goLeft = () => setStep(s => Math.max(s - 1, 0));
-  const goRight = () => setStep(s => Math.min(s + 1, STEPS.length - 1));
-  const current = STEPS[step];
-  const currentStepId = STEP_ORDER[step];
-
-  // ─── Render ──────────────────────────────────────────────────────────────
-
   return (
     <div className="sb-page">
-      {/* Header */}
       <header className="sb-header">
         <button className="sb-back" onClick={onBack}>Back</button>
         <div className="sb-header-center">
-          <h1 className="sb-title">Pipeline Inspector</h1>
+          <h1 className="sb-title">Pipeline Report</h1>
           {result && (
             <span className="sb-header-ep">{result.episode.title}</span>
           )}
         </div>
-        {result && (
-          <span className="sb-step-counter">{step + 1}/{STEPS.length}</span>
-        )}
       </header>
 
-      {/* Loading state */}
       {loading && (
         <div className="sb-loading-full">
           <div className="sb-loading-spinner" />
@@ -749,7 +733,6 @@ export function SandboxPage({ onBack }: Props) {
         </div>
       )}
 
-      {/* Error state */}
       {error && !loading && (
         <div className="sb-error-full">
           <div className="sb-error-icon">!</div>
@@ -760,70 +743,44 @@ export function SandboxPage({ onBack }: Props) {
         </div>
       )}
 
-      {/* Step carousel */}
       {result && !loading && (
-        <>
-          {/* Step nav pills */}
-          <nav className="sb-step-nav">
-            {STEPS.map((s, i) => (
-              <button
-                key={s.id}
-                className={`sb-step-pill ${i === step ? 'active' : ''} ${i < step ? 'done' : ''}`}
-                onClick={() => setStep(i)}
-              >
-                <span className="sb-pill-num">{i + 1}</span>
-                <span className="sb-pill-label">{s.label}</span>
-              </button>
-            ))}
-          </nav>
+        <div className="sb-report-scroll">
+          <StepSection index={0} step={STEPS[0]}>
+            <StepFetchRss podcastName={podcastInfo.name} podcastId={podcastInfo.id} />
+          </StepSection>
 
-          {/* Step content */}
-          <div className="sb-step-content" ref={contentRef}>
-            <div className="sb-step-header">
-              <span className="sb-step-badge">Step {step + 1}</span>
-              <span className="sb-step-type">{current.type}</span>
-              <h2 className="sb-step-title">{current.label}</h2>
-              <p className="sb-step-subtitle">{current.subtitle}</p>
-            </div>
+          <StepSection index={1} step={STEPS[1]}>
+            <StepParseEpisodes result={result} />
+          </StepSection>
 
-            {currentStepId === 'step_fetch_rss' && <StepFetchRss podcastName={podcastInfo.name} podcastId={podcastInfo.id} />}
-            {currentStepId === 'step_parse_episodes' && <StepParseEpisodes result={result} />}
-            {currentStepId === 'step_resolve_audio_stream' && <StepResolveAudioStream result={result} />}
-            {currentStepId === 'step_start_audio_streaming' && <StepStreamAudioChunks result={result} />}
-            {currentStepId === 'step_transcribe_chunks' && <StepTranscribeChunks result={result} />}
-            {currentStepId === 'step_mark_ad_locations' && <StepMarkAdLocations result={result} />}
-            {currentStepId === 'step_build_skip_map' && <StepBuildSkipMap result={result} />}
-            {currentStepId === 'step_fetch_html_transcript' && <StepFetchHtmlTranscript result={result} />}
-            {currentStepId === 'step_finalize_playback' && <StepFinalizePlayback result={result} />}
-          </div>
+          <StepSection index={2} step={STEPS[2]}>
+            <StepResolveAudioStream result={result} />
+          </StepSection>
 
-          {/* Bottom nav */}
-          <footer className="sb-step-footer">
-            <button
-              className="sb-nav-btn sb-nav-prev"
-              onClick={goLeft}
-              disabled={step === 0}
-            >
-              Prev
-            </button>
-            <div className="sb-step-dots">
-              {STEPS.map((_, i) => (
-                <div
-                  key={i}
-                  className={`sb-dot ${i === step ? 'active' : ''}`}
-                  onClick={() => setStep(i)}
-                />
-              ))}
-            </div>
-            <button
-              className="sb-nav-btn sb-nav-next"
-              onClick={goRight}
-              disabled={step === STEPS.length - 1}
-            >
-              Next
-            </button>
-          </footer>
-        </>
+          <StepSection index={3} step={STEPS[3]}>
+            <StepStreamAudioChunks result={result} />
+          </StepSection>
+
+          <StepSection index={4} step={STEPS[4]}>
+            <StepTranscribeChunks result={result} />
+          </StepSection>
+
+          <StepSection index={5} step={STEPS[5]}>
+            <StepMarkAdLocations result={result} />
+          </StepSection>
+
+          <StepSection index={6} step={STEPS[6]}>
+            <StepBuildSkipMap result={result} />
+          </StepSection>
+
+          <StepSection index={7} step={STEPS[7]}>
+            <StepFetchHtmlTranscript result={result} />
+          </StepSection>
+
+          <StepSection index={8} step={STEPS[8]}>
+            <StepFinalizePlayback result={result} />
+          </StepSection>
+        </div>
       )}
     </div>
   );

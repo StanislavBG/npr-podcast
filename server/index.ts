@@ -482,7 +482,11 @@ app.post('/api/audio/chunk', async (req, res) => {
     console.log(`[chunk ${chunkIndex}] Downloaded ${(audioBuffer.length / 1024 / 1024).toFixed(1)} MB`);
 
     // Step 5: Transcribe chunk with Whisper
-    const { buffer: compatBuffer, format } = await ensureCompatibleFormat(audioBuffer);
+    // MP3 chunks from Range requests may not start at frame boundaries,
+    // but Whisper handles this fine. Skip ensureCompatibleFormat to avoid
+    // ffmpeg dependency — we know the source is audio/mpeg from the HEAD request.
+    const compatBuffer = audioBuffer;
+    const format = 'mp3';
 
     let chunkText = '';
     let chunkSegments: Array<{ start: number; end: number; text: string }> = [];
@@ -1374,7 +1378,11 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             chunkBuffer = fullBuf.subarray(startByte, endByte + 1);
           }
 
-          const { buffer: compatBuf, format: fmt } = await ensureCompatibleFormat(chunkBuffer);
+          // Skip ensureCompatibleFormat — MP3 chunks from Range requests don't
+          // have magic bytes at offset 0, which would trigger ffmpeg (not installed).
+          // Whisper handles MP3 chunks fine even without frame alignment.
+          const compatBuf = chunkBuffer;
+          const fmt = 'mp3';
 
           try {
             const { toFile } = await import('openai');
