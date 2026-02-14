@@ -203,6 +203,18 @@ function StepStreamAudioChunks({ result }: { result: SandboxResult }) {
 function StepTranscribeChunks({ result }: { result: SandboxResult }) {
   const audio = result.audioDetails;
   const isAudioSource = result.transcriptSource === 'audio-transcription' || result.transcriptSource === 'audio-transcription-chunked';
+  const { lines } = result.transcript;
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+  const dur = result.episode.durationSec;
+  const validation = result.validation;
+
+  // Compute stats
+  const avgWordsPerLine = lines.length > 0 ? Math.round(totalWords / lines.length) : 0;
+  const speakers = [...new Set(lines.filter(l => l.speaker).map(l => l.speaker))];
+  const wordsPerMinute = dur > 0 ? Math.round(totalWords / (dur / 60)) : 0;
+  const wordCounts = lines.map(l => l.wordCount);
+  const maxWordsLine = wordCounts.length > 0 ? Math.max(...wordCounts) : 0;
+  const minWordsLine = wordCounts.length > 0 ? Math.min(...wordCounts) : 0;
 
   if (!audio || !audio.available) {
     return (
@@ -234,21 +246,47 @@ function StepTranscribeChunks({ result }: { result: SandboxResult }) {
     <div className="sb-step-body">
       <div className="sb-qa-callout">
         Each audio chunk is sent to <strong>OpenAI {audio.transcriptionModel}</strong> for
-        speech-to-text with <code>verbose_json</code> format to get segment-level timestamps.
-        The result is a timestamped transcript that Step 6 uses as input for ad classification.
+        speech-to-text with <code>verbose_json</code> format. Large segments are then split
+        into individual sentences. The output is a timestamped transcript for Step 6.
       </div>
+
+      {/* Transcription metadata */}
+      <h3 className="sb-sub-heading">Transcription Details</h3>
       <div className="sb-kv-grid">
         <div className="sb-kv"><span className="sb-kv-k">Model</span><span className="sb-kv-v">{audio.transcriptionModel}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Response format</span><span className="sb-kv-v">verbose_json (segment timestamps)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Segments returned</span><span className="sb-kv-v">{audio.segmentCount}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Audio duration (STT)</span><span className="sb-kv-v">{audio.audioDurationSec > 0 ? `${formatTime(audio.audioDurationSec)} (${audio.audioDurationSec.toFixed(1)}s)` : '(not reported)'}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Sentences produced</span><span className="sb-kv-v">{result.transcript.lineCount}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{result.transcript.totalWords.toLocaleString()}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Whisper segments</span><span className="sb-kv-v">{audio.segmentCount}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Audio duration</span><span className="sb-kv-v">{audio.audioDurationSec > 0 ? `${formatTimestamp(audio.audioDurationSec)} (${audio.audioDurationSec.toFixed(1)}s)` : '(not reported)'}</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Transcript source</span><span className="sb-kv-v">{isAudioSource ? 'Audio transcription (STT)' : result.transcriptSource || 'html'}</span></div>
       </div>
+
+      {/* Transcript quality stats */}
+      <h3 className="sb-sub-heading">Transcript Quality</h3>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Sentences</span><span className="sb-kv-v">{lines.length} ({audio.segmentCount} Whisper segments → {lines.length} sentences after splitting)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{totalWords.toLocaleString()}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Avg words/sentence</span><span className="sb-kv-v">{avgWordsPerLine}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Min / Max words</span><span className="sb-kv-v">{minWordsLine} / {maxWordsLine}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Speech rate</span><span className="sb-kv-v">{wordsPerMinute} words/min (expected ~155 wpm)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Speakers detected</span><span className="sb-kv-v">{speakers.length > 0 ? speakers.join(', ') : '(none — typical for STT)'}</span></div>
+      </div>
+
+      {/* Validation result */}
+      {validation && (
+        validation.isValid ? (
+          <div className="sb-qa-ok">
+            Transcript validation passed: {validation.reason}
+          </div>
+        ) : (
+          <div className="sb-qa-alert">
+            Transcript validation failed: {validation.reason}
+          </div>
+        )
+      )}
+
       {isAudioSource ? (
         <div className="sb-qa-ok">
-          Audio transcription succeeded. Full timestamped transcript ready for Step 6.
+          Timestamped transcript ready. {lines.length} sentences covering {formatTimestamp(dur)}.
         </div>
       ) : (
         <div className="sb-qa-alert">
@@ -257,17 +295,12 @@ function StepTranscribeChunks({ result }: { result: SandboxResult }) {
       )}
 
       {/* Full transcript text with hh:mm:ss timestamps */}
-      <h3 className="sb-sub-heading">Full Transcript</h3>
+      <h3 className="sb-sub-heading">Full Transcript ({lines.length} sentences)</h3>
       <div className="sb-qa-callout">
-        Verify the transcript is complete and readable. Each line is one sentence with a timestamp.
-        This is the input that Step 6 uses for ad classification.
+        This is the exact input Step 6 receives. Each sentence has a timestamp and word count.
       </div>
       <div className="sb-parsed-lines">
-        {result.transcript.lines.map(l => {
-          const totalWords = result.transcript.lines.length > 0
-            ? result.transcript.lines[result.transcript.lines.length - 1].cumulativeWords
-            : 0;
-          const dur = result.episode.durationSec;
+        {lines.map(l => {
           const approxTime = dur > 0 && totalWords > 0
             ? (l.cumulativeWords / totalWords) * dur
             : 0;
@@ -289,60 +322,123 @@ function StepTranscribeChunks({ result }: { result: SandboxResult }) {
 }
 
 function StepMarkAdLocations({ result }: { result: SandboxResult }) {
-  const { adBlocks, episode, summary } = result;
+  const { adBlocks, episode, summary, transcript } = result;
+  const { lines } = transcript;
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+  const dur = episode.durationSec;
   let parsed: any = null;
   try { parsed = JSON.parse(result.llmResponse); } catch { /* not JSON */ }
+
+  // Compute per-block sentence details
+  const adSentenceCount = adBlocks.reduce((s, b) => s + (b.endLine - b.startLine + 1), 0);
+  const contentSentenceCount = lines.length - adSentenceCount;
 
   return (
     <div className="sb-step-body">
       <div className="sb-qa-callout">
-        Numbered transcript lines are sent to the LLM. It identifies contiguous line ranges
-        that are ads, sponsor reads, funding credits, or promos.
-      </div>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Ad blocks found</span><span className="sb-kv-v">{summary.totalAdBlocks}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Ad word %</span><span className="sb-kv-v">{summary.adWordPercent}%</span></div>
+        The LLM reads every sentence from Step 5 and classifies it as <strong>CONTENT</strong> or
+        {' '}<strong>AD</strong>. Adjacent ad sentences are grouped into blocks. Strategy: {summary.strategy}
       </div>
 
-      {adBlocks.length === 0 ? (
+      {/* Classification summary */}
+      <h3 className="sb-sub-heading">Classification Summary</h3>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Input sentences</span><span className="sb-kv-v">{lines.length}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Classified as CONTENT</span><span className="sb-kv-v">{contentSentenceCount} sentences ({lines.length > 0 ? ((contentSentenceCount / lines.length) * 100).toFixed(1) : 0}%)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Classified as AD</span><span className="sb-kv-v">{adSentenceCount} sentences in {adBlocks.length} block(s) ({lines.length > 0 ? ((adSentenceCount / lines.length) * 100).toFixed(1) : 0}%)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Ad words</span><span className="sb-kv-v">{summary.totalAdWords.toLocaleString()} / {totalWords.toLocaleString()} ({summary.adWordPercent}%)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{formatTimestamp(summary.totalAdTimeSec)} ({summary.totalAdTimeSec}s)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Content time</span><span className="sb-kv-v">{formatTimestamp(summary.contentTimeSec)} ({summary.contentTimeSec}s)</span></div>
+      </div>
+
+      {/* Sanity check */}
+      {summary.adWordPercent > 20 && (
         <div className="sb-qa-alert">
-          No ad blocks detected. The transcript may not contain any ad-like content,
-          or ads are dynamically inserted into the audio stream only.
+          Ad content is {summary.adWordPercent}% of transcript — this is unusually high.
+          Most NPR episodes have 5-15% ads. The LLM may be over-classifying editorial content as ads.
         </div>
-      ) : (
+      )}
+      {adBlocks.length === 0 && (
+        <div className="sb-qa-alert">
+          No ad blocks detected. The LLM found zero ad sentences. This could mean the episode
+          genuinely has no ads, or the transcript quality was too poor for classification.
+        </div>
+      )}
+
+      {adBlocks.length > 0 && <Timeline result={result} />}
+
+      {/* Detailed ad blocks with full sentence text */}
+      {adBlocks.length > 0 && (
         <>
-          <Timeline result={result} />
+          <h3 className="sb-sub-heading">Detected Ad Blocks ({adBlocks.length})</h3>
           <div className="sb-ad-list">
-            {adBlocks.map((b, i) => (
-              <AdBlockCard key={i} block={b} index={i} durationSec={episode.durationSec} />
-            ))}
+            {adBlocks.map((b, i) => {
+              const blockLines = lines.filter(l => l.lineNum >= b.startLine && l.lineNum <= b.endLine);
+              const blockWords = blockLines.reduce((s, l) => s + l.wordCount, 0);
+              const duration = b.endTimeSec - b.startTimeSec;
+              return (
+                <div key={i} className="sb-ad-card">
+                  <div className="sb-ad-card-header">
+                    <span className="sb-ad-badge">AD {i + 1}</span>
+                    <span className="sb-ad-lines">Sentences {b.startLine}–{b.endLine} ({b.endLine - b.startLine + 1} sentences)</span>
+                    <span className="sb-ad-time">
+                      {formatTimestamp(b.startTimeSec)} – {formatTimestamp(b.endTimeSec)}
+                    </span>
+                    <span className="sb-ad-dur">{duration.toFixed(0)}s, {blockWords} words</span>
+                  </div>
+                  <div className="sb-ad-card-reason"><strong>Reason:</strong> {b.reason}</div>
+                  {/* Show each sentence in the ad block */}
+                  <div className="sb-parsed-lines" style={{ marginTop: '8px', borderLeft: '3px solid #e74c3c', paddingLeft: '8px' }}>
+                    {blockLines.map(l => {
+                      const approxTime = dur > 0 && totalWords > 0
+                        ? (l.cumulativeWords / totalWords) * dur
+                        : 0;
+                      return (
+                        <div key={l.lineNum} className="sb-parsed-line">
+                          <span className="sb-pl-time">{formatTimestamp(approxTime)}</span>
+                          <span className="sb-pl-num">[{l.lineNum}]</span>
+                          <span className="sb-pl-text" style={{ color: '#e74c3c' }}>
+                            {l.speaker && <strong>{l.speaker}: </strong>}
+                            {l.text}
+                          </span>
+                          <span className="sb-pl-wc">{l.wordCount}w</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </>
       )}
 
-      {/* Annotated transcript */}
-      <h3 className="sb-sub-heading">Annotated Transcript</h3>
+      {/* Annotated transcript — full view with ads highlighted */}
+      <h3 className="sb-sub-heading">Annotated Transcript (full)</h3>
       <div className="sb-qa-callout">
-        Lines highlighted in red are detected ad blocks. Scan for any the LLM may have missed.
+        Sentences in red are classified as ads. Scan to verify the LLM's classification is correct.
       </div>
       <TranscriptViewer
-        lines={result.transcript.lines}
-        adBlocks={result.adBlocks}
-        durationSec={result.episode.durationSec}
+        lines={lines}
+        adBlocks={adBlocks}
+        durationSec={dur}
       />
 
-      {/* LLM response detail */}
-      <h3 className="sb-sub-heading">System Prompt</h3>
+      {/* LLM prompts and response for debugging */}
+      <h3 className="sb-sub-heading">LLM System Prompt</h3>
       <pre className="sb-code-block sb-prompt-text">{result.prompts.system}</pre>
 
-      <h3 className="sb-sub-heading">User Prompt</h3>
-      <pre className="sb-code-block sb-prompt-text">{result.prompts.user}</pre>
+      <h3 className="sb-sub-heading">LLM User Prompt (first 500 chars + last 300 chars)</h3>
+      <pre className="sb-code-block sb-prompt-text">
+        {result.prompts.user.length > 800
+          ? result.prompts.user.slice(0, 500) + '\n\n... (' + result.prompts.user.length.toLocaleString() + ' chars total) ...\n\n' + result.prompts.user.slice(-300)
+          : result.prompts.user}
+      </pre>
 
       <h3 className="sb-sub-heading">Raw LLM Response</h3>
-      {parsed && parsed.adBlocks?.length === 0 && (
-        <div className="sb-qa-alert">
-          The LLM returned zero ad blocks.
+      {parsed && (
+        <div className="sb-kv-grid" style={{ marginBottom: '8px' }}>
+          <div className="sb-kv"><span className="sb-kv-k">Blocks returned</span><span className="sb-kv-v">{parsed.adBlocks?.length ?? '(parse error)'}</span></div>
         </div>
       )}
       <pre className="sb-code-block sb-json-text">{result.llmResponse}</pre>
@@ -351,21 +447,23 @@ function StepMarkAdLocations({ result }: { result: SandboxResult }) {
 }
 
 function StepBuildSkipMap({ result }: { result: SandboxResult }) {
-  const { adBlocks, episode } = result;
+  const { adBlocks, episode, summary } = result;
   const totalWords = result.transcript.lines.length > 0
     ? result.transcript.lines[result.transcript.lines.length - 1].cumulativeWords
     : 0;
   const dur = episode.durationSec;
+  const totalAdTimeSec = adBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
 
   return (
     <div className="sb-step-body">
       <div className="sb-qa-callout">
-        <strong>Pure computation</strong> — no external calls. Adjacent ad segments are merged,
-        padding is added (0.5s before, 0.3s after), and line ranges are mapped to timestamps
-        using proportional word position.
+        <strong>Pure computation</strong> — no external calls. Sentence-level ad classifications from
+        Step 6 are mapped to audio timestamps using proportional word position, then merged
+        into skip ranges for the player.
       </div>
 
-      <h3 className="sb-sub-heading">Timestamp Mapping</h3>
+      {/* Mapping formula */}
+      <h3 className="sb-sub-heading">Word-to-Time Mapping</h3>
       <div className="sb-qa-math">
         <div className="sb-qa-row">
           <span className="sb-qa-label">Total transcript words</span>
@@ -373,46 +471,84 @@ function StepBuildSkipMap({ result }: { result: SandboxResult }) {
         </div>
         <div className="sb-qa-row">
           <span className="sb-qa-label">Audio duration</span>
-          <span className="sb-qa-val">{formatTime(dur)} ({dur}s)</span>
+          <span className="sb-qa-val">{formatTimestamp(dur)} ({dur}s)</span>
         </div>
         <div className="sb-qa-row">
           <span className="sb-qa-label">Mapping formula</span>
-          <span className="sb-qa-val">timeSec = (cumulativeWords / totalWords) * duration</span>
+          <span className="sb-qa-val">time = (cumulativeWords / {totalWords}) × {dur}s</span>
+        </div>
+      </div>
+
+      {/* Time breakdown */}
+      <h3 className="sb-sub-heading">Time Breakdown</h3>
+      <div className="sb-qa-math">
+        <div className="sb-qa-row">
+          <span className="sb-qa-label">Total episode</span>
+          <span className="sb-qa-val">{formatTimestamp(dur)}</span>
+        </div>
+        <div className="sb-qa-row" style={{ color: '#e74c3c' }}>
+          <span className="sb-qa-label">Ad time ({adBlocks.length} blocks)</span>
+          <span className="sb-qa-val">{formatTimestamp(totalAdTimeSec)} ({dur > 0 ? ((totalAdTimeSec / dur) * 100).toFixed(1) : 0}%)</span>
+        </div>
+        <div className="sb-qa-row sb-qa-highlight">
+          <span className="sb-qa-label">Content time</span>
+          <span className="sb-qa-val">{formatTimestamp(dur - totalAdTimeSec)} ({dur > 0 ? (((dur - totalAdTimeSec) / dur) * 100).toFixed(1) : 0}%)</span>
         </div>
       </div>
 
       {adBlocks.length > 0 && (
         <>
-          <h3 className="sb-sub-heading">Ad Block Mappings</h3>
+          <h3 className="sb-sub-heading">Skip Ranges ({adBlocks.length})</h3>
           <div className="sb-ad-list">
-            {adBlocks.map((b, i) => (
-              <div key={i} className="sb-ad-card">
-                <div className="sb-ad-card-header">
-                  <span className="sb-ad-badge">AD {i + 1}</span>
-                  <span className="sb-ad-lines">Lines {b.startLine}--{b.endLine}</span>
-                  <span className="sb-ad-time">Words {b.startWord}--{b.endWord}</span>
+            {adBlocks.map((b, i) => {
+              const blockDuration = b.endTimeSec - b.startTimeSec;
+              const blockWords = b.endWord - b.startWord;
+              return (
+                <div key={i} className="sb-ad-card">
+                  <div className="sb-ad-card-header">
+                    <span className="sb-ad-badge">SKIP {i + 1}</span>
+                    <span className="sb-ad-lines">Sentences {b.startLine}–{b.endLine}</span>
+                  </div>
+                  <div className="sb-qa-math" style={{ marginTop: '0.5rem' }}>
+                    <div className="sb-qa-row">
+                      <span className="sb-qa-label">Start</span>
+                      <span className="sb-qa-val">word {b.startWord}/{totalWords} → {formatTimestamp(b.startTimeSec)} ({b.startTimeSec.toFixed(1)}s)</span>
+                    </div>
+                    <div className="sb-qa-row">
+                      <span className="sb-qa-label">End</span>
+                      <span className="sb-qa-val">word {b.endWord}/{totalWords} → {formatTimestamp(b.endTimeSec)} ({b.endTimeSec.toFixed(1)}s)</span>
+                    </div>
+                    <div className="sb-qa-row sb-qa-highlight">
+                      <span className="sb-qa-label">Skip duration</span>
+                      <span className="sb-qa-val">{blockDuration.toFixed(1)}s ({blockWords} words)</span>
+                    </div>
+                    <div className="sb-qa-row">
+                      <span className="sb-qa-label">Reason</span>
+                      <span className="sb-qa-val">{b.reason}</span>
+                    </div>
+                  </div>
                 </div>
-                <div className="sb-qa-math" style={{ marginTop: '0.5rem' }}>
-                  <div className="sb-qa-row">
-                    <span className="sb-qa-label">Start</span>
-                    <span className="sb-qa-val">{b.startWord}/{totalWords} words = {formatTime(b.startTimeSec)} ({b.startTimeSec.toFixed(1)}s)</span>
-                  </div>
-                  <div className="sb-qa-row">
-                    <span className="sb-qa-label">End</span>
-                    <span className="sb-qa-val">{b.endWord}/{totalWords} words = {formatTime(b.endTimeSec)} ({b.endTimeSec.toFixed(1)}s)</span>
-                  </div>
-                  <div className="sb-qa-row sb-qa-highlight">
-                    <span className="sb-qa-label">Duration</span>
-                    <span className="sb-qa-val">{(b.endTimeSec - b.startTimeSec).toFixed(1)}s</span>
-                  </div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </>
       )}
 
       <Timeline result={result} />
+
+      {/* Raw skip map JSON */}
+      <h3 className="sb-sub-heading">Skip Map JSON</h3>
+      <div className="sb-qa-callout">
+        This JSON is passed to the audio player to auto-skip ad segments during playback.
+      </div>
+      {result.skipMap.length === 0 && (
+        <div className="sb-qa-alert">
+          Empty skip map — the player will not skip anything for this episode.
+        </div>
+      )}
+      <pre className="sb-code-block sb-json-text">
+        {JSON.stringify(result.skipMap, null, 2)}
+      </pre>
     </div>
   );
 }
@@ -555,11 +691,13 @@ function Timeline({ result }: { result: SandboxResult }) {
     for (let i = s; i <= e; i++) cells[i] = true;
   }
 
+  const totalAdSec = result.adBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
+
   return (
     <div className="sb-timeline">
       <div className="sb-timeline-labels">
-        <span>0:00</span>
-        <span>{formatTime(dur)}</span>
+        <span>{formatTimestamp(0)}</span>
+        <span>{formatTimestamp(dur)}</span>
       </div>
       <div className="sb-timeline-bar">
         {cells.map((isAd, i) => (
@@ -567,8 +705,8 @@ function Timeline({ result }: { result: SandboxResult }) {
         ))}
       </div>
       <div className="sb-timeline-legend">
-        <span><span className="sb-legend-dot content" /> content</span>
-        <span><span className="sb-legend-dot ad" /> ad block</span>
+        <span><span className="sb-legend-dot content" /> content ({formatTimestamp(dur - totalAdSec)})</span>
+        <span><span className="sb-legend-dot ad" /> ad ({formatTimestamp(totalAdSec)})</span>
       </div>
     </div>
   );
@@ -628,16 +766,16 @@ function TranscriptViewer({
       const block = adLineToBlock.get(l.lineNum)!;
       elements.push(
         <div key={`ad-start-${l.lineNum}`} className="sb-ad-banner start">
-          AD BLOCK (lines {block.startLine}--{block.endLine}){' '}
-          {formatTime(block.startTimeSec)} -- {formatTime(block.endTimeSec)}
-          {' -- '}{block.reason}
+          AD BLOCK (sentences {block.startLine}–{block.endLine}){' '}
+          {formatTimestamp(block.startTimeSec)} – {formatTimestamp(block.endTimeSec)}
+          {' — '}{block.reason}
         </div>
       );
     }
 
     elements.push(
       <div key={l.lineNum} className={`sb-line ${isAd ? 'is-ad' : ''}`}>
-        <span className="sb-line-time">{formatTime(approxTime)}</span>
+        <span className="sb-line-time">{formatTimestamp(approxTime)}</span>
         <span className="sb-line-num">{l.lineNum}</span>
         {isAd && <span className="sb-line-ad-mark" />}
         <span className="sb-line-text">

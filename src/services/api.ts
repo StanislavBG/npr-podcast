@@ -226,6 +226,17 @@ export interface SandboxResult {
   rawHtml: { length: number; pTagCount: number; snippet: string };
   transcript: { lineCount: number; totalWords: number; lines: SandboxLine[] };
   transcriptSource?: string;
+  validation?: {
+    isValid: boolean;
+    reason: string;
+    details: {
+      lineCount: number;
+      totalWords: number;
+      linesWithSpeaker: number;
+      expectedMinWords: number;
+      avgWordsPerLine: number;
+    };
+  };
   adBlocks: SandboxAdBlock[];
   summary: {
     totalAdBlocks: number;
