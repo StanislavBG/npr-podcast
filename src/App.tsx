@@ -413,7 +413,7 @@ export default function App() {
         <header className="header">
           <h1 className="header-title">NPR Podcasts</h1>
           <button className="header-sandbox-link" onClick={goToSandbox}>
-            Sandbox
+            Enhanced View
           </button>
         </header>
 

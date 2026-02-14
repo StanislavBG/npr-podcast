@@ -122,9 +122,9 @@ function StepResolveAudioStream({ result }: { result: SandboxResult }) {
         </div>
       )}
       {tooLarge && (
-        <div className="sb-qa-alert">
-          Audio file is {fileSizeMb} MB — exceeds OpenAI Whisper's 25 MB upload limit.
-          Transcription in step 5 will likely fail with a 413 error unless chunking is used.
+        <div className="sb-qa-callout">
+          Audio file is {fileSizeMb} MB — exceeds Whisper's 25 MB single-request limit.
+          Chunked processing (5-min chunks, ~4.7 MB each) handles this automatically.
         </div>
       )}
     </div>
@@ -143,44 +143,40 @@ function StepStreamAudioChunks({ result }: { result: SandboxResult }) {
     );
   }
 
-  const chunkSizeBytes = 480_000; // ~30s at 128kbps
+  const chunkDurationSec = 300; // 5 minutes
+  const bytesPerChunk = chunkDurationSec * (128000 / 8); // ~4.7 MB at 128kbps
   const fileSizeMb = audio.contentLengthBytes > 0
     ? (audio.contentLengthBytes / 1024 / 1024).toFixed(1)
     : audio.downloadSizeMb;
   const estimatedChunks = audio.contentLengthBytes > 0
-    ? Math.ceil(audio.contentLengthBytes / chunkSizeBytes)
+    ? Math.ceil((audio.contentLengthBytes * 8 / 128000) / chunkDurationSec)
     : 0;
-  const tooLarge = audio.contentLengthBytes > 25 * 1024 * 1024;
-  const is413 = audio.error?.includes('413');
+  const chunkSizeMb = (bytesPerChunk / 1024 / 1024).toFixed(1);
 
   return (
     <div className="sb-step-body">
       <div className="sb-qa-callout">
-        Audio is fetched from the resolved CDN URL. Currently downloads the full file
-        in one request. The streaming pipeline would chunk into ~30s segments via HTTP Range requests.
+        Audio is fetched in <strong>5-minute chunks</strong> via HTTP Range requests.
+        Each chunk is ~{chunkSizeMb} MB — well under Whisper's 25 MB limit.
+        A 10-second overlap between chunks catches ad boundaries.
       </div>
       <div className="sb-kv-grid">
         <div className="sb-kv"><span className="sb-kv-k">File size</span><span className="sb-kv-v">{fileSizeMb} MB ({audio.contentLengthBytes.toLocaleString()} bytes)</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Format</span><span className="sb-kv-v">{audio.contentType}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Chunk strategy</span><span className="sb-kv-v">~30s per chunk ({(chunkSizeBytes / 1024).toFixed(0)} KB at 128kbps)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Chunk strategy</span><span className="sb-kv-v">~5 min per chunk (~{chunkSizeMb} MB at 128kbps)</span></div>
         {estimatedChunks > 0 && (
           <div className="sb-kv"><span className="sb-kv-k">Estimated chunks</span><span className="sb-kv-v">{estimatedChunks}</span></div>
         )}
-        <div className="sb-kv"><span className="sb-kv-k">Lookahead</span><span className="sb-kv-v">3 chunks (~90s ahead of playback)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Lookahead</span><span className="sb-kv-v">2 chunks (~10 min ahead of playback)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Overlap</span><span className="sb-kv-v">10 seconds (boundary ad detection)</span></div>
       </div>
       {audio.error ? (
         <div className="sb-qa-alert">
           Audio download/processing failed: {audio.error}
-          {is413 && tooLarge && (
-            <div style={{ marginTop: '0.5rem' }}>
-              File is {fileSizeMb} MB but OpenAI Whisper accepts max 25 MB.
-              Chunked streaming would solve this by sending ~30s segments individually.
-            </div>
-          )}
         </div>
       ) : (
         <div className="sb-qa-ok">
-          Audio downloaded successfully ({fileSizeMb} MB). Feeding into transcription pipeline.
+          Audio chunked successfully ({estimatedChunks} chunks, {fileSizeMb} MB total). Feeding into transcription pipeline.
         </div>
       )}
     </div>
@@ -189,7 +185,7 @@ function StepStreamAudioChunks({ result }: { result: SandboxResult }) {
 
 function StepTranscribeChunks({ result }: { result: SandboxResult }) {
   const audio = result.audioDetails;
-  const isAudioSource = result.transcriptSource === 'audio-transcription';
+  const isAudioSource = result.transcriptSource === 'audio-transcription' || result.transcriptSource === 'audio-transcription-chunked';
 
   if (!audio || !audio.available) {
     return (
@@ -381,9 +377,10 @@ function StepBuildSkipMap({ result }: { result: SandboxResult }) {
 function StepFetchHtmlTranscript({ result }: { result: SandboxResult }) {
   const { rawHtml, transcript, qa } = result;
   const source = result.transcriptSource || 'html';
-  const isAudioSource = source === 'audio-transcription';
+  const isAudioSource = source === 'audio-transcription' || source === 'audio-transcription-chunked';
   const sourceLabels: Record<string, string> = {
     'audio-transcription': 'Audio Transcription (speech-to-text)',
+    'audio-transcription-chunked': 'Audio Transcription (chunked, speech-to-text)',
     'srt': 'SRT subtitle file',
     'vtt': 'VTT subtitle file',
     'json': 'JSON transcript',
