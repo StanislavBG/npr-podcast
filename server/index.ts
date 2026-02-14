@@ -361,6 +361,41 @@ const CHUNK_OVERLAP_SEC = 10;   // 10s overlap to catch boundary ads
 const DEFAULT_BITRATE = 128000; // 128kbps
 
 /**
+ * Align a buffer to the first valid MP3 frame sync.
+ *
+ * When fetching audio via HTTP Range requests, the chunk starts at an arbitrary
+ * byte offset — often in the middle of an MP3 frame. The leading garbage bytes
+ * confuse Whisper's decoder. This function scans forward to the first valid
+ * MPEG frame sync (0xFF followed by 0xE0+ mask) and returns the buffer from
+ * that point onward.
+ *
+ * MP3 frame sync: 11 set bits = 0xFF then (byte & 0xE0) === 0xE0
+ * Additional validation: check bitrate index is not 0xF (invalid) and
+ * sample rate index is not 0x3 (reserved).
+ */
+function alignToMp3Frame(buf: Buffer): Buffer {
+  for (let i = 0; i < Math.min(buf.length - 4, 8192); i++) {
+    // Check for frame sync: 11 set bits across first 2 bytes
+    if (buf[i] === 0xFF && (buf[i + 1] & 0xE0) === 0xE0) {
+      // Validate it's a real frame header, not just coincidental bytes
+      const byte2 = buf[i + 2];
+      const bitrateIndex = (byte2 >> 4) & 0x0F;
+      const sampleRateIndex = (byte2 >> 2) & 0x03;
+      // bitrateIndex 0xF is "bad" and sampleRate 0x3 is "reserved"
+      if (bitrateIndex !== 0x0F && sampleRateIndex !== 0x03 && bitrateIndex !== 0x00) {
+        if (i > 0) {
+          console.log(`[mp3-align] Skipped ${i} bytes to reach first valid frame sync`);
+        }
+        return buf.subarray(i);
+      }
+    }
+  }
+  // No frame sync found in first 8KB — return as-is and hope for the best
+  console.warn(`[mp3-align] No valid MP3 frame sync found in first 8KB of chunk`);
+  return buf;
+}
+
+/**
  * Step 3: Resolve Audio Stream — HEAD request to follow redirects, get metadata for chunking.
  */
 app.post('/api/audio/resolve', async (req, res) => {
@@ -482,11 +517,11 @@ app.post('/api/audio/chunk', async (req, res) => {
     console.log(`[chunk ${chunkIndex}] Downloaded ${(audioBuffer.length / 1024 / 1024).toFixed(1)} MB`);
 
     // Step 5: Transcribe chunk with Whisper
-    // MP3 chunks from Range requests may not start at frame boundaries,
-    // but Whisper handles this fine. Skip ensureCompatibleFormat to avoid
-    // ffmpeg dependency — we know the source is audio/mpeg from the HEAD request.
-    const compatBuffer = audioBuffer;
+    // Align to first valid MP3 frame sync — Range requests start at arbitrary
+    // byte offsets which produce leading garbage that confuses Whisper.
+    const compatBuffer = alignToMp3Frame(audioBuffer);
     const format = 'mp3';
+    console.log(`[chunk ${chunkIndex}] Aligned buffer: ${audioBuffer.length} -> ${compatBuffer.length} bytes (trimmed ${audioBuffer.length - compatBuffer.length})`);
 
     let chunkText = '';
     let chunkSegments: Array<{ start: number; end: number; text: string }> = [];
@@ -1378,11 +1413,11 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             chunkBuffer = fullBuf.subarray(startByte, endByte + 1);
           }
 
-          // Skip ensureCompatibleFormat — MP3 chunks from Range requests don't
-          // have magic bytes at offset 0, which would trigger ffmpeg (not installed).
-          // Whisper handles MP3 chunks fine even without frame alignment.
-          const compatBuf = chunkBuffer;
+          // Align to first valid MP3 frame sync — Range requests start at
+          // arbitrary byte offsets producing leading garbage that confuses Whisper.
+          const compatBuf = alignToMp3Frame(chunkBuffer);
           const fmt = 'mp3';
+          console.log(`[sandbox] Chunk ${ci + 1}: aligned ${chunkBuffer.length} -> ${compatBuf.length} bytes`);
 
           try {
             const { toFile } = await import('openai');
