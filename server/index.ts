@@ -351,119 +351,19 @@ app.get('/api/transcript', async (req, res) => {
 // The v2 approach parses HTML into numbered lines server-side. No LLM needed
 // for this step — it's deterministic HTML parsing, same as the sandbox.
 
-// ─── Audio Transcription (speech-to-text via OpenAI) ─────────────────────────
+// ─── Audio Chunked Processing ────────────────────────────────────────────────
+//
+// Chunked strategy: process 5-minute chunks on-demand, staying 2 chunks ahead
+// of playback. Each chunk is ~4.7 MB at 128kbps — well under Whisper's 25 MB limit.
+
+const CHUNK_DURATION_SEC = 300; // 5 minutes
+const CHUNK_OVERLAP_SEC = 10;   // 10s overlap to catch boundary ads
+const DEFAULT_BITRATE = 128000; // 128kbps
 
 /**
- * Fetch audio from URL and transcribe it using OpenAI's gpt-4o-mini-transcribe.
- * Returns structured transcript with timestamps when available.
+ * Step 3: Resolve Audio Stream — HEAD request to follow redirects, get metadata for chunking.
  */
-async function transcribeAudioFromUrl(audioUrl: string): Promise<{
-  text: string;
-  segments: Array<{ start: number; end: number; text: string }>;
-  lines: SandboxLine[];
-  durationSec: number;
-}> {
-  // Step 1: Download the audio file
-  console.log(`[transcribe] Fetching audio: ${audioUrl.slice(0, 80)}...`);
-  const audioRes = await fetch(audioUrl, {
-    headers: { 'User-Agent': 'NPR-Podcast-Player/1.0' },
-    redirect: 'follow',
-  });
-  if (!audioRes.ok) throw new Error(`Audio fetch failed: ${audioRes.status}`);
-
-  const arrayBuf = await audioRes.arrayBuffer();
-  const audioBuffer = Buffer.from(arrayBuf);
-  console.log(`[transcribe] Audio downloaded: ${(audioBuffer.length / 1024 / 1024).toFixed(1)} MB`);
-
-  // Step 2: Ensure compatible format (MP3 passes through, others get converted)
-  const { buffer, format } = await ensureCompatibleFormat(audioBuffer);
-
-  // Step 3: Transcribe with verbose_json for timestamps
-  // Try verbose_json first for segment timestamps, fall back to plain text
-  let fullText = '';
-  let segments: Array<{ start: number; end: number; text: string }> = [];
-  let audioDuration = 0;
-
-  try {
-    // Use the OpenAI client directly for verbose_json response format
-    const { toFile } = await import('openai');
-    const file = await toFile(buffer, `audio.${format}`);
-    const verboseResult = await sttOpenai.audio.transcriptions.create({
-      file,
-      model: 'gpt-4o-mini-transcribe',
-      response_format: 'verbose_json',
-    }) as any;
-
-    fullText = verboseResult.text || '';
-    audioDuration = verboseResult.duration || 0;
-    segments = (verboseResult.segments || []).map((s: any) => ({
-      start: s.start || 0,
-      end: s.end || 0,
-      text: (s.text || '').trim(),
-    }));
-    console.log(`[transcribe] Got ${segments.length} segments, duration=${audioDuration}s`);
-  } catch (verboseErr: any) {
-    // Fall back to plain text transcription
-    console.warn(`[transcribe] verbose_json failed (${verboseErr.message}), falling back to plain text`);
-    fullText = await speechToText(buffer, format);
-    console.log(`[transcribe] Got plain text: ${fullText.length} chars`);
-  }
-
-  // Step 4: Convert to SandboxLine format
-  const lines: SandboxLine[] = [];
-  let cumulative = 0;
-  let lineNum = 0;
-
-  if (segments.length > 0) {
-    // We have timestamped segments — use them directly
-    for (const seg of segments) {
-      if (!seg.text) continue;
-
-      let speaker = '';
-      let content = seg.text;
-
-      // Detect speaker pattern: "SPEAKER NAME:" at start
-      const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
-      if (speakerMatch) {
-        speaker = speakerMatch[1].trim();
-        content = content.slice(speakerMatch[0].length).trim();
-      }
-
-      if (!content) continue;
-
-      lineNum++;
-      const wc = content.split(/\s+/).filter(Boolean).length;
-      cumulative += wc;
-
-      lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative });
-    }
-  } else {
-    // Plain text — split into sentences/paragraphs
-    const sentences = fullText.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
-    for (const sentence of sentences) {
-      let speaker = '';
-      let content = sentence.trim();
-
-      const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
-      if (speakerMatch) {
-        speaker = speakerMatch[1].trim();
-        content = content.slice(speakerMatch[0].length).trim();
-      }
-
-      if (!content) continue;
-
-      lineNum++;
-      const wc = content.split(/\s+/).filter(Boolean).length;
-      cumulative += wc;
-
-      lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative });
-    }
-  }
-
-  return { text: fullText, segments, lines, durationSec: audioDuration };
-}
-
-app.post('/api/transcribe', async (req, res) => {
+app.post('/api/audio/resolve', async (req, res) => {
   const { audioUrl } = req.body as { audioUrl: string };
   if (!audioUrl) {
     res.status(400).json({ error: 'Missing audioUrl' });
@@ -471,18 +371,242 @@ app.post('/api/transcribe', async (req, res) => {
   }
 
   try {
-    const result = await transcribeAudioFromUrl(audioUrl);
+    console.log(`[resolve] HEAD request: ${audioUrl.slice(0, 80)}...`);
+    const headRes = await fetch(audioUrl, {
+      method: 'HEAD',
+      headers: { 'User-Agent': 'NPR-Podcast-Player/1.0' },
+      redirect: 'follow',
+    });
+
+    const resolvedUrl = headRes.url || audioUrl;
+    const contentType = headRes.headers.get('content-type') || 'audio/mpeg';
+    const cl = headRes.headers.get('content-length');
+    const contentLength = cl ? parseInt(cl, 10) : 0;
+    const acceptRanges = (headRes.headers.get('accept-ranges') || '').toLowerCase() !== 'none';
+
+    // Estimate duration from file size + assumed bitrate
+    const bitrate = DEFAULT_BITRATE;
+    const durationSec = contentLength > 0 ? Math.round((contentLength * 8) / bitrate) : 0;
+    const totalChunks = durationSec > 0 ? Math.ceil(durationSec / CHUNK_DURATION_SEC) : 1;
+
+    console.log(`[resolve] Resolved: ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${durationSec}s, ${totalChunks} chunks, ranges=${acceptRanges}`);
+
     res.json({
-      text: result.text,
-      segments: result.segments,
-      lines: result.lines,
-      totalWords: result.lines.length > 0 ? result.lines[result.lines.length - 1].cumulativeWords : 0,
-      durationSec: result.durationSec,
-      source: 'audio-transcription',
+      resolvedUrl,
+      contentLength,
+      acceptRanges,
+      contentType,
+      durationSec,
+      bitrate,
+      totalChunks,
+      chunkDurationSec: CHUNK_DURATION_SEC,
     });
   } catch (err: any) {
-    console.error('Transcription error:', err.message);
-    res.status(500).json({ error: 'Transcription failed', detail: err.message });
+    console.error('[resolve] Error:', err.message);
+    res.status(500).json({ error: 'Failed to resolve audio URL', detail: err.message });
+  }
+});
+
+/**
+ * Step 4+5+6: Process a single audio chunk — fetch bytes via Range request,
+ * transcribe with Whisper, detect ads with LLM. Returns results for one chunk.
+ */
+app.post('/api/audio/chunk', async (req, res) => {
+  const {
+    resolvedUrl,
+    chunkIndex,
+    totalChunks,
+    contentLength,
+    durationSec,
+    bitrate,
+    chunkDurationSec,
+    overlapSec,
+    episodeTitle,
+    prevChunkTrailingText,
+  } = req.body as {
+    resolvedUrl: string;
+    chunkIndex: number;
+    totalChunks: number;
+    contentLength: number;
+    durationSec: number;
+    bitrate: number;
+    chunkDurationSec: number;
+    overlapSec: number;
+    episodeTitle: string;
+    prevChunkTrailingText: string;
+  };
+
+  if (!resolvedUrl || chunkIndex === undefined) {
+    res.status(400).json({ error: 'Missing resolvedUrl or chunkIndex' });
+    return;
+  }
+
+  try {
+    const bytesPerSec = bitrate / 8;
+    const chunkStartSec = chunkIndex * chunkDurationSec;
+    // Add overlap: fetch a bit past the chunk boundary to catch boundary ads
+    const chunkEndSec = Math.min((chunkIndex + 1) * chunkDurationSec + overlapSec, durationSec);
+
+    // For chunks > 0, start fetching slightly before to overlap with previous
+    const fetchStartSec = chunkIndex > 0 ? Math.max(0, chunkStartSec - overlapSec) : 0;
+
+    const startByte = Math.floor(fetchStartSec * bytesPerSec);
+    const endByte = Math.min(Math.floor(chunkEndSec * bytesPerSec) - 1, contentLength - 1);
+
+    const chunkSizeMB = ((endByte - startByte + 1) / 1024 / 1024).toFixed(1);
+    console.log(`[chunk ${chunkIndex}/${totalChunks - 1}] Fetching bytes ${startByte}-${endByte} (${chunkSizeMB} MB), time ${fetchStartSec.toFixed(0)}s-${chunkEndSec.toFixed(0)}s`);
+
+    // Step 4: Fetch chunk via Range request
+    const audioRes = await fetch(resolvedUrl, {
+      headers: {
+        'User-Agent': 'NPR-Podcast-Player/1.0',
+        'Range': `bytes=${startByte}-${endByte}`,
+      },
+    });
+
+    let audioBuffer: Buffer;
+    if (!audioRes.ok && audioRes.status !== 206) {
+      // If Range requests fail, try fetching the full file and slicing
+      console.warn(`[chunk ${chunkIndex}] Range request returned ${audioRes.status}, trying full download + slice`);
+      const fullRes = await fetch(resolvedUrl, {
+        headers: { 'User-Agent': 'NPR-Podcast-Player/1.0' },
+        redirect: 'follow',
+      });
+      if (!fullRes.ok) throw new Error(`Audio fetch failed: ${fullRes.status}`);
+      const fullBuf = Buffer.from(await fullRes.arrayBuffer());
+      audioBuffer = fullBuf.subarray(startByte, endByte + 1);
+    } else {
+      audioBuffer = Buffer.from(await audioRes.arrayBuffer());
+    }
+
+    console.log(`[chunk ${chunkIndex}] Downloaded ${(audioBuffer.length / 1024 / 1024).toFixed(1)} MB`);
+
+    // Step 5: Transcribe chunk with Whisper
+    const { buffer: compatBuffer, format } = await ensureCompatibleFormat(audioBuffer);
+
+    let chunkText = '';
+    let chunkSegments: Array<{ start: number; end: number; text: string }> = [];
+
+    try {
+      const { toFile } = await import('openai');
+      const file = await toFile(compatBuffer, `chunk_${chunkIndex}.${format}`);
+      const verboseResult = await sttOpenai.audio.transcriptions.create({
+        file,
+        model: 'gpt-4o-mini-transcribe',
+        response_format: 'verbose_json',
+      }) as any;
+
+      chunkText = verboseResult.text || '';
+      // Offset timestamps by the chunk's start time in the full audio
+      chunkSegments = (verboseResult.segments || []).map((s: any) => ({
+        start: (s.start || 0) + fetchStartSec,
+        end: (s.end || 0) + fetchStartSec,
+        text: (s.text || '').trim(),
+      }));
+      console.log(`[chunk ${chunkIndex}] Transcribed: ${chunkSegments.length} segments, ${chunkText.length} chars`);
+    } catch (sttErr: any) {
+      // Fallback to plain text
+      console.warn(`[chunk ${chunkIndex}] verbose_json failed (${sttErr.message}), trying plain text`);
+      chunkText = await speechToText(compatBuffer, format);
+      console.log(`[chunk ${chunkIndex}] Plain text: ${chunkText.length} chars`);
+    }
+
+    // Step 6: Detect ads in this chunk's transcript
+    let adSegments: Array<{
+      startTime: number;
+      endTime: number;
+      type: 'pre-roll' | 'mid-roll' | 'post-roll' | 'sponsor-mention';
+      confidence: number;
+      reason: string;
+    }> = [];
+
+    if (chunkText.length > 50 && LLM_API_KEY) {
+      // Build transcript text for the LLM
+      const segmentText = chunkSegments.length > 0
+        ? chunkSegments.map((s, i) => `[${i + 1}] (${s.start.toFixed(1)}s-${s.end.toFixed(1)}s) ${s.text}`).join('\n')
+        : chunkText;
+
+      const adSystemPrompt = `You are an ad-block detector analyzing a ${chunkDurationSec}-second chunk of a podcast transcript.
+
+IMPORTANT: You are looking for OBVIOUS ad blocks. Typical patterns:
+- "Support for this podcast comes from..."
+- "This message comes from..."
+- Sponsor descriptions with calls-to-action ("visit example.com", "use promo code...")
+- NPR funding credits ("Support for NPR comes from...")
+- Dynamically inserted ads: abrupt topic changes to promotional content, different speakers doing ad reads
+
+Do NOT flag: editorial discussion about economics/business, interview content, host commentary, topic transitions.
+
+Return ONLY valid JSON.`;
+
+      const adUserPrompt = `Analyze this chunk of "${episodeTitle}" (chunk ${chunkIndex + 1}/${totalChunks}, seconds ${fetchStartSec.toFixed(0)}-${chunkEndSec.toFixed(0)}):
+
+${prevChunkTrailingText ? `CONTEXT from previous chunk (last ~200 chars):\n${prevChunkTrailingText}\n\n` : ''}TRANSCRIPT:
+${segmentText}
+
+Find any ad blocks in this chunk. For each, provide the approximate start/end time in seconds (absolute position in full audio).
+
+Return JSON:
+{
+  "adBlocks": [
+    { "startTimeSec": number, "endTimeSec": number, "reason": "short explanation" }
+  ]
+}`;
+
+      try {
+        const { parsed } = await callLLM(adSystemPrompt, adUserPrompt, 0, 1024);
+        const result = parsed as { adBlocks: Array<{ startTimeSec: number; endTimeSec: number; reason: string }> };
+
+        adSegments = (result.adBlocks || []).map(b => {
+          const midpoint = (b.startTimeSec + b.endTimeSec) / 2;
+          let type: 'pre-roll' | 'mid-roll' | 'post-roll' | 'sponsor-mention' = 'mid-roll';
+          if (durationSec > 0) {
+            if (midpoint < durationSec * 0.1) type = 'pre-roll';
+            else if (midpoint > durationSec * 0.9) type = 'post-roll';
+          }
+          return {
+            startTime: Math.round(b.startTimeSec),
+            endTime: Math.round(b.endTimeSec),
+            type,
+            confidence: 0.9,
+            reason: b.reason,
+          };
+        });
+        console.log(`[chunk ${chunkIndex}] Detected ${adSegments.length} ad segments`);
+      } catch (llmErr: any) {
+        console.warn(`[chunk ${chunkIndex}] LLM ad detection failed: ${llmErr.message}`);
+      }
+    } else if (!LLM_API_KEY && chunkText.length > 50) {
+      // Heuristic fallback
+      const lower = chunkText.toLowerCase();
+      if (lower.includes('support for this podcast') || lower.includes('this message comes from') || lower.includes('support for npr')) {
+        adSegments.push({
+          startTime: Math.round(chunkStartSec),
+          endTime: Math.round(chunkStartSec + 30),
+          type: chunkStartSec < 60 ? 'pre-roll' : 'mid-roll',
+          confidence: 0.5,
+          reason: 'Keyword heuristic (no API key)',
+        });
+      }
+    }
+
+    // Build trailing text for next chunk's context
+    const trailingText = chunkText.slice(-200);
+
+    res.json({
+      chunkIndex,
+      startTimeSec: fetchStartSec,
+      endTimeSec: chunkEndSec,
+      transcript: {
+        text: chunkText,
+        segments: chunkSegments,
+      },
+      adSegments,
+      trailingText,
+    });
+  } catch (err: any) {
+    console.error(`[chunk ${chunkIndex}] Error:`, err.message);
+    res.status(500).json({ error: `Chunk ${chunkIndex} processing failed`, detail: err.message });
   }
 });
 
@@ -1213,18 +1337,90 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         }
         console.log(`[sandbox] Audio resolved: ${audioDetails.resolvedUrl.slice(0, 80)}, ${audioDetails.contentType}, ${audioDetails.contentLengthBytes} bytes`);
 
-        // Steps 4-5: Stream + Transcribe audio
-        console.log(`[sandbox] Transcribing audio for "${episodeTitle}"...`);
-        const transcription = await transcribeAudioFromUrl(audioUrl);
-        lines = transcription.lines;
-        transcriptSource = 'audio-transcription';
-        html = transcription.text;
-        rawHtmlLength = transcription.text.length;
+        // Steps 4-5: Stream + Transcribe audio in 5-min chunks
+        const resolvedUrl = audioDetails.resolvedUrl;
+        const totalBytes = audioDetails.contentLengthBytes;
+        const bps = DEFAULT_BITRATE / 8;
+        const estDuration = totalBytes > 0 ? Math.round((totalBytes * 8) / DEFAULT_BITRATE) : (durationSec || 600);
+        const numChunks = Math.ceil(estDuration / CHUNK_DURATION_SEC);
 
-        audioDetails.segmentCount = transcription.segments.length;
-        audioDetails.audioDurationSec = transcription.durationSec;
+        console.log(`[sandbox] Transcribing "${episodeTitle}" in ${numChunks} chunks (~${CHUNK_DURATION_SEC}s each)...`);
 
-        console.log(`[sandbox] Audio transcription: ${lines.length} lines, ${transcription.lines.length > 0 ? transcription.lines[transcription.lines.length - 1].cumulativeWords : 0} words, ${transcription.segments.length} segments`);
+        let allText = '';
+        let allSegments: Array<{ start: number; end: number; text: string }> = [];
+
+        for (let ci = 0; ci < numChunks; ci++) {
+          const chunkStartSec = ci * CHUNK_DURATION_SEC;
+          const chunkEndSec = Math.min((ci + 1) * CHUNK_DURATION_SEC + CHUNK_OVERLAP_SEC, estDuration);
+          const fetchStartSec = ci > 0 ? Math.max(0, chunkStartSec - CHUNK_OVERLAP_SEC) : 0;
+
+          const startByte = Math.floor(fetchStartSec * bps);
+          const endByte = Math.min(Math.floor(chunkEndSec * bps) - 1, totalBytes - 1);
+
+          console.log(`[sandbox] Chunk ${ci + 1}/${numChunks}: bytes ${startByte}-${endByte} (${((endByte - startByte + 1) / 1024 / 1024).toFixed(1)} MB)`);
+
+          let chunkBuffer: Buffer;
+          const rangeRes = await fetch(resolvedUrl, {
+            headers: { 'User-Agent': 'NPR-Podcast-Player/1.0', 'Range': `bytes=${startByte}-${endByte}` },
+          });
+          if (rangeRes.ok || rangeRes.status === 206) {
+            chunkBuffer = Buffer.from(await rangeRes.arrayBuffer());
+          } else {
+            // Fallback: download full file, slice (only happens once if range unsupported)
+            console.warn(`[sandbox] Range request failed (${rangeRes.status}), downloading full file`);
+            const fullRes = await fetch(resolvedUrl, { headers: { 'User-Agent': 'NPR-Podcast-Player/1.0' }, redirect: 'follow' });
+            if (!fullRes.ok) throw new Error(`Audio fetch failed: ${fullRes.status}`);
+            const fullBuf = Buffer.from(await fullRes.arrayBuffer());
+            chunkBuffer = fullBuf.subarray(startByte, endByte + 1);
+          }
+
+          const { buffer: compatBuf, format: fmt } = await ensureCompatibleFormat(chunkBuffer);
+
+          try {
+            const { toFile } = await import('openai');
+            const file = await toFile(compatBuf, `chunk_${ci}.${fmt}`);
+            const result = await sttOpenai.audio.transcriptions.create({ file, model: 'gpt-4o-mini-transcribe', response_format: 'verbose_json' }) as any;
+
+            allText += (result.text || '') + ' ';
+            const segs = (result.segments || []).map((s: any) => ({
+              start: (s.start || 0) + fetchStartSec,
+              end: (s.end || 0) + fetchStartSec,
+              text: (s.text || '').trim(),
+            }));
+            allSegments.push(...segs);
+            console.log(`[sandbox] Chunk ${ci + 1}: ${segs.length} segments`);
+          } catch (chunkErr: any) {
+            console.warn(`[sandbox] Chunk ${ci + 1} transcription failed: ${chunkErr.message}`);
+            try {
+              const plainText = await speechToText(compatBuf, fmt);
+              allText += plainText + ' ';
+            } catch { /* skip chunk */ }
+          }
+        }
+
+        // Build lines from all segments
+        let cumW = 0;
+        let lineN = 0;
+        for (const seg of allSegments) {
+          if (!seg.text) continue;
+          let speaker = '';
+          let content = seg.text;
+          const speakerMatch = content.match(/^([A-Z][A-Z\s'.,-]+):\s*/);
+          if (speakerMatch) { speaker = speakerMatch[1].trim(); content = content.slice(speakerMatch[0].length).trim(); }
+          if (!content) continue;
+          lineN++;
+          const wc = content.split(/\s+/).filter(Boolean).length;
+          cumW += wc;
+          lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW });
+        }
+
+        transcriptSource = 'audio-transcription-chunked';
+        html = allText.trim();
+        rawHtmlLength = html.length;
+        audioDetails.segmentCount = allSegments.length;
+        audioDetails.audioDurationSec = estDuration;
+
+        console.log(`[sandbox] Audio transcription complete: ${lines.length} lines, ${cumW} words, ${allSegments.length} segments`);
       } catch (sttErr: any) {
         audioDetails.error = sttErr.message;
         console.warn(`[sandbox] Audio transcription failed: ${sttErr.message} — falling back to text transcript`);

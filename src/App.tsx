@@ -11,11 +11,16 @@ import {
   llmParseTranscript,
   llmDetectAds,
   llmPreparePlayback,
+  resolveAudio,
+  processAudioChunk,
   parseDuration,
   type Podcast,
   type Episode,
+  type AudioMeta,
+  type ChunkResult,
 } from './services/api';
 import type { AdDetectionResult, PlaybackConfig } from './services/adDetector';
+import { mergeChunkAdSegments } from './services/adDetector';
 import {
   createInitialFlowState,
   type FlowState,
@@ -105,62 +110,147 @@ export default function App() {
     load(selected);
   }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Chunk processing refs (persist across renders) ──────────────
+  const audioMetaRef = useRef<AudioMeta | null>(null);
+  const chunksRef = useRef<Map<number, ChunkResult>>(new Map());
+  const processingRef = useRef<Set<number>>(new Set());
+  const trailingTextRef = useRef<Map<number, string>>(new Map());
+
+  const processChunk = useCallback(async (
+    index: number,
+    meta: AudioMeta,
+    episodeTitle: string,
+  ): Promise<ChunkResult | null> => {
+    if (chunksRef.current.has(index) || processingRef.current.has(index)) return chunksRef.current.get(index) || null;
+    if (index < 0 || index >= meta.totalChunks) return null;
+
+    processingRef.current.add(index);
+    try {
+      const prevTrailing = index > 0 ? (trailingTextRef.current.get(index - 1) || '') : '';
+      const result = await processAudioChunk({
+        resolvedUrl: meta.resolvedUrl,
+        chunkIndex: index,
+        totalChunks: meta.totalChunks,
+        contentLength: meta.contentLength,
+        durationSec: meta.durationSec,
+        bitrate: meta.bitrate,
+        chunkDurationSec: meta.chunkDurationSec,
+        overlapSec: 10,
+        episodeTitle,
+        prevChunkTrailingText: prevTrailing,
+      });
+      chunksRef.current.set(index, result);
+      trailingTextRef.current.set(index, result.trailingText);
+
+      // Merge ad segments progressively
+      setAds(prev => {
+        const existing = prev?.segments || [];
+        const merged = mergeChunkAdSegments(existing, result.adSegments);
+        const totalAdTime = merged.reduce((s, seg) => s + (seg.endTime - seg.startTime), 0);
+        return {
+          segments: merged,
+          totalAdTime,
+          contentDuration: meta.durationSec - totalAdTime,
+          strategy: 'chunked-progressive',
+        };
+      });
+
+      return result;
+    } catch (err) {
+      console.error(`Chunk ${index} failed:`, err);
+      return null;
+    } finally {
+      processingRef.current.delete(index);
+    }
+  }, []);
+
   const pick = useCallback(async (ep: Episode) => {
     setEpisode(ep);
     setAds(null);
     setPlayback(null);
 
+    // Reset chunk state
+    audioMetaRef.current = null;
+    chunksRef.current = new Map();
+    processingRef.current = new Set();
+    trailingTextRef.current = new Map();
+
     const durationSec = parseDuration(ep.duration);
     let html = '';
+    let audioChunksSucceeded = false;
 
-    // ── Steps 3-5: Audio Pipeline (resolve → stream → transcribe) ────
+    // ── Steps 3-7: Chunked Audio Pipeline ────────────────────────────
     if (ep.audioUrl) {
+      // Step 3: Resolve audio stream
       setFlow((prev) => setStep(prev, 'step_resolve_audio_stream', 'running'));
 
       try {
-        // Step 3 done: audio URL resolved from RSS feed
+        const meta = await resolveAudio(ep.audioUrl);
+        audioMetaRef.current = meta;
+
         setFlow((prev) => {
           let fs = setStep(prev, 'step_resolve_audio_stream', 'completed');
-          // Step 4: audio is being fetched for transcription
           fs = setStep(fs, 'step_start_audio_streaming', 'running');
-          return fs;
+          return { ...fs, chunkProgress: { currentChunk: 0, totalChunks: meta.totalChunks } };
         });
+
+        // Steps 4-6: Process first 2 chunks in parallel (lookahead)
+        const chunkPromises: Promise<ChunkResult | null>[] = [];
+        const chunksToProcess = Math.min(2, meta.totalChunks);
+
+        // Process chunk 0 first (need its trailing text for chunk 1)
+        const chunk0 = await processChunk(0, meta, ep.title);
+
+        setFlow((prev) => ({
+          ...prev,
+          chunkProgress: { currentChunk: 1, totalChunks: meta.totalChunks },
+        }));
+
+        // Process chunk 1 if available (now we have chunk 0's trailing text)
+        if (meta.totalChunks > 1) {
+          await processChunk(1, meta, ep.title);
+        }
 
         setFlow((prev) => {
           let fs = setStep(prev, 'step_start_audio_streaming', 'completed');
-          // Step 5: transcription running
-          fs = setStep(fs, 'step_transcribe_chunks', 'running');
-          return fs;
+          fs = setStep(fs, 'step_transcribe_chunks', 'completed');
+          fs = setStep(fs, 'step_mark_ad_locations', 'completed');
+          fs = setStep(fs, 'step_build_skip_map', 'completed');
+          return { ...fs, chunkProgress: { currentChunk: Math.min(2, meta.totalChunks), totalChunks: meta.totalChunks } };
         });
 
-        const transcribeRes = await fetch('/api/transcribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ audioUrl: ep.audioUrl }),
-        });
+        // Build HTML from transcribed chunks for the LLM pipeline
+        const allText = Array.from(chunksRef.current.values())
+          .sort((a, b) => a.chunkIndex - b.chunkIndex)
+          .map(c => c.transcript.text)
+          .join(' ');
 
-        if (transcribeRes.ok) {
-          const transcription = await transcribeRes.json();
-          const audioText = transcription.text || '';
-          if (audioText.length > 100) {
-            html = audioText.split(/(?<=[.!?])\s+/).map((s: string) => `<p>${s}</p>`).join('\n');
-            setFlow((prev) => setStep(prev, 'step_transcribe_chunks', 'completed'));
-          } else {
-            throw new Error('Transcription too short');
-          }
-        } else {
-          throw new Error(`Transcription request failed: ${transcribeRes.status}`);
+        if (allText.length > 100) {
+          html = allText.split(/(?<=[.!?])\s+/).map((s: string) => `<p>${s}</p>`).join('\n');
+          audioChunksSucceeded = true;
+        }
+
+        // Continue processing remaining chunks in background (non-blocking)
+        if (meta.totalChunks > 2) {
+          (async () => {
+            for (let i = 2; i < meta.totalChunks; i++) {
+              await processChunk(i, meta, ep.title);
+              setFlow((prev) => ({
+                ...prev,
+                chunkProgress: { currentChunk: i + 1, totalChunks: meta.totalChunks },
+              }));
+            }
+          })();
         }
       } catch (err) {
-        console.warn('Audio transcription failed, falling back to HTML transcript:', err);
-        // Mark any incomplete audio steps as failed/skipped
+        console.warn('Audio chunked pipeline failed, falling back to HTML transcript:', err);
         setFlow((prev) => {
           let fs = prev;
           if (fs.steps.step_resolve_audio_stream === 'running') fs = setStep(fs, 'step_resolve_audio_stream', 'failed');
-          if (fs.steps.step_start_audio_streaming === 'running') fs = setStep(fs, 'step_start_audio_streaming', 'failed');
-          else if (fs.steps.step_start_audio_streaming === 'pending') fs = setStep(fs, 'step_start_audio_streaming', 'skipped');
-          if (fs.steps.step_transcribe_chunks === 'running') fs = setStep(fs, 'step_transcribe_chunks', 'failed');
-          else if (fs.steps.step_transcribe_chunks === 'pending') fs = setStep(fs, 'step_transcribe_chunks', 'skipped');
+          if (fs.steps.step_start_audio_streaming !== 'completed') fs = setStep(fs, 'step_start_audio_streaming', 'skipped');
+          if (fs.steps.step_transcribe_chunks !== 'completed') fs = setStep(fs, 'step_transcribe_chunks', 'skipped');
+          if (fs.steps.step_mark_ad_locations !== 'completed') fs = setStep(fs, 'step_mark_ad_locations', 'skipped');
+          if (fs.steps.step_build_skip_map !== 'completed') fs = setStep(fs, 'step_build_skip_map', 'skipped');
           return fs;
         });
       }
@@ -170,11 +260,13 @@ export default function App() {
         let fs = setStep(prev, 'step_resolve_audio_stream', 'skipped');
         fs = setStep(fs, 'step_start_audio_streaming', 'skipped');
         fs = setStep(fs, 'step_transcribe_chunks', 'skipped');
+        fs = setStep(fs, 'step_mark_ad_locations', 'skipped');
+        fs = setStep(fs, 'step_build_skip_map', 'skipped');
         return fs;
       });
     }
 
-    // ── Step 8: Fetch HTML Transcript (parallel path / fallback) ─────
+    // ── Step 8: Fetch HTML Transcript (fallback / cross-reference) ───
     if (!html && ep.transcriptUrl) {
       setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', 'running'));
       try {
@@ -185,11 +277,53 @@ export default function App() {
         setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', 'skipped'));
       }
     } else {
-      // Audio transcription succeeded or no transcript URL available
-      setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', 'skipped'));
+      setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', audioChunksSucceeded ? 'skipped' : 'skipped'));
     }
 
-    // ── Step 6: Mark Ad Locations (parse transcript + detect ads) ────
+    // If we have chunked ad segments already (from audio pipeline), skip to finalize
+    if (audioChunksSucceeded) {
+      // ── Step 9: Finalize Playback ──────────────────────────────────
+      setFlow((prev) => setStep(prev, 'step_finalize_playback', 'running'));
+      try {
+        // Build a transcript result from the chunked audio text
+        const transcript = await llmParseTranscript(html || `<p>${ep.description}</p>`);
+        const currentAds: AdDetectionResult = {
+          segments: Array.from(chunksRef.current.values())
+            .flatMap(c => c.adSegments)
+            .sort((a, b) => a.startTime - b.startTime),
+          totalAdTime: 0,
+          contentDuration: durationSec,
+          strategy: 'chunked-progressive',
+        };
+        currentAds.totalAdTime = currentAds.segments.reduce((s, seg) => s + (seg.endTime - seg.startTime), 0);
+        currentAds.contentDuration = durationSec - currentAds.totalAdTime;
+
+        const config = await llmPreparePlayback(transcript, currentAds, ep.title, ep.description);
+        setPlayback(config);
+        if (config.skipMap && config.skipMap.length > 0) {
+          setAds({
+            segments: config.skipMap,
+            totalAdTime: config.totalAdTime,
+            contentDuration: config.contentDuration,
+            strategy: 'llm-verified',
+          });
+        }
+        setFlow((prev) => {
+          const fs = setStep(prev, 'step_finalize_playback', 'completed');
+          return { ...fs, currentStep: null };
+        });
+      } catch (err) {
+        console.error('LLM prepare-playback failed:', err);
+        setFlow((prev) => {
+          const fs = setStep(prev, 'step_finalize_playback', 'skipped');
+          return { ...fs, currentStep: null };
+        });
+      }
+      return;
+    }
+
+    // ── Fallback: HTML-based ad detection (no audio) ─────────────────
+    // Step 6: Mark Ad Locations
     setFlow((prev) => setStep(prev, 'step_mark_ad_locations', 'running'));
     let transcript;
     try {
@@ -221,20 +355,14 @@ export default function App() {
       return;
     }
 
-    // ── Step 7: Build Skip Map ───────────────────────────────────────
+    // Step 7: Build Skip Map
     setFlow((prev) => setStep(prev, 'step_build_skip_map', 'running'));
-    // Skip map is produced as part of ad detection; mark complete
     setFlow((prev) => setStep(prev, 'step_build_skip_map', 'completed'));
 
-    // ── Step 9: Finalize Playback ────────────────────────────────────
+    // Step 9: Finalize Playback
     setFlow((prev) => setStep(prev, 'step_finalize_playback', 'running'));
     try {
-      const config = await llmPreparePlayback(
-        transcript,
-        adResult,
-        ep.title,
-        ep.description,
-      );
+      const config = await llmPreparePlayback(transcript, adResult, ep.title, ep.description);
       setPlayback(config);
       if (config.skipMap && config.skipMap.length > 0) {
         setAds({
@@ -255,7 +383,7 @@ export default function App() {
         return { ...fs, currentStep: null };
       });
     }
-  }, []);
+  }, [processChunk]);
 
   const goToSandbox = useCallback(() => {
     window.history.pushState(null, '', '/sandbox');
