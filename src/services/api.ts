@@ -129,6 +129,19 @@ export interface SandboxAdBlock {
   endTimeSec: number;
 }
 
+export interface SandboxAudioDetails {
+  available: boolean;
+  originalUrl: string;
+  resolvedUrl: string;
+  contentType: string;
+  contentLengthBytes: number;
+  downloadSizeMb: string;
+  segmentCount: number;
+  transcriptionModel: string;
+  audioDurationSec: number;
+  error: string | null;
+}
+
 export interface SandboxResult {
   episode: { title: string; durationSec: number; transcriptUrl: string };
   rawHtml: { length: number; pTagCount: number; snippet: string };
@@ -161,6 +174,7 @@ export interface SandboxResult {
     confidence: number;
     reason: string;
   }>;
+  audioDetails?: SandboxAudioDetails;
 }
 
 export async function sandboxAnalyze(
