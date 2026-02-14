@@ -12,6 +12,7 @@ channel = "stable-25_05"
 build = ["sh", "-c", "npx vite build"]
 run = ["sh", "-c", "PORT=5000 npx tsx server/index.ts"]
 deploymentTarget = "cloudrun"
+publicDir = "dist/public"
 
 [[deployment.healthChecks]]
 name = "web"
