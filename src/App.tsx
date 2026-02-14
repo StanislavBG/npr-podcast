@@ -13,6 +13,7 @@ import {
   llmPreparePlayback,
   resolveAudio,
   processAudioChunk,
+  detectAdsFromTranscript,
   parseDuration,
   type Podcast,
   type Episode,
@@ -20,7 +21,6 @@ import {
   type ChunkResult,
 } from './services/api';
 import type { AdDetectionResult, PlaybackConfig } from './services/adDetector';
-import { mergeChunkAdSegments } from './services/adDetector';
 import {
   createInitialFlowState,
   type FlowState,
@@ -115,6 +115,7 @@ export default function App() {
   const chunksRef = useRef<Map<number, ChunkResult>>(new Map());
   const processingRef = useRef<Set<number>>(new Set());
   const trailingTextRef = useRef<Map<number, string>>(new Map());
+  const detectedAdsRef = useRef<AdDetectionResult | null>(null);
 
   const processChunk = useCallback(async (
     index: number,
@@ -142,19 +143,6 @@ export default function App() {
       chunksRef.current.set(index, result);
       trailingTextRef.current.set(index, result.trailingText);
 
-      // Merge ad segments progressively
-      setAds(prev => {
-        const existing = prev?.segments || [];
-        const merged = mergeChunkAdSegments(existing, result.adSegments);
-        const totalAdTime = merged.reduce((s, seg) => s + (seg.endTime - seg.startTime), 0);
-        return {
-          segments: merged,
-          totalAdTime,
-          contentDuration: meta.durationSec - totalAdTime,
-          strategy: 'chunked-progressive',
-        };
-      });
-
       return result;
     } catch (err) {
       console.error(`Chunk ${index} failed:`, err);
@@ -174,6 +162,7 @@ export default function App() {
     chunksRef.current = new Map();
     processingRef.current = new Set();
     trailingTextRef.current = new Map();
+    detectedAdsRef.current = null;
 
     const durationSec = parseDuration(ep.duration);
     let html = '';
@@ -194,29 +183,19 @@ export default function App() {
           return { ...fs, chunkProgress: { currentChunk: 0, totalChunks: meta.totalChunks } };
         });
 
-        // Steps 4-6: Process first 2 chunks in parallel (lookahead)
-        const chunkPromises: Promise<ChunkResult | null>[] = [];
-        const chunksToProcess = Math.min(2, meta.totalChunks);
-
-        // Process chunk 0 first (need its trailing text for chunk 1)
-        const chunk0 = await processChunk(0, meta, ep.title);
-
-        setFlow((prev) => ({
-          ...prev,
-          chunkProgress: { currentChunk: 1, totalChunks: meta.totalChunks },
-        }));
-
-        // Process chunk 1 if available (now we have chunk 0's trailing text)
-        if (meta.totalChunks > 1) {
-          await processChunk(1, meta, ep.title);
+        // Steps 4+5: Process ALL chunks sequentially (each needs previous trailing text)
+        for (let i = 0; i < meta.totalChunks; i++) {
+          await processChunk(i, meta, ep.title);
+          setFlow((prev) => ({
+            ...prev,
+            chunkProgress: { currentChunk: i + 1, totalChunks: meta.totalChunks },
+          }));
         }
 
         setFlow((prev) => {
           let fs = setStep(prev, 'step_start_audio_streaming', 'completed');
           fs = setStep(fs, 'step_transcribe_chunks', 'completed');
-          fs = setStep(fs, 'step_mark_ad_locations', 'completed');
-          fs = setStep(fs, 'step_build_skip_map', 'completed');
-          return { ...fs, chunkProgress: { currentChunk: Math.min(2, meta.totalChunks), totalChunks: meta.totalChunks } };
+          return { ...fs, chunkProgress: { currentChunk: meta.totalChunks, totalChunks: meta.totalChunks } };
         });
 
         // Build HTML from transcribed chunks for the LLM pipeline
@@ -230,17 +209,45 @@ export default function App() {
           audioChunksSucceeded = true;
         }
 
-        // Continue processing remaining chunks in background (non-blocking)
-        if (meta.totalChunks > 2) {
-          (async () => {
-            for (let i = 2; i < meta.totalChunks; i++) {
-              await processChunk(i, meta, ep.title);
-              setFlow((prev) => ({
-                ...prev,
-                chunkProgress: { currentChunk: i + 1, totalChunks: meta.totalChunks },
-              }));
-            }
-          })();
+        // Step 6: Detect ads from the full assembled transcript (separate LLM call)
+        setFlow((prev) => setStep(prev, 'step_mark_ad_locations', 'running'));
+        try {
+          // Gather all segments from all chunks, sorted by time
+          const allSegments = Array.from(chunksRef.current.values())
+            .sort((a, b) => a.chunkIndex - b.chunkIndex)
+            .flatMap(c => c.transcript.segments);
+
+          if (allSegments.length > 0) {
+            const adResult = await detectAdsFromTranscript({
+              segments: allSegments,
+              episodeTitle: ep.title,
+              durationSec,
+            });
+
+            const adSegments = adResult.adSegments || [];
+            const totalAdTime = adSegments.reduce((s, seg) => s + (seg.endTime - seg.startTime), 0);
+            const adsResult: AdDetectionResult = {
+              segments: adSegments,
+              totalAdTime,
+              contentDuration: durationSec - totalAdTime,
+              strategy: 'full-transcript-llm',
+            };
+            detectedAdsRef.current = adsResult;
+            setAds(adsResult);
+          }
+
+          setFlow((prev) => {
+            let fs = setStep(prev, 'step_mark_ad_locations', 'completed');
+            fs = setStep(fs, 'step_build_skip_map', 'completed');
+            return fs;
+          });
+        } catch (adErr) {
+          console.error('Ad detection failed:', adErr);
+          setFlow((prev) => {
+            let fs = setStep(prev, 'step_mark_ad_locations', 'failed');
+            fs = setStep(fs, 'step_build_skip_map', 'skipped');
+            return fs;
+          });
         }
       } catch (err) {
         console.warn('Audio chunked pipeline failed, falling back to HTML transcript:', err);
@@ -280,23 +287,20 @@ export default function App() {
       setFlow((prev) => setStep(prev, 'step_fetch_html_transcript', audioChunksSucceeded ? 'skipped' : 'skipped'));
     }
 
-    // If we have chunked ad segments already (from audio pipeline), skip to finalize
+    // If we have audio transcript, skip to finalize
     if (audioChunksSucceeded) {
       // ── Step 9: Finalize Playback ──────────────────────────────────
       setFlow((prev) => setStep(prev, 'step_finalize_playback', 'running'));
       try {
         // Build a transcript result from the chunked audio text
         const transcript = await llmParseTranscript(html || `<p>${ep.description}</p>`);
-        const currentAds: AdDetectionResult = {
-          segments: Array.from(chunksRef.current.values())
-            .flatMap(c => c.adSegments)
-            .sort((a, b) => a.startTime - b.startTime),
+        // Use ad segments from the dedicated detect-ads call (set by Step 6 above)
+        const currentAds: AdDetectionResult = detectedAdsRef.current || {
+          segments: [],
           totalAdTime: 0,
           contentDuration: durationSec,
-          strategy: 'chunked-progressive',
+          strategy: 'full-transcript-llm',
         };
-        currentAds.totalAdTime = currentAds.segments.reduce((s, seg) => s + (seg.endTime - seg.startTime), 0);
-        currentAds.contentDuration = durationSec - currentAds.totalAdTime;
 
         const config = await llmPreparePlayback(transcript, currentAds, ep.title, ep.description);
         setPlayback(config);

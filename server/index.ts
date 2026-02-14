@@ -565,8 +565,8 @@ app.post('/api/audio/resolve', async (req, res) => {
 });
 
 /**
- * Step 4+5+6: Process a single audio chunk — fetch bytes via Range request,
- * transcribe with Whisper, detect ads with LLM. Returns results for one chunk.
+ * Step 4+5: Process a single audio chunk — fetch bytes via Range request,
+ * transcribe with Whisper. Ad detection happens separately via /api/audio/detect-ads.
  */
 app.post('/api/audio/chunk', async (req, res) => {
   const {
@@ -672,85 +672,6 @@ app.post('/api/audio/chunk', async (req, res) => {
       console.log(`[chunk ${chunkIndex}] Plain text: ${chunkText.length} chars`);
     }
 
-    // Step 6: Detect ads in this chunk's transcript
-    let adSegments: Array<{
-      startTime: number;
-      endTime: number;
-      type: 'pre-roll' | 'mid-roll' | 'post-roll' | 'sponsor-mention';
-      confidence: number;
-      reason: string;
-    }> = [];
-
-    if (chunkText.length > 50 && LLM_API_KEY) {
-      // Build transcript text for the LLM
-      const segmentText = chunkSegments.length > 0
-        ? chunkSegments.map((s, i) => `[${i + 1}] (${s.start.toFixed(1)}s-${s.end.toFixed(1)}s) ${s.text}`).join('\n')
-        : chunkText;
-
-      const adSystemPrompt = `You are an ad-block detector analyzing a ${chunkDurationSec}-second chunk of a podcast transcript.
-
-IMPORTANT: You are looking for OBVIOUS ad blocks. Typical patterns:
-- "Support for this podcast comes from..."
-- "This message comes from..."
-- Sponsor descriptions with calls-to-action ("visit example.com", "use promo code...")
-- NPR funding credits ("Support for NPR comes from...")
-- Dynamically inserted ads: abrupt topic changes to promotional content, different speakers doing ad reads
-
-Do NOT flag: editorial discussion about economics/business, interview content, host commentary, topic transitions.
-
-Return ONLY valid JSON.`;
-
-      const adUserPrompt = `Analyze this chunk of "${episodeTitle}" (chunk ${chunkIndex + 1}/${totalChunks}, seconds ${fetchStartSec.toFixed(0)}-${chunkEndSec.toFixed(0)}):
-
-${prevChunkTrailingText ? `CONTEXT from previous chunk (last ~200 chars):\n${prevChunkTrailingText}\n\n` : ''}TRANSCRIPT:
-${segmentText}
-
-Find any ad blocks in this chunk. For each, provide the approximate start/end time in seconds (absolute position in full audio).
-
-Return JSON:
-{
-  "adBlocks": [
-    { "startTimeSec": number, "endTimeSec": number, "reason": "short explanation" }
-  ]
-}`;
-
-      try {
-        const { parsed } = await callLLM(adSystemPrompt, adUserPrompt, 0, 1024);
-        const result = parsed as { adBlocks: Array<{ startTimeSec: number; endTimeSec: number; reason: string }> };
-
-        adSegments = (result.adBlocks || []).map(b => {
-          const midpoint = (b.startTimeSec + b.endTimeSec) / 2;
-          let type: 'pre-roll' | 'mid-roll' | 'post-roll' | 'sponsor-mention' = 'mid-roll';
-          if (durationSec > 0) {
-            if (midpoint < durationSec * 0.1) type = 'pre-roll';
-            else if (midpoint > durationSec * 0.9) type = 'post-roll';
-          }
-          return {
-            startTime: Math.round(b.startTimeSec),
-            endTime: Math.round(b.endTimeSec),
-            type,
-            confidence: 0.9,
-            reason: b.reason,
-          };
-        });
-        console.log(`[chunk ${chunkIndex}] Detected ${adSegments.length} ad segments`);
-      } catch (llmErr: any) {
-        console.warn(`[chunk ${chunkIndex}] LLM ad detection failed: ${llmErr.message}`);
-      }
-    } else if (!LLM_API_KEY && chunkText.length > 50) {
-      // Heuristic fallback
-      const lower = chunkText.toLowerCase();
-      if (lower.includes('support for this podcast') || lower.includes('this message comes from') || lower.includes('support for npr')) {
-        adSegments.push({
-          startTime: Math.round(chunkStartSec),
-          endTime: Math.round(chunkStartSec + 30),
-          type: chunkStartSec < 60 ? 'pre-roll' : 'mid-roll',
-          confidence: 0.5,
-          reason: 'Keyword heuristic (no API key)',
-        });
-      }
-    }
-
     // Build trailing text for next chunk's context
     const trailingText = chunkText.slice(-200);
 
@@ -762,12 +683,154 @@ Return JSON:
         text: chunkText,
         segments: chunkSegments,
       },
-      adSegments,
+      adSegments: [],
       trailingText,
     });
   } catch (err: any) {
     console.error(`[chunk ${chunkIndex}] Error:`, err.message);
     res.status(500).json({ error: `Chunk ${chunkIndex} processing failed`, detail: err.message });
+  }
+});
+
+// ─── Step 6: Dedicated Ad Detection (separate from transcription) ────────────
+
+/**
+ * Detect ads from the full assembled transcript. Called AFTER all chunks have been
+ * transcribed (Step 5 complete). Takes all transcript segments with timestamps and
+ * uses a focused LLM call to find complete ad sentences.
+ */
+app.post('/api/audio/detect-ads', async (req, res) => {
+  const {
+    segments,
+    episodeTitle,
+    durationSec,
+  } = req.body as {
+    segments: Array<{ start: number; end: number; text: string }>;
+    episodeTitle: string;
+    durationSec: number;
+  };
+
+  if (!segments || segments.length === 0) {
+    res.status(400).json({ error: 'Missing segments' });
+    return;
+  }
+
+  if (!LLM_API_KEY) {
+    // Heuristic fallback when no API key
+    const adSegments: Array<{
+      startTime: number; endTime: number;
+      type: string; confidence: number; reason: string;
+    }> = [];
+    for (const seg of segments) {
+      const lower = seg.text.toLowerCase();
+      if (lower.includes('support for this podcast') || lower.includes('this message comes from') || lower.includes('support for npr')) {
+        adSegments.push({
+          startTime: Math.round(seg.start),
+          endTime: Math.round(seg.end),
+          type: 'mid-roll',
+          confidence: 0.5,
+          reason: 'Keyword heuristic (no API key)',
+        });
+      }
+    }
+    res.json({ adSegments });
+    return;
+  }
+
+  try {
+    // Build numbered transcript for the LLM — each line is one Whisper segment
+    const numberedTranscript = segments.map((s, i) =>
+      `[${i + 1}] (${s.start.toFixed(1)}s – ${s.end.toFixed(1)}s) ${s.text}`
+    ).join('\n');
+
+    const systemPrompt = `You are an expert ad detector for podcast transcripts. You will receive the full transcript of a podcast episode with numbered, timestamped sentences.
+
+Your job: find the COMPLETE SENTENCES that are advertisements, sponsor reads, or funding credits — NOT part of the actual podcast editorial content.
+
+WHAT TO LOOK FOR (these are complete sentences or runs of sentences):
+- Sponsor reads: "Support for this podcast comes from [Company]..." followed by a description of their product/service
+- Funding credits: "Support for NPR comes from..."
+- Calls to action: sentences containing "visit [website]", "use promo code", "download the app", "sign up at"
+- NPR promos: promotions for other NPR shows ("Coming up on All Things Considered...")
+- Dynamically inserted ads: abrupt topic changes to promotional content with different tone/speaker
+
+WHAT IS NOT AN AD (do NOT flag these):
+- The podcast's own editorial content, even if it discusses companies, products, or money
+- Interview segments, even with business leaders
+- The host's own commentary or opinions
+- Topic transitions within the editorial content
+- Episode introductions or sign-offs by the hosts
+
+CRITICAL RULES:
+1. Return the EXACT segment numbers (start and end inclusive) for each ad block
+2. An ad block is a contiguous run of segments — every segment in the range must be ad content
+3. Be precise: if only segments 45-48 are an ad, do NOT include segment 44 or 49
+4. Most podcast episodes have 0-4 ad breaks, each lasting 15-60 seconds
+5. If you're unsure whether something is an ad, do NOT flag it
+
+Return ONLY valid JSON.`;
+
+    const userPrompt = `Here is the full transcript of "${episodeTitle}" (${Math.round(durationSec / 60)} minutes, ${segments.length} segments).
+
+Find all advertisement segments. For each ad block, return the first and last segment numbers (inclusive).
+
+TRANSCRIPT:
+${numberedTranscript}
+
+Return JSON:
+{
+  "adBlocks": [
+    {
+      "firstSegment": <number - first segment number in the ad>,
+      "lastSegment": <number - last segment number in the ad>,
+      "reason": "<short explanation of why this is an ad>"
+    }
+  ]
+}`;
+
+    console.log(`[detect-ads] Analyzing ${segments.length} segments for "${episodeTitle}"`);
+    const { parsed } = await callLLM(systemPrompt, userPrompt, 0, 2048);
+    const result = parsed as { adBlocks: Array<{ firstSegment: number; lastSegment: number; reason: string }> };
+
+    const adBlocks = result.adBlocks || [];
+    console.log(`[detect-ads] Found ${adBlocks.length} ad blocks`);
+
+    // Map segment ranges back to timestamps
+    const adSegments = adBlocks.map(block => {
+      // Segment numbers are 1-indexed in the prompt
+      const firstIdx = block.firstSegment - 1;
+      const lastIdx = block.lastSegment - 1;
+
+      const startSeg = segments[Math.max(0, Math.min(firstIdx, segments.length - 1))];
+      const endSeg = segments[Math.max(0, Math.min(lastIdx, segments.length - 1))];
+
+      const startTime = Math.round(startSeg.start);
+      const endTime = Math.round(endSeg.end);
+      const midpoint = (startTime + endTime) / 2;
+
+      let type: 'pre-roll' | 'mid-roll' | 'post-roll' | 'sponsor-mention' = 'mid-roll';
+      if (durationSec > 0) {
+        if (midpoint < durationSec * 0.1) type = 'pre-roll';
+        else if (midpoint > durationSec * 0.9) type = 'post-roll';
+      }
+
+      // Collect the actual ad text for logging
+      const adText = segments.slice(firstIdx, lastIdx + 1).map(s => s.text).join(' ');
+      console.log(`[detect-ads]   ${type} [${startTime}s-${endTime}s]: "${adText.slice(0, 100)}..."`);
+
+      return {
+        startTime,
+        endTime,
+        type,
+        confidence: 0.9,
+        reason: block.reason,
+      };
+    });
+
+    res.json({ adSegments });
+  } catch (err: any) {
+    console.error('[detect-ads] Error:', err.message);
+    res.status(500).json({ error: 'Ad detection failed', detail: err.message });
   }
 });
 
