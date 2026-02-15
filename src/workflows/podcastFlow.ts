@@ -4,7 +4,6 @@ import {
   WorkflowStatus,
   DeterminismGrade,
 } from 'bilko-flow';
-import type { FlowProgressStep } from 'bilko-flow/react';
 
 /**
  * Podcast processing workflow using bilko-flow DSL.
@@ -356,71 +355,5 @@ const STEP_ORDER = [
   'step_finalize_playback',
 ];
 
-/** Internal step tracking status */
-export type StepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
-
-export interface FlowState {
-  steps: Record<string, StepStatus>;
-  currentStep: string | null;
-  error: string | null;
-  chunkProgress?: {
-    currentChunk: number;
-    totalChunks: number;
-  };
-}
-
-export function createInitialFlowState(): FlowState {
-  return {
-    steps: Object.fromEntries(STEP_ORDER.map((id) => [id, 'pending' as StepStatus])),
-    currentStep: null,
-    error: null,
-  };
-}
-
-/** Bilko-flow progress step status values */
-export type ProgressStepStatus = 'pending' | 'active' | 'complete' | 'error';
-
-/** Map internal status to bilko-flow FlowProgressStep status */
-function mapStatus(s: StepStatus): FlowProgressStep['status'] {
-  switch (s) {
-    case 'running': return 'active';
-    case 'completed': return 'complete';
-    case 'failed': return 'error';
-    case 'skipped': return 'complete';
-    default: return 'pending';
-  }
-}
-
-/** Convert our FlowState to bilko-flow FlowProgressStep array */
-export function toFlowProgressSteps(state: FlowState): FlowProgressStep[] {
-  return STEP_ORDER.map((id) => ({
-    id,
-    label: STEP_META[id].label,
-    status: mapStatus(state.steps[id]),
-    type: STEP_META[id].type,
-  }));
-}
-
-/** Get overall flow status */
-export function getFlowStatus(state: FlowState): 'idle' | 'running' | 'complete' | 'error' {
-  const statuses = Object.values(state.steps);
-  if (statuses.some((s) => s === 'failed')) return 'error';
-  if (statuses.some((s) => s === 'running')) return 'running';
-  if (statuses.every((s) => s === 'completed' || s === 'skipped')) return 'complete';
-  return 'idle';
-}
-
-/** Get activity description for the current step */
-export function getFlowActivity(state: FlowState): string {
-  if (!state.currentStep) return '';
-  const meta = STEP_META[state.currentStep];
-  if (!meta) return '';
-  const chunkSteps = ['step_start_audio_streaming', 'step_transcribe_chunks', 'step_mark_ad_locations', 'step_build_skip_map'];
-  if (state.chunkProgress && chunkSteps.includes(state.currentStep)) {
-    return `${meta.label} (${state.chunkProgress.currentChunk}/${state.chunkProgress.totalChunks})...`;
-  }
-  return `${meta.label}...`;
-}
-
-/** Export step order for consumers */
+/** Export step order and metadata for consumers */
 export { STEP_ORDER, STEP_META };

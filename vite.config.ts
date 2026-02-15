@@ -7,6 +7,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
+      'bilko-flow/react/components': path.resolve(__dirname, 'node_modules/bilko-flow/src/react/components.ts'),
       'bilko-flow/react': path.resolve(__dirname, 'node_modules/bilko-flow/src/react/index.ts'),
       'bilko-flow': path.resolve(__dirname, 'node_modules/bilko-flow/src/domain/index.ts'),
     },
