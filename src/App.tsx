@@ -149,7 +149,7 @@ export default function App() {
       // Steps 1-2: Fetch RSS and parse episodes (client-side)
       updateStep('step_fetch_rss', { status: 'active', meta: { message: 'Loading...' } });
       const fetchStart = Date.now();
-      updateExecution('step_fetch_rss', { status: 'running', startedAt: fetchStart, input: { podcastId: id, url: `/api/podcast/${id}/episodes` } });
+      updateExecution('step_fetch_rss', { status: 'running', startedAt: fetchStart, input: { podcastId: id, url: `/api/podcast/${id}/episodes`, method: 'GET', timeout_ms: 15000, max_attempts: 3 } });
 
       try {
         const data = await fetchEpisodes(id);
@@ -159,7 +159,7 @@ export default function App() {
         updateStep('step_fetch_rss', { status: 'complete', meta: { message: 'RSS loaded' } });
         updateExecution('step_fetch_rss', { status: 'success', completedAt: fetchEnd, durationMs: fetchEnd - fetchStart, output: { podcastName: data.podcastName, episodeCount: data.episodes.length } });
         updateStep('step_parse_episodes', { status: 'complete', meta: { message: `${data.episodes.length} episodes` } });
-        updateExecution('step_parse_episodes', { status: 'success', startedAt: fetchStart, completedAt: fetchEnd, durationMs: fetchEnd - fetchStart, output: { episodes: data.episodes.length } });
+        updateExecution('step_parse_episodes', { status: 'success', startedAt: fetchStart, completedAt: fetchEnd, durationMs: fetchEnd - fetchStart, input: { transform: 'extract_episode_metadata', timeout_ms: 5000 }, output: { episodeCount: data.episodes.length, podcastName: data.podcastName } });
       } catch (e: any) {
         const fetchEnd = Date.now();
         updateStep('step_fetch_rss', { status: 'error', meta: { error: 'Failed' } });
@@ -193,6 +193,19 @@ export default function App() {
     setPipelineSteps(steps);
 
     const durationSec = parseDuration(ep.duration);
+
+    // Enrich parse_episodes execution with the selected episode data
+    updateExecution('step_parse_episodes', {
+      status: 'success',
+      output: {
+        episodeTitle: ep.title,
+        duration: ep.duration,
+        durationSec,
+        transcriptUrl: ep.transcriptUrl || '(none)',
+        audioUrl: ep.audioUrl ? 'available' : '(none)',
+        episodeCount: episodes.length,
+      },
+    });
 
     try {
       const handleProgress = (evt: SandboxProgressEvent) => {
@@ -262,6 +275,41 @@ export default function App() {
           const chunkStepId = `${evt.threadId}-${chunkSuffix}`;
           const now = Date.now();
           const { step: _cs, status: _cst, message: _cm, threadId: _ct, chunkIndex: _cci, totalChunks: _ctc, ...chunkExtraData } = evt;
+
+          // Build chunk-step-specific config for richer input data
+          const chunkStepConfig: Record<string, Record<string, unknown>> = {
+            step_fetch_chunk: {
+              audioUrl: ep.audioUrl || '(none)',
+              chunkIndex: evt.chunkIndex,
+              totalChunks: evt.totalChunks,
+              chunkSizeBytes: 1_048_576,
+              method: 'GET (Range header)',
+            },
+            step_transcribe_chunk: {
+              model: 'whisper-1',
+              format: 'verbose_json',
+              language: 'en',
+              chunkIndex: evt.chunkIndex,
+              totalChunks: evt.totalChunks,
+            },
+            step_classify_chunk: {
+              model: 'claude-3-5-sonnet',
+              chunkIndex: evt.chunkIndex,
+              totalChunks: evt.totalChunks,
+              episodeTitle: ep.title,
+            },
+            step_refine_chunk: {
+              model: 'claude-3-5-sonnet',
+              chunkIndex: evt.chunkIndex,
+              totalChunks: evt.totalChunks,
+            },
+            step_emit_skips: {
+              chunkIndex: evt.chunkIndex,
+              totalChunks: evt.totalChunks,
+              target: 'player-scrubber',
+            },
+          };
+
           if (evt.status === 'done') {
             const startedAt = stepStartTimesRef.current[chunkStepId] || now;
             updateExecution(chunkStepId, { status: 'success', completedAt: now, durationMs: now - startedAt, output: Object.keys(chunkExtraData).length > 0 ? chunkExtraData : { message: evt.message } });
@@ -272,7 +320,10 @@ export default function App() {
             if (!stepStartTimesRef.current[chunkStepId]) {
               stepStartTimesRef.current[chunkStepId] = now;
             }
-            updateExecution(chunkStepId, { status: 'running', startedAt: stepStartTimesRef.current[chunkStepId], input: Object.keys(chunkExtraData).length > 0 ? chunkExtraData : undefined });
+            const config = chunkStepConfig[evt.step];
+            const sseData = Object.keys(chunkExtraData).length > 0 ? chunkExtraData : undefined;
+            const input = config ? { ...config, ...sseData } : sseData;
+            updateExecution(chunkStepId, { status: 'running', startedAt: stepStartTimesRef.current[chunkStepId], input });
           }
 
           // Track scan progress: when a chunk's last step completes, mark it scanned
@@ -293,10 +344,29 @@ export default function App() {
           const now = Date.now();
           // Capture all extra event fields as execution output data
           const { step: _s, status: _st, message: _m, threadId: _t, chunkIndex: _ci, totalChunks: _tc, ...extraData } = evt;
+
+          // Build step-specific config for input enrichment
+          const stepConfig: Record<string, Record<string, unknown>> = {
+            step_resolve_audio_stream: {
+              audioUrl: ep.audioUrl || '(none)',
+              method: 'HEAD (follow redirects)',
+              timeout_ms: 10000,
+              max_attempts: 3,
+            },
+            step_plan_chunks: {
+              chunkSizeBytes: 1_048_576,
+              chunkSizeLabel: '1 MB',
+              strategy: 'byte-range',
+              estimatedChunkDuration: '~65s at 128kbps',
+              audioUrl: ep.audioUrl || '(none)',
+            },
+          };
+
           if (evt.status === 'done') {
             const startedAt = stepStartTimesRef.current[stepId] || now;
             updateStep(stepId, { status: 'complete', meta: { message: evt.message } });
-            updateExecution(stepId, { status: 'success', completedAt: now, durationMs: now - startedAt, output: Object.keys(extraData).length > 0 ? extraData : { message: evt.message } });
+            const baseOutput = Object.keys(extraData).length > 0 ? extraData : { message: evt.message };
+            updateExecution(stepId, { status: 'success', completedAt: now, durationMs: now - startedAt, output: baseOutput });
           } else if (evt.status === 'error') {
             const startedAt = stepStartTimesRef.current[stepId] || now;
             updateStep(stepId, { status: 'error', meta: { error: evt.message } });
@@ -313,7 +383,11 @@ export default function App() {
               ...(evt.chunkIndex != null ? { chunksProcessed: evt.chunkIndex + 1 } : {}),
               ...(evt.totalChunks != null ? { chunksTotal: evt.totalChunks } : {}),
             } });
-            updateExecution(stepId, { status: 'running', startedAt: stepStartTimesRef.current[stepId], input: Object.keys(extraData).length > 0 ? extraData : undefined });
+            // Merge step-specific config into execution input
+            const config = stepConfig[stepId];
+            const sseData = Object.keys(extraData).length > 0 ? extraData : undefined;
+            const input = config ? { ...config, ...sseData } : sseData;
+            updateExecution(stepId, { status: 'running', startedAt: stepStartTimesRef.current[stepId], input });
           }
         }
       };
@@ -356,24 +430,88 @@ export default function App() {
       setAds(adResult);
       setSandboxResult(result);
 
-      // Enrich step executions with final result data (prompts, LLM response, transcript)
-      if (result.prompts) {
-        // Find the chunk classify/refine steps or the overall classification
-        setStepExecutions(prev => {
-          const enriched = { ...prev };
-          // Attach prompts + LLM response to a synthetic 'pipeline_llm' key visible in analysis
-          if (result.prompts) {
-            enriched['pipeline_llm_classify'] = {
-              stepId: 'pipeline_llm_classify',
-              status: 'success',
-              input: { systemPrompt: result.prompts.system, userPrompt: result.prompts.user },
-              output: { adBlocks: result.adBlocks.length, skipMap: result.skipMap.length },
-              rawResponse: result.llmResponse || undefined,
-            };
-          }
-          return enriched;
-        });
-      }
+      // Enrich step executions with final result data from SandboxResult
+      setStepExecutions(prev => {
+        const enriched = { ...prev };
+
+        // Enrich step_resolve_audio_stream with audioDetails from result
+        if (result.audioDetails && enriched['step_resolve_audio_stream']) {
+          enriched['step_resolve_audio_stream'] = {
+            ...enriched['step_resolve_audio_stream'],
+            output: {
+              available: result.audioDetails.available,
+              resolvedUrl: result.audioDetails.resolvedUrl,
+              contentType: result.audioDetails.contentType,
+              contentLengthBytes: result.audioDetails.contentLengthBytes,
+              downloadSizeMb: result.audioDetails.downloadSizeMb,
+              redirected: result.audioDetails.resolvedUrl !== result.audioDetails.originalUrl,
+              audioDurationSec: result.audioDetails.audioDurationSec,
+              error: result.audioDetails.error,
+            },
+          };
+        }
+
+        // Enrich step_plan_chunks with chunk planning data
+        if (result.audioDetails && enriched['step_plan_chunks']) {
+          const chunkCount = result.audioDetails.segmentCount || 0;
+          const fileSizeMb = result.audioDetails.downloadSizeMb;
+          enriched['step_plan_chunks'] = {
+            ...enriched['step_plan_chunks'],
+            output: {
+              chunkCount,
+              fileSizeMb,
+              format: result.audioDetails.contentType,
+              resolvedUrl: result.audioDetails.resolvedUrl,
+              transcriptionModel: result.audioDetails.transcriptionModel,
+              estimatedChunkDuration: '~65s at 128kbps',
+              audioDurationSec: result.audioDetails.audioDurationSec,
+            },
+          };
+        }
+
+        // Enrich step_parse_episodes with transcript/validation info from result
+        if (enriched['step_parse_episodes']) {
+          enriched['step_parse_episodes'] = {
+            ...enriched['step_parse_episodes'],
+            output: {
+              ...(enriched['step_parse_episodes'].output as Record<string, unknown> || {}),
+              transcriptSource: result.transcriptSource,
+              transcriptLines: result.transcript.lineCount,
+              transcriptWords: result.transcript.totalWords,
+              validation: result.validation ? {
+                isValid: result.validation.isValid,
+                reason: result.validation.reason,
+                speechRateWpm: result.qa.speechRateWpm,
+              } : undefined,
+            },
+          };
+        }
+
+        // Attach prompts + LLM response to a synthetic 'pipeline_llm' key visible in analysis
+        if (result.prompts) {
+          enriched['pipeline_llm_classify'] = {
+            stepId: 'pipeline_llm_classify',
+            status: 'success',
+            input: {
+              systemPrompt: result.prompts.system,
+              userPrompt: result.prompts.user.length > 2000
+                ? result.prompts.user.slice(0, 800) + `\n... (${result.prompts.user.length} chars) ...\n` + result.prompts.user.slice(-500)
+                : result.prompts.user,
+            },
+            output: {
+              strategy: result.summary.strategy,
+              adBlocks: result.adBlocks.length,
+              skipRanges: result.skipMap.length,
+              totalAdTimeSec: result.summary.totalAdTimeSec,
+              contentTimeSec: result.summary.contentTimeSec,
+              adWordPercent: result.summary.adWordPercent,
+            },
+            rawResponse: result.llmResponse || undefined,
+          };
+        }
+
+        return enriched;
+      });
 
       // Mark all remaining steps as done
       setPipelineSteps(prev => prev.map(s =>

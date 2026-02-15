@@ -171,7 +171,7 @@ export { STEP_ORDER, STEP_META, CHUNK_STEP_META, FORK_INDEX };
 
 // ─── FlowDefinition bridge for bilko-flow StepDetail ──────────────────────
 
-import type { FlowStep, FlowDefinition, UIStepType } from 'bilko-flow/react/components';
+import type { FlowStep, FlowDefinition, UIStepType, SchemaField } from 'bilko-flow/react/components';
 
 /** Map pipeline step types to bilko-flow UIStepType */
 const TYPE_MAP: Record<string, UIStepType> = {
@@ -181,32 +181,90 @@ const TYPE_MAP: Record<string, UIStepType> = {
   'ai.generate-text':   'llm',
 };
 
-/** Step descriptions for the StepDetail prompt/schema tabs */
-const STEP_DESCRIPTIONS: Record<string, { description: string; prompt?: string }> = {
+/** Step descriptions, prompts, and schemas for the StepDetail tabs */
+const STEP_DESCRIPTIONS: Record<string, {
+  description: string;
+  prompt?: string;
+  userMessage?: string;
+  model?: string;
+  inputSchema: SchemaField[];
+  outputSchema: SchemaField[];
+}> = {
   step_fetch_rss: {
-    description: 'Pull the podcast RSS feed from NPR and return the raw XML.',
+    description: 'Fetch the podcast RSS feed from NPR via the server proxy. The server fetches the feed XML, parses episode metadata, and returns structured JSON.',
+    inputSchema: [
+      { name: 'podcastId', type: 'string', required: true, description: 'NPR podcast feed ID' },
+      { name: 'url', type: 'string', required: true, description: 'API endpoint: /api/podcast/{id}/episodes' },
+      { name: 'method', type: 'string', required: true, description: 'HTTP method (GET)' },
+      { name: 'timeout_ms', type: 'number', required: false, description: 'Request timeout (15000ms)' },
+      { name: 'max_attempts', type: 'number', required: false, description: 'Retry count (3)' },
+    ],
+    outputSchema: [
+      { name: 'podcastName', type: 'string', required: true, description: 'Name of the podcast' },
+      { name: 'episodeCount', type: 'number', required: true, description: 'Number of episodes found' },
+    ],
   },
   step_parse_episodes: {
-    description: 'Extract episode metadata (title, duration, audio URL, transcript URL) from the RSS XML.',
+    description: 'Extract episode metadata from the RSS XML response: title, duration, audio URL, and transcript URL for each episode. The server handles XML parsing; this step extracts structured episode data.',
+    inputSchema: [
+      { name: 'transform', type: 'string', required: true, description: 'Extraction method (extract_episode_metadata)' },
+      { name: 'timeout_ms', type: 'number', required: false, description: 'Parse timeout (5000ms)' },
+    ],
+    outputSchema: [
+      { name: 'episodeTitle', type: 'string', required: true, description: 'Selected episode title' },
+      { name: 'duration', type: 'string', required: true, description: 'Episode duration (HH:MM:SS)' },
+      { name: 'durationSec', type: 'number', required: true, description: 'Duration in seconds' },
+      { name: 'transcriptUrl', type: 'string', required: false, description: 'NPR transcript page URL' },
+      { name: 'audioUrl', type: 'string', required: false, description: 'Audio stream URL (podtrac-wrapped)' },
+      { name: 'episodeCount', type: 'number', required: true, description: 'Total episodes in feed' },
+    ],
   },
   step_resolve_audio_stream: {
-    description: 'HEAD request to follow podtrac → megaphone → CDN redirects. Returns final URL, Content-Length, Content-Type, Accept-Ranges.',
+    description: 'HEAD request to follow the podtrac → megaphone → CDN redirect chain and resolve the final audio stream URL. Returns content metadata needed for byte-range chunking: Content-Length, Content-Type, and Accept-Ranges header.',
+    inputSchema: [
+      { name: 'audioUrl', type: 'string', required: true, description: 'Original podtrac-wrapped audio URL' },
+      { name: 'method', type: 'string', required: true, description: 'HTTP method (HEAD, follow redirects)' },
+      { name: 'timeout_ms', type: 'number', required: false, description: 'Request timeout (10000ms)' },
+      { name: 'max_attempts', type: 'number', required: false, description: 'Retry count (3)' },
+    ],
+    outputSchema: [
+      { name: 'resolvedUrl', type: 'string', required: true, description: 'Final CDN URL after redirects' },
+      { name: 'contentType', type: 'string', required: true, description: 'Audio MIME type (e.g. audio/mpeg)' },
+      { name: 'contentLengthBytes', type: 'number', required: true, description: 'Total file size in bytes' },
+      { name: 'acceptRanges', type: 'string', required: true, description: 'Range request support (bytes)' },
+      { name: 'redirected', type: 'boolean', required: true, description: 'Whether URL was redirected' },
+    ],
   },
   step_plan_chunks: {
-    description: 'Pure computation — divide Content-Length into 1 MB byte-range chunks for parallel processing.',
+    description: 'Pure computation — divide the audio file\'s Content-Length into 1 MB byte-range chunks for parallel streaming. Each chunk is ~65 seconds of audio at 128kbps. Chunks are processed independently with no join.',
+    inputSchema: [
+      { name: 'contentLengthBytes', type: 'number', required: true, description: 'Total audio file size from HEAD' },
+      { name: 'chunkSizeBytes', type: 'number', required: true, description: 'Target chunk size (1,048,576 = 1 MB)' },
+      { name: 'strategy', type: 'string', required: true, description: 'Chunking strategy (byte-range)' },
+      { name: 'format', type: 'string', required: false, description: 'Audio format from Content-Type' },
+      { name: 'resolvedUrl', type: 'string', required: true, description: 'CDN URL for byte-range requests' },
+    ],
+    outputSchema: [
+      { name: 'chunkCount', type: 'number', required: true, description: 'Number of chunks planned' },
+      { name: 'chunkDurationSec', type: 'number', required: true, description: 'Estimated seconds per chunk (~65s at 128kbps)' },
+      { name: 'totalEstimatedAudioSec', type: 'number', required: true, description: 'Total estimated audio duration' },
+      { name: 'fileSizeMb', type: 'string', required: true, description: 'File size formatted in MB' },
+    ],
   },
 };
 
+/** Step dependency graph */
+const STEP_DEPENDS_ON: Record<string, string[]> = {
+  step_fetch_rss: [],
+  step_parse_episodes: ['step_fetch_rss'],
+  step_resolve_audio_stream: ['step_parse_episodes'],
+  step_plan_chunks: ['step_resolve_audio_stream'],
+};
+
 /** Build a FlowStep from our pipeline step metadata */
-function toFlowStep(id: string, index: number): FlowStep {
+function toFlowStep(id: string, _index: number): FlowStep {
   const meta = STEP_META[id];
   const desc = STEP_DESCRIPTIONS[id];
-  const dslStep = {
-    step_fetch_rss: { dependsOn: [] as string[], inputs: { url: '/api/podcast/{id}/episodes', method: 'GET' } },
-    step_parse_episodes: { dependsOn: ['step_fetch_rss'], inputs: { transform: 'extract_episode_metadata' } },
-    step_resolve_audio_stream: { dependsOn: ['step_parse_episodes'], inputs: { url: '/api/audio/resolve', method: 'HEAD' } },
-    step_plan_chunks: { dependsOn: ['step_resolve_audio_stream'], inputs: { chunkSizeBytes: 1_048_576, strategy: 'byte-range' } },
-  }[id] || { dependsOn: [] as string[], inputs: {} };
 
   return {
     id,
@@ -214,32 +272,129 @@ function toFlowStep(id: string, index: number): FlowStep {
     type: TYPE_MAP[meta.type] || 'transform',
     description: desc?.description || '',
     prompt: desc?.prompt,
-    dependsOn: dslStep.dependsOn,
-    inputSchema: Object.entries(dslStep.inputs).map(([name, value]) => ({
-      name,
-      type: typeof value,
-      required: true,
-    })),
-    outputSchema: [],
+    userMessage: desc?.userMessage,
+    model: desc?.model,
+    dependsOn: STEP_DEPENDS_ON[id] || [],
+    inputSchema: desc?.inputSchema || [],
+    outputSchema: desc?.outputSchema || [],
   };
 }
 
+/** Per-chunk thread step definitions for StepDetail */
+const CHUNK_STEP_DEFINITIONS: Record<string, {
+  description: string;
+  prompt?: string;
+  userMessage?: string;
+  model?: string;
+  inputSchema: SchemaField[];
+  outputSchema: SchemaField[];
+  dependsOn: string[];
+}> = {
+  step_fetch_chunk: {
+    description: 'HTTP Range request to fetch a 1 MB audio slice from the CDN. Uses byte-range headers to download only the relevant portion of the audio file.',
+    inputSchema: [
+      { name: 'audioUrl', type: 'string', required: true, description: 'CDN URL for byte-range request' },
+      { name: 'byteRangeStart', type: 'number', required: true, description: 'Start byte offset' },
+      { name: 'byteRangeEnd', type: 'number', required: true, description: 'End byte offset' },
+      { name: 'chunkIndex', type: 'number', required: true, description: 'Zero-based chunk index' },
+      { name: 'totalChunks', type: 'number', required: true, description: 'Total number of chunks' },
+    ],
+    outputSchema: [
+      { name: 'bytesFetched', type: 'number', required: true, description: 'Bytes downloaded' },
+      { name: 'contentType', type: 'string', required: true, description: 'Audio MIME type' },
+      { name: 'durationSec', type: 'number', required: false, description: 'Estimated chunk audio duration' },
+    ],
+    dependsOn: [],
+  },
+  step_transcribe_chunk: {
+    description: 'Speech-to-text transcription of the audio chunk using OpenAI Whisper. Produces timestamped segments with word-level confidence scores.',
+    model: 'whisper-1',
+    inputSchema: [
+      { name: 'audioChunk', type: 'Buffer', required: true, description: 'Audio data from fetch step' },
+      { name: 'model', type: 'string', required: true, description: 'STT model (whisper-1)' },
+      { name: 'format', type: 'string', required: true, description: 'Output format (verbose_json)' },
+      { name: 'language', type: 'string', required: false, description: 'Language hint (en)' },
+      { name: 'chunkIndex', type: 'number', required: true, description: 'Chunk index for context' },
+    ],
+    outputSchema: [
+      { name: 'transcript', type: 'string', required: true, description: 'Transcribed text' },
+      { name: 'segments', type: 'number', required: true, description: 'Number of timed segments' },
+      { name: 'words', type: 'number', required: true, description: 'Total word count' },
+      { name: 'confidence', type: 'number', required: false, description: 'Average confidence score' },
+      { name: 'durationSec', type: 'number', required: true, description: 'Audio duration transcribed' },
+    ],
+    dependsOn: ['step_fetch_chunk'],
+  },
+  step_classify_chunk: {
+    description: 'LLM classifies each sentence in the chunk transcript as content or advertisement. Uses topic-aware context from surrounding chunks to improve boundary detection.',
+    prompt: 'You are an expert podcast ad detector. Analyze the transcript and classify each segment as CONTENT or AD. Ads include: sponsor reads, promo codes, calls to action, network promos, and mid-roll ad breaks. Content includes: news, interviews, analysis, and editorial segments.',
+    userMessage: 'Classify each line of this podcast transcript chunk as content or ad. Return a JSON array of { lineIndex, classification, confidence, reason } objects.',
+    model: 'claude-3-5-sonnet',
+    inputSchema: [
+      { name: 'transcript', type: 'string', required: true, description: 'Chunk transcript text' },
+      { name: 'chunkIndex', type: 'number', required: true, description: 'Current chunk index' },
+      { name: 'totalChunks', type: 'number', required: true, description: 'Total chunks in episode' },
+      { name: 'episodeTitle', type: 'string', required: false, description: 'Episode title for context' },
+      { name: 'precedingContext', type: 'string', required: false, description: 'Last lines from previous chunk' },
+    ],
+    outputSchema: [
+      { name: 'classifications', type: 'object[]', required: true, description: 'Per-line ad/content classification' },
+      { name: 'adBlockCount', type: 'number', required: true, description: 'Number of contiguous ad blocks found' },
+      { name: 'adWordCount', type: 'number', required: true, description: 'Total words classified as ad' },
+      { name: 'confidence', type: 'number', required: true, description: 'Overall classification confidence' },
+    ],
+    dependsOn: ['step_transcribe_chunk'],
+  },
+  step_refine_chunk: {
+    description: 'LLM refines ad block boundaries by examining transition points between content and ads. Adjusts start/end timestamps to natural sentence boundaries and merges small gaps between adjacent ad segments.',
+    prompt: 'You are refining ad block boundaries in a podcast transcript. Given the raw classifications, adjust boundaries to align with natural sentence breaks. Merge ad blocks separated by less than 3 seconds. Output precise start/end timestamps.',
+    userMessage: 'Refine these ad block boundaries. Input: chunk transcript with timestamps and raw classifications. Output: adjusted skip ranges with precise timestamps.',
+    model: 'claude-3-5-sonnet',
+    inputSchema: [
+      { name: 'transcript', type: 'string', required: true, description: 'Chunk transcript with timestamps' },
+      { name: 'rawClassifications', type: 'object[]', required: true, description: 'Classifications from classify step' },
+      { name: 'adBlocks', type: 'object[]', required: true, description: 'Raw ad block boundaries' },
+      { name: 'chunkStartTimeSec', type: 'number', required: true, description: 'Chunk start time in episode' },
+    ],
+    outputSchema: [
+      { name: 'refinedBlocks', type: 'object[]', required: true, description: 'Adjusted ad blocks with precise timestamps' },
+      { name: 'skipRanges', type: 'number', required: true, description: 'Number of skip ranges produced' },
+      { name: 'totalAdTimeSec', type: 'number', required: true, description: 'Total ad time in this chunk' },
+    ],
+    dependsOn: ['step_classify_chunk'],
+  },
+  step_emit_skips: {
+    description: 'Push skip ranges for this chunk to the audio player. Each chunk emits independently — no join needed. The player receives progressive results and updates the scrubber in real-time.',
+    inputSchema: [
+      { name: 'skipRanges', type: 'object[]', required: true, description: 'Refined skip ranges from refine step' },
+      { name: 'chunkIndex', type: 'number', required: true, description: 'Chunk index being emitted' },
+      { name: 'totalChunks', type: 'number', required: true, description: 'Total chunks for progress tracking' },
+    ],
+    outputSchema: [
+      { name: 'emittedRanges', type: 'number', required: true, description: 'Number of skip ranges sent to player' },
+      { name: 'totalAdTimeSec', type: 'number', required: true, description: 'Ad time emitted by this chunk' },
+      { name: 'playerUpdated', type: 'boolean', required: true, description: 'Whether player scrubber was updated' },
+    ],
+    dependsOn: ['step_refine_chunk'],
+  },
+};
+
 /** Per-chunk thread FlowSteps for StepDetail */
-const CHUNK_FLOW_STEPS: FlowStep[] = Object.entries(CHUNK_STEP_META).map(([id, meta]) => ({
-  id,
-  name: meta.label,
-  type: TYPE_MAP[meta.type] || 'transform',
-  description: {
-    step_fetch_chunk: 'HTTP Range request for 1 MB audio slice.',
-    step_transcribe_chunk: 'Speech-to-text via Whisper on chunk audio.',
-    step_classify_chunk: 'LLM classifies chunk transcript as content or ad.',
-    step_refine_chunk: 'LLM refines ad block boundaries within chunk.',
-    step_emit_skips: 'Push skip ranges for this chunk to the player.',
-  }[id] || '',
-  dependsOn: [],
-  inputSchema: [],
-  outputSchema: [],
-}));
+const CHUNK_FLOW_STEPS: FlowStep[] = Object.entries(CHUNK_STEP_META).map(([id, meta]) => {
+  const def = CHUNK_STEP_DEFINITIONS[id];
+  return {
+    id,
+    name: meta.label,
+    type: TYPE_MAP[meta.type] || 'transform',
+    description: def?.description || '',
+    prompt: def?.prompt,
+    userMessage: def?.userMessage,
+    model: def?.model,
+    dependsOn: def?.dependsOn || [],
+    inputSchema: def?.inputSchema || [],
+    outputSchema: def?.outputSchema || [],
+  };
+});
 
 /**
  * Build a bilko-flow FlowDefinition from the pipeline step definitions.
