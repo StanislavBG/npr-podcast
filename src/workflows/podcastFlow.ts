@@ -167,7 +167,7 @@ const CHUNK_STEP_META: Record<string, { label: string; type: string }> = {
 const FORK_INDEX = 4; // After step_plan_chunks (index 3)
 
 /** Export step order and metadata for consumers */
-export { STEP_ORDER, STEP_META, CHUNK_STEP_META, FORK_INDEX };
+export { STEP_ORDER, STEP_META, STEP_DESCRIPTIONS, CHUNK_STEP_META, FORK_INDEX };
 
 // ─── FlowDefinition bridge for bilko-flow StepDetail ──────────────────────
 
@@ -281,7 +281,7 @@ function toFlowStep(id: string, _index: number): FlowStep {
 }
 
 /** Per-chunk thread step definitions for StepDetail */
-const CHUNK_STEP_DEFINITIONS: Record<string, {
+export const CHUNK_STEP_DEFINITIONS: Record<string, {
   description: string;
   prompt?: string;
   userMessage?: string;
