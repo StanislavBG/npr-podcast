@@ -1869,13 +1869,15 @@ function mapAdBlocksToTimestamps(
 }
 
 app.post('/api/sandbox/analyze', async (req, res) => {
-  const { transcriptUrl, episodeTitle, durationSec, podcastTranscripts, audioUrl } = req.body as {
+  const { transcriptUrl, episodeTitle, durationSec, podcastTranscripts, audioUrl, testMode } = req.body as {
     transcriptUrl: string;
     episodeTitle: string;
     durationSec: number;
     podcastTranscripts?: PodcastTranscript[];
     audioUrl?: string;
+    testMode?: boolean;
   };
+  const TEST_MODE_MAX_CHUNKS = 5;
 
   if (!transcriptUrl && !audioUrl && (!podcastTranscripts || podcastTranscripts.length === 0)) {
     res.status(400).json({ error: 'Missing transcriptUrl, audioUrl, or podcastTranscripts' });
@@ -1957,16 +1959,21 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         const resolvedUrl = audioDetails.resolvedUrl;
         const contentLength = audioDetails.contentLengthBytes;
         const bitrate = DEFAULT_BITRATE;
-        const numChunks = Math.ceil(contentLength / CHUNK_SIZE_BYTES);
+        const allChunksCount = Math.ceil(contentLength / CHUNK_SIZE_BYTES);
+        const numChunks = testMode ? Math.min(allChunksCount, TEST_MODE_MAX_CHUNKS) : allChunksCount;
         const estChunkDuration = (CHUNK_SIZE_BYTES * 8) / bitrate; // ~65.5s at 128kbps
         const estDuration = (contentLength * 8) / bitrate;
 
-        sendEvent('progress', { step: 'step_plan_chunks', message: `Planning ${numChunks} chunks (1 MB each)...` });
-        console.log(`[sandbox] Planned ${numChunks} chunks for ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${estDuration.toFixed(0)}s`);
+        if (testMode && allChunksCount > TEST_MODE_MAX_CHUNKS) {
+          console.log(`[sandbox] TEST MODE: limiting from ${allChunksCount} to ${numChunks} chunks`);
+        }
+
+        sendEvent('progress', { step: 'step_plan_chunks', message: `Planning ${numChunks} chunks (1 MB each)${testMode ? ' [TEST MODE]' : ''}...` });
+        console.log(`[sandbox] Planned ${numChunks} chunks for ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${estDuration.toFixed(0)}s${testMode ? ' [TEST MODE]' : ''}`);
         sendEvent('progress', {
           step: 'step_plan_chunks',
           status: 'done',
-          message: `${numChunks} chunks planned (${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${Math.round(estDuration)}s)`,
+          message: `${numChunks}${testMode ? `/${allChunksCount}` : ''} chunks planned (${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${Math.round(estDuration)}s)${testMode ? ' [TEST MODE]' : ''}`,
           audioDetails: { ...audioDetails },
         });
 

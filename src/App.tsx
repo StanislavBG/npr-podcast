@@ -90,6 +90,8 @@ export default function App() {
   const [sandboxResult, setSandboxResult] = useState<SandboxResult | null>(null);
   const [podcastName, setPodcastName] = useState('');
   const [chunkThreads, setChunkThreads] = useState<ParallelThread[]>([]);
+  // Test mode: limit to 5 chunks for faster iteration
+  const [testMode, setTestMode] = useState(true);
   // Tracks which chunks have completed scanning — used by Player scrubber
   const [scanProgress, setScanProgress] = useState<{ totalChunks: number; completedChunks: Set<number> }>({ totalChunks: 0, completedChunks: new Set() });
   // Accumulator ref for partial ads (avoids stale closure in SSE callback)
@@ -288,6 +290,7 @@ export default function App() {
         ep.podcastTranscripts,
         ep.audioUrl || undefined,
         handlePartialAds,
+        testMode,
       );
 
       // Final result replaces any partial ads with the full topic-aware classification
@@ -311,7 +314,7 @@ export default function App() {
       ));
       setPipelineStatus('error');
     }
-  }, [updateStep]);
+  }, [updateStep, testMode]);
 
   const goToSandbox = useCallback(() => {
     window.history.pushState(null, '', '/sandbox');
@@ -378,14 +381,24 @@ export default function App() {
       <div className="shell">
         <header className="header">
           <h1 className="header-title">NPR Podcasts</h1>
-          <button
-            className={`header-sandbox-link ${!pipelineStarted ? 'disabled' : ''}`}
-            onClick={goToSandbox}
-            disabled={!pipelineStarted}
-            title={pipelineStarted ? 'View pipeline details' : 'Select an episode first'}
-          >
-            View Details
-          </button>
+          <div className="header-actions">
+            <button
+              className={`test-mode-toggle ${testMode ? 'on' : 'off'}`}
+              onClick={() => setTestMode(m => !m)}
+              title={testMode ? 'Test mode ON: processing max 5 chunks' : 'Test mode OFF: processing all chunks'}
+            >
+              <span className="test-mode-label">{testMode ? 'TEST' : 'FULL'}</span>
+              <span className="test-mode-hint">{testMode ? '5 chunks' : 'all'}</span>
+            </button>
+            <button
+              className={`header-sandbox-link ${!pipelineStarted ? 'disabled' : ''}`}
+              onClick={goToSandbox}
+              disabled={!pipelineStarted}
+              title={pipelineStarted ? 'View pipeline details' : 'Select an episode first'}
+            >
+              View Details
+            </button>
+          </div>
         </header>
 
         <PodcastSelector

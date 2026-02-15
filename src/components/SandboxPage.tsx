@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { FlowErrorBoundary, resolveStepMeta } from 'bilko-flow/react/components';
 import type { FlowProgressStep, ParallelThread, ParallelConfig } from 'bilko-flow/react/components';
 import { PipelineWaterfall } from './PipelineWaterfall';
@@ -6,8 +6,6 @@ import {
   formatTime,
   formatTimestamp,
   type SandboxResult,
-  type SandboxAdBlock,
-  type SandboxLine,
   type Episode,
 } from '../services/api';
 import { STEP_ORDER, STEP_META } from '../workflows/podcastFlow';
@@ -26,7 +24,7 @@ interface Props {
   parallelConfig: ParallelConfig;
 }
 
-// ─── Step definitions derived from podcastFlow.ts ────────────────────────────
+// ─── Unified step definitions (includes virtual "chunk processing" step) ─────
 
 interface StepDef {
   id: string;
@@ -35,19 +33,35 @@ interface StepDef {
   type: string;
 }
 
-const STEPS: StepDef[] = STEP_ORDER.map(id => ({
-  id,
-  label: STEP_META[id].label,
-  type: STEP_META[id].type,
-  subtitle: {
-    step_fetch_rss:              'Pull podcast RSS feed from NPR',
-    step_parse_episodes:         'Extract episode metadata from feed',
-    step_resolve_audio_stream:   'Resolve CDN URL, get audio metadata',
-    step_plan_chunks:            'Calculate 1 MB byte-range chunks for parallel processing',
-    step_fetch_html_transcript:  'Fetch NPR HTML transcript for cross-reference',
-    step_finalize_playback:      'Reconcile + summary + build player config',
-  }[id] || '',
-}));
+const ALL_STEPS: StepDef[] = [
+  ...STEP_ORDER.slice(0, 4).map(id => ({
+    id,
+    label: STEP_META[id].label,
+    type: STEP_META[id].type,
+    subtitle: {
+      step_fetch_rss:              'Pull podcast RSS feed from NPR',
+      step_parse_episodes:         'Extract episode metadata from feed',
+      step_resolve_audio_stream:   'Resolve CDN URL, get audio metadata',
+      step_plan_chunks:            'Calculate 1 MB byte-range chunks for parallel processing',
+    }[id] || '',
+  })),
+  // Virtual step for chunk processing
+  {
+    id: 'step_chunk_processing',
+    label: 'Chunk Processing',
+    subtitle: 'Fetch → Transcribe → Classify → Refine → Emit (per chunk, parallel)',
+    type: 'ai.speech-to-text',
+  },
+  ...STEP_ORDER.slice(4).map(id => ({
+    id,
+    label: STEP_META[id].label,
+    type: STEP_META[id].type,
+    subtitle: {
+      step_fetch_html_transcript:  'Fetch NPR HTML transcript for cross-reference',
+      step_finalize_playback:      'Reconcile + summary + build player config',
+    }[id] || '',
+  })),
+];
 
 // ─── Copy Feedback: accumulate debug info for agent/developer ────────────────
 
@@ -63,7 +77,6 @@ function buildFeedbackText(
   lines.push(`Generated: ${new Date().toISOString()}`);
   lines.push('');
 
-  // Episode context
   lines.push('## Episode');
   if (episode) {
     lines.push(`- Title: ${episode.title}`);
@@ -76,7 +89,6 @@ function buildFeedbackText(
   }
   lines.push('');
 
-  // Pipeline status
   lines.push('## Pipeline Status');
   lines.push(`Overall: ${pipelineStatus}`);
   lines.push('');
@@ -91,7 +103,6 @@ function buildFeedbackText(
   }
   lines.push('');
 
-  // Errors section (all steps with errors)
   const errorSteps = pipelineSteps.filter(s => s.status === 'error');
   if (errorSteps.length > 0) {
     lines.push('## Errors');
@@ -105,23 +116,17 @@ function buildFeedbackText(
     }
   }
 
-  // Result details (if available)
   if (result) {
     lines.push('## Analysis Results');
-
-    // Transcript stats
     lines.push('### Transcript');
     lines.push(`- Source: ${result.transcriptSource || 'unknown'}`);
     lines.push(`- Lines: ${result.transcript.lines.length}`);
     lines.push(`- Total words: ${result.transcript.totalWords}`);
-
-    // Validation
     if (result.validation) {
       lines.push(`- Validation: ${result.validation.isValid ? 'PASS' : 'FAIL'} — ${result.validation.reason}`);
     }
     lines.push('');
 
-    // Ad detection
     lines.push('### Ad Detection');
     lines.push(`- Strategy: ${result.summary.strategy}`);
     lines.push(`- Ad blocks: ${result.summary.totalAdBlocks}`);
@@ -130,7 +135,6 @@ function buildFeedbackText(
     lines.push(`- Ad word %: ${result.summary.adWordPercent}%`);
     lines.push('');
 
-    // Skip map
     lines.push('### Skip Map');
     if (result.skipMap.length === 0) {
       lines.push('(empty — no ads detected or skip map generation failed)');
@@ -141,7 +145,6 @@ function buildFeedbackText(
     }
     lines.push('');
 
-    // Audio details
     if (result.audioDetails) {
       const a = result.audioDetails;
       lines.push('### Audio');
@@ -156,7 +159,6 @@ function buildFeedbackText(
       lines.push('');
     }
 
-    // QA metrics
     if (result.qa) {
       lines.push('### QA Metrics');
       lines.push(`- Audio duration: ${result.qa.audioDurationSec}s`);
@@ -167,7 +169,6 @@ function buildFeedbackText(
       lines.push('');
     }
 
-    // LLM details
     if (result.prompts) {
       lines.push('### LLM Prompts');
       lines.push('#### System Prompt');
@@ -183,7 +184,6 @@ function buildFeedbackText(
       lines.push('');
     }
 
-    // Raw LLM response
     if (result.llmResponse) {
       lines.push('### Raw LLM Response');
       lines.push('```json');
@@ -195,671 +195,540 @@ function buildFeedbackText(
   return lines.join('\n');
 }
 
-// ─── Step content renderers ──────────────────────────────────────────────────
+// ─── Detail panel sub-section ────────────────────────────────────────────────
 
-function StepFetchRss({ podcastName, podcastId }: { podcastName: string; podcastId: string }) {
+function DetailSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="sb-step-body">
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Podcast</span><span className="sb-kv-v">{podcastName}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Feed ID</span><span className="sb-kv-v">{podcastId}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Endpoint</span><span className="sb-kv-v">/api/podcast/{podcastId}/episodes</span></div>
-      </div>
-      <div className="sb-qa-ok">
-        RSS feed fetched successfully.
-      </div>
+    <div className="sb-detail-section">
+      <h3 className="sb-detail-section-title">{title}</h3>
+      <div className="sb-detail-section-body">{children}</div>
     </div>
   );
 }
 
-function StepParseEpisodes({ result }: { result: SandboxResult }) {
+// ─── Per-step detail renderers (INPUT / CONFIG / OUTPUT) ─────────────────────
+
+function DetailFetchRss({ podcastName, podcastId, pipelineStep }: { podcastName: string; podcastId: string; pipelineStep?: FlowProgressStep }) {
+  const meta = resolveStepMeta(pipelineStep?.meta);
+  return (
+    <>
+      <DetailSection title="INPUT">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Podcast</span><span className="sb-kv-v">{podcastName}</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Feed ID</span><span className="sb-kv-v">{podcastId}</span></div>
+        </div>
+      </DetailSection>
+      <DetailSection title="CONFIG">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Endpoint</span><span className="sb-kv-v">/api/podcast/{podcastId}/episodes</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Method</span><span className="sb-kv-v">GET</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Timeout</span><span className="sb-kv-v">15000ms</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Max attempts</span><span className="sb-kv-v">3</span></div>
+        </div>
+      </DetailSection>
+      <DetailSection title="OUTPUT">
+        {meta.message && <div className="sb-qa-ok">{meta.message}</div>}
+        {meta.error && <div className="sb-qa-alert">{meta.error}</div>}
+        {!meta.message && !meta.error && <div className="sb-qa-callout">Waiting for result...</div>}
+      </DetailSection>
+    </>
+  );
+}
+
+function DetailParseEpisodes({ result, pipelineStep }: { result: SandboxResult | null; pipelineStep?: FlowProgressStep }) {
+  const meta = resolveStepMeta(pipelineStep?.meta);
+  if (!result) {
+    return (
+      <>
+        <DetailSection title="INPUT">
+          <div className="sb-qa-callout">RSS feed XML from Step 1</div>
+        </DetailSection>
+        <DetailSection title="CONFIG">
+          <div className="sb-kv-grid">
+            <div className="sb-kv"><span className="sb-kv-k">Transform</span><span className="sb-kv-v">extract_episode_metadata</span></div>
+          </div>
+        </DetailSection>
+        <DetailSection title="OUTPUT">
+          {meta.message && <div className="sb-qa-ok">{meta.message}</div>}
+          {meta.error && <div className="sb-qa-alert">{meta.error}</div>}
+          {!meta.message && !meta.error && <div className="sb-qa-callout">Waiting...</div>}
+        </DetailSection>
+      </>
+    );
+  }
+
   const { episode } = result;
   const audio = result.audioDetails;
   return (
-    <div className="sb-step-body">
-      <h2 className="sb-step-heading">{episode.title}</h2>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Duration</span><span className="sb-kv-v">{formatTime(episode.durationSec)} ({episode.durationSec}s)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Transcript URL</span><span className="sb-kv-v sb-kv-url">{episode.transcriptUrl || '(none)'}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Audio URL</span><span className="sb-kv-v">{audio?.available ? 'Yes' : 'No'}</span></div>
-      </div>
-      <div className="sb-qa-callout">
-        Episode metadata extracted from RSS feed. Next step: resolve the audio stream URL.
-      </div>
-    </div>
+    <>
+      <DetailSection title="INPUT">
+        <div className="sb-qa-callout">RSS feed XML from Step 1 (parsed by server)</div>
+      </DetailSection>
+      <DetailSection title="CONFIG">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Transform</span><span className="sb-kv-v">extract_episode_metadata</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Timeout</span><span className="sb-kv-v">5000ms</span></div>
+        </div>
+      </DetailSection>
+      <DetailSection title="OUTPUT">
+        <h4 className="sb-detail-subtitle">{episode.title}</h4>
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Duration</span><span className="sb-kv-v">{formatTime(episode.durationSec)} ({episode.durationSec}s)</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Transcript URL</span><span className="sb-kv-v sb-kv-url">{episode.transcriptUrl || '(none)'}</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Audio URL</span><span className="sb-kv-v">{audio?.available ? 'Available' : 'Not available'}</span></div>
+        </div>
+      </DetailSection>
+    </>
   );
 }
 
-function StepResolveAudioStream({ result }: { result: SandboxResult }) {
-  const audio = result.audioDetails;
-  if (!audio || !audio.available) {
-    return (
-      <div className="sb-step-body">
-        <div className="sb-qa-alert">
-          No audio URL available for this episode. Audio pipeline skipped — falling back to text transcript.
-        </div>
-        <div className="sb-qa-callout">
-          The main flow skips steps 3-5 when no audio URL is present in the RSS feed.
-          This happens when the episode only provides an HTML transcript link.
-        </div>
-      </div>
-    );
-  }
-
-  const headSucceeded = !!(audio.resolvedUrl || audio.contentType);
-  const fileSizeMb = audio.contentLengthBytes > 0
-    ? (audio.contentLengthBytes / 1024 / 1024).toFixed(1)
-    : audio.downloadSizeMb;
-  const tooLarge = audio.contentLengthBytes > 25 * 1024 * 1024;
+function DetailResolveAudio({ result, pipelineStep }: { result: SandboxResult | null; pipelineStep?: FlowProgressStep }) {
+  const meta = resolveStepMeta(pipelineStep?.meta);
+  const audio = result?.audioDetails;
 
   return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        <strong>HEAD request</strong> follows podtrac/megaphone redirects to resolve the final CDN URL
-        and retrieve audio metadata (Content-Type, Content-Length, Accept-Ranges).
-      </div>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Original URL</span><span className="sb-kv-v sb-kv-url">{audio.originalUrl}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Resolved URL</span><span className="sb-kv-v sb-kv-url">{audio.resolvedUrl || '(same)'}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Content-Type</span><span className="sb-kv-v">{audio.contentType || '(unknown)'}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Content-Length</span><span className="sb-kv-v">{audio.contentLengthBytes > 0 ? `${fileSizeMb} MB (${audio.contentLengthBytes.toLocaleString()} bytes)` : '(unknown)'}</span></div>
-      </div>
-      {headSucceeded && audio.resolvedUrl !== audio.originalUrl && (
-        <div className="sb-qa-ok">
-          URL redirected — final CDN endpoint resolved successfully.
+    <>
+      <DetailSection title="INPUT">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Audio URL</span><span className="sb-kv-v sb-kv-url">{audio?.originalUrl || '(from episode metadata)'}</span></div>
         </div>
-      )}
-      {headSucceeded && !audio.resolvedUrl && (
-        <div className="sb-qa-ok">
-          Audio URL resolved (no redirect).
+      </DetailSection>
+      <DetailSection title="CONFIG">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Method</span><span className="sb-kv-v">HEAD (follow redirects)</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Timeout</span><span className="sb-kv-v">10000ms</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Max attempts</span><span className="sb-kv-v">3</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Purpose</span><span className="sb-kv-v">Resolve CDN URL, get Content-Length/Type</span></div>
         </div>
-      )}
-      {tooLarge && (
-        <div className="sb-qa-callout">
-          Audio file is {fileSizeMb} MB — exceeds Whisper's 25 MB single-request limit.
-          Chunked processing (1 MB byte-range chunks) handles this automatically.
-        </div>
-      )}
-    </div>
+      </DetailSection>
+      <DetailSection title="OUTPUT">
+        {!audio || !audio.available ? (
+          <div className="sb-qa-alert">No audio URL available — audio pipeline skipped.</div>
+        ) : (
+          <>
+            <div className="sb-kv-grid">
+              <div className="sb-kv"><span className="sb-kv-k">Resolved URL</span><span className="sb-kv-v sb-kv-url">{audio.resolvedUrl || '(same)'}</span></div>
+              <div className="sb-kv"><span className="sb-kv-k">Content-Type</span><span className="sb-kv-v">{audio.contentType || '(unknown)'}</span></div>
+              <div className="sb-kv"><span className="sb-kv-k">Content-Length</span><span className="sb-kv-v">{audio.contentLengthBytes > 0 ? `${(audio.contentLengthBytes / 1024 / 1024).toFixed(1)} MB (${audio.contentLengthBytes.toLocaleString()} bytes)` : '(unknown)'}</span></div>
+              <div className="sb-kv"><span className="sb-kv-k">Redirected</span><span className="sb-kv-v">{audio.resolvedUrl && audio.resolvedUrl !== audio.originalUrl ? 'Yes' : 'No'}</span></div>
+            </div>
+            {audio.contentLengthBytes > 25 * 1024 * 1024 && (
+              <div className="sb-qa-callout">
+                Audio file exceeds Whisper's 25 MB limit — chunked processing required.
+              </div>
+            )}
+          </>
+        )}
+        {meta.error && <div className="sb-qa-alert">{meta.error}</div>}
+      </DetailSection>
+    </>
   );
 }
 
-function StepStreamAudioChunks({ result }: { result: SandboxResult }) {
-  const audio = result.audioDetails;
+function DetailPlanChunks({ result, pipelineStep }: { result: SandboxResult | null; pipelineStep?: FlowProgressStep }) {
+  const meta = resolveStepMeta(pipelineStep?.meta);
+  const audio = result?.audioDetails;
+  const CHUNK_SIZE_BYTES = 1_048_576;
+
   if (!audio || !audio.available) {
     return (
-      <div className="sb-step-body">
-        <div className="sb-qa-alert">
-          Audio pipeline skipped — no audio URL available.
-        </div>
-      </div>
+      <>
+        <DetailSection title="INPUT"><div className="sb-qa-alert">Audio not available — step skipped.</div></DetailSection>
+        <DetailSection title="CONFIG"><div className="sb-qa-callout">N/A</div></DetailSection>
+        <DetailSection title="OUTPUT"><div className="sb-qa-alert">No chunks planned.</div></DetailSection>
+      </>
     );
   }
 
-  const CHUNK_SIZE_BYTES = 1_048_576; // 1 MB — must match podcastFlow / server
-  const fileSizeMb = audio.contentLengthBytes > 0
-    ? (audio.contentLengthBytes / 1024 / 1024).toFixed(1)
-    : audio.downloadSizeMb;
-  const estimatedChunks = audio.contentLengthBytes > 0
-    ? Math.ceil(audio.contentLengthBytes / CHUNK_SIZE_BYTES)
-    : 0;
+  const fileSizeMb = audio.contentLengthBytes > 0 ? (audio.contentLengthBytes / 1024 / 1024).toFixed(1) : audio.downloadSizeMb;
+  const estimatedChunks = audio.contentLengthBytes > 0 ? Math.ceil(audio.contentLengthBytes / CHUNK_SIZE_BYTES) : 0;
   const chunkDurationSec = Math.round(CHUNK_SIZE_BYTES / (128000 / 8));
 
   return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        Each chunk is fetched via <strong>HTTP Range request</strong> (1 MB per range),
-        then aligned to the nearest MP3 frame boundary. Each chunk is ~{chunkDurationSec}s
-        of audio at 128 kbps — well under Whisper's 25 MB limit.
-      </div>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">File size</span><span className="sb-kv-v">{fileSizeMb} MB ({audio.contentLengthBytes.toLocaleString()} bytes)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Format</span><span className="sb-kv-v">{audio.contentType}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Chunk strategy</span><span className="sb-kv-v">1 MB byte-range (~{chunkDurationSec}s at 128 kbps)</span></div>
-        {estimatedChunks > 0 && (
-          <div className="sb-kv"><span className="sb-kv-k">Estimated chunks</span><span className="sb-kv-v">{estimatedChunks}</span></div>
-        )}
-      </div>
-      {audio.error ? (
-        <div className="sb-qa-alert">
-          Audio download/processing failed: {audio.error}
+    <>
+      <DetailSection title="INPUT">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">File size</span><span className="sb-kv-v">{fileSizeMb} MB ({audio.contentLengthBytes.toLocaleString()} bytes)</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Format</span><span className="sb-kv-v">{audio.contentType}</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Resolved URL</span><span className="sb-kv-v sb-kv-url">{audio.resolvedUrl}</span></div>
         </div>
-      ) : (
-        <div className="sb-qa-ok">
-          Audio chunked successfully ({estimatedChunks} chunks, {fileSizeMb} MB total). Feeding into transcription pipeline.
+      </DetailSection>
+      <DetailSection title="CONFIG">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Chunk size</span><span className="sb-kv-v">1 MB (1,048,576 bytes)</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Strategy</span><span className="sb-kv-v">HTTP byte-range requests</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Chunk duration</span><span className="sb-kv-v">~{chunkDurationSec}s at 128 kbps</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Step type</span><span className="sb-kv-v">compute (pure — no I/O)</span></div>
         </div>
-      )}
+      </DetailSection>
+      <DetailSection title="OUTPUT">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Chunks planned</span><span className="sb-kv-v">{estimatedChunks}</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Total estimated audio</span><span className="sb-kv-v">~{Math.round((audio.contentLengthBytes * 8) / 128000)}s</span></div>
+        </div>
+        {meta.message && <div className="sb-qa-ok">{meta.message}</div>}
+        {audio.error && <div className="sb-qa-alert">{audio.error}</div>}
 
-      {audio.resolvedUrl && (
-        <div style={{ marginTop: '12px' }}>
-          <h3 className="sb-sub-heading">Audio Preview</h3>
-          <audio
-            controls
-            preload="none"
-            src={audio.resolvedUrl}
-            style={{ width: '100%', borderRadius: '6px' }}
-          />
-          <div className="sb-qa-callout" style={{ marginTop: '4px', fontSize: '11px' }}>
-            Streams directly from CDN. Listen to verify audio is accessible and audible.
+        {audio.resolvedUrl && (
+          <div style={{ marginTop: '12px' }}>
+            <h4 className="sb-detail-subtitle">Audio Preview</h4>
+            <audio
+              controls
+              preload="none"
+              src={audio.resolvedUrl}
+              style={{ width: '100%', borderRadius: '6px' }}
+            />
           </div>
-        </div>
-      )}
-    </div>
+        )}
+      </DetailSection>
+    </>
   );
 }
 
-function StepPerChunkProcessing({ result, chunkThreads }: { result: SandboxResult; chunkThreads: ParallelThread[] }) {
-  const audio = result.audioDetails;
-  const isAudioSource = result.transcriptSource === 'audio-transcription' || result.transcriptSource === 'audio-transcription-chunked';
-  const { lines } = result.transcript;
-  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
-  const dur = result.episode.durationSec;
-  const validation = result.validation;
+function DetailChunkProcessing({ result, chunkThreads, pipelineStep }: { result: SandboxResult | null; chunkThreads: ParallelThread[]; pipelineStep?: FlowProgressStep }) {
+  const audio = result?.audioDetails;
 
   if (!audio || !audio.available) {
     return (
-      <div className="sb-step-body">
-        <div className="sb-qa-alert">
-          Audio pipeline skipped — no audio URL. Per-chunk processing was not performed.
-        </div>
-        <div className="sb-qa-callout">
-          Transcript was obtained from: <strong>{result.transcriptSource || 'html'}</strong>
-        </div>
-      </div>
+      <>
+        <DetailSection title="INPUT"><div className="sb-qa-alert">Audio not available — chunk processing skipped.</div></DetailSection>
+        <DetailSection title="CONFIG"><div className="sb-qa-callout">N/A</div></DetailSection>
+        <DetailSection title="OUTPUT">
+          {result && <div className="sb-qa-callout">Transcript source: <strong>{result.transcriptSource || 'html'}</strong></div>}
+        </DetailSection>
+      </>
     );
   }
 
   const completedThreads = chunkThreads.filter(t => t.status === 'complete').length;
   const errorThreads = chunkThreads.filter(t => t.status === 'error').length;
   const totalThreads = chunkThreads.length;
+  const isAudioSource = result ? (result.transcriptSource === 'audio-transcription' || result.transcriptSource === 'audio-transcription-chunked') : false;
+  const lines = result?.transcript.lines || [];
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+  const dur = result?.episode.durationSec || 0;
 
   return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        Each audio chunk is processed <strong>in parallel</strong> (up to 3 concurrent). For each chunk:
-        <br />
-        <strong>Step 5</strong> (Transcribe) sends the chunk to OpenAI {audio.transcriptionModel} for speech-to-text.
-        <br />
-        <strong>Step 6</strong> (Classify) uses an LLM to identify ad vs. content sentences within the chunk.
-      </div>
+    <>
+      <DetailSection title="INPUT">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Chunks</span><span className="sb-kv-v">{totalThreads} (1 MB each)</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Audio URL</span><span className="sb-kv-v sb-kv-url">{audio.resolvedUrl}</span></div>
+        </div>
+        <div className="sb-qa-callout" style={{ marginTop: '8px' }}>
+          Per-chunk pipeline: <strong>Fetch</strong> (Range request) → <strong>Transcribe</strong> (Whisper STT) → <strong>Classify</strong> (LLM ad detection) → <strong>Refine</strong> (LLM boundary refinement) → <strong>Emit</strong> (skip ranges to player)
+        </div>
+      </DetailSection>
+      <DetailSection title="CONFIG">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Concurrency</span><span className="sb-kv-v">3 parallel STT calls (semaphore)</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">STT Model</span><span className="sb-kv-v">{audio.transcriptionModel}</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">STT Format</span><span className="sb-kv-v">verbose_json (segment timestamps)</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Ad classifier</span><span className="sb-kv-v">LLM (per-chunk, then merged)</span></div>
+        </div>
+      </DetailSection>
+      <DetailSection title="OUTPUT">
+        {/* Thread status summary */}
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Total chunks</span><span className="sb-kv-v">{totalThreads}</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Completed</span><span className="sb-kv-v" style={{ color: completedThreads === totalThreads && totalThreads > 0 ? '#2ecc71' : undefined }}>{completedThreads}</span></div>
+          {errorThreads > 0 && (
+            <div className="sb-kv"><span className="sb-kv-k">Errors</span><span className="sb-kv-v" style={{ color: '#e74c3c' }}>{errorThreads}</span></div>
+          )}
+        </div>
 
-      {/* Thread status summary */}
-      <h3 className="sb-sub-heading">Chunk Thread Status ({totalThreads} chunks)</h3>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Total chunks</span><span className="sb-kv-v">{totalThreads}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Completed</span><span className="sb-kv-v">{completedThreads}</span></div>
-        {errorThreads > 0 && (
-          <div className="sb-kv"><span className="sb-kv-k">Errors</span><span className="sb-kv-v" style={{ color: '#e74c3c' }}>{errorThreads}</span></div>
-        )}
-        <div className="sb-kv"><span className="sb-kv-k">Concurrency</span><span className="sb-kv-v">3 parallel STT calls (semaphore)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Model</span><span className="sb-kv-v">{audio.transcriptionModel}</span></div>
-      </div>
-
-      {/* Per-thread detail */}
-      {chunkThreads.length > 0 && (
-        <>
-          <h3 className="sb-sub-heading">Per-Chunk Results</h3>
-          <div className="sb-ad-list">
+        {/* Per-thread detail cards */}
+        {chunkThreads.length > 0 && (
+          <div className="sb-chunk-grid">
             {chunkThreads.map(thread => {
-              const transcribeStep = thread.steps.find(s => s.id.endsWith('-transcribe'));
-              const classifyStep = thread.steps.find(s => s.id.endsWith('-classify'));
-              const tMeta = resolveStepMeta(transcribeStep?.meta);
-              const cMeta = resolveStepMeta(classifyStep?.meta);
-              const statusIcon = thread.status === 'complete' ? '[OK]' :
-                                  thread.status === 'error' ? '[ERR]' :
-                                  thread.status === 'running' ? '[...]' : '[--]';
-              return (
-                <div key={thread.id} className="sb-ad-card">
-                  <div className="sb-ad-card-header">
-                    <span className="sb-ad-badge" style={{
-                      background: thread.status === 'complete' ? '#27ae60' :
+              const statusColor = thread.status === 'complete' ? '#2ecc71' :
                                   thread.status === 'error' ? '#e74c3c' :
-                                  thread.status === 'running' ? '#f39c12' : '#7f8c8d',
-                    }}>{statusIcon}</span>
-                    <span className="sb-ad-lines">{thread.label}</span>
+                                  thread.status === 'running' ? '#3498db' : '#666';
+              return (
+                <div key={thread.id} className={`sb-chunk-card sb-chunk-${thread.status}`}>
+                  <div className="sb-chunk-card-header">
+                    <span className="sb-chunk-dot" style={{ background: statusColor }} />
+                    <span className="sb-chunk-label">{thread.label}</span>
                   </div>
-                  <div className="sb-qa-math" style={{ marginTop: '0.5rem' }}>
-                    <div className="sb-qa-row">
-                      <span className="sb-qa-label">Transcribe (Step 5)</span>
-                      <span className="sb-qa-val">
-                        {transcribeStep?.status === 'complete' ? 'Done' :
-                         transcribeStep?.status === 'active' ? 'Running...' :
-                         transcribeStep?.status === 'error' ? `Error: ${tMeta.error || tMeta.message}` : 'Pending'}
-                        {tMeta.message && transcribeStep?.status === 'complete' && ` — ${tMeta.message}`}
-                      </span>
-                    </div>
-                    <div className="sb-qa-row">
-                      <span className="sb-qa-label">Classify (Step 6)</span>
-                      <span className="sb-qa-val">
-                        {classifyStep?.status === 'complete' ? 'Done' :
-                         classifyStep?.status === 'active' ? 'Running...' :
-                         classifyStep?.status === 'error' ? `Error: ${cMeta.error || cMeta.message}` : 'Pending'}
-                        {cMeta.message && classifyStep?.status === 'complete' && ` — ${cMeta.message}`}
-                      </span>
-                    </div>
+                  <div className="sb-chunk-steps">
+                    {thread.steps.map(s => {
+                      const sMeta = resolveStepMeta(s.meta);
+                      return (
+                        <div key={s.id} className="sb-chunk-step-row">
+                          <span className={`sb-chunk-step-dot sb-csd-${s.status}`} />
+                          <span className="sb-chunk-step-name">{s.label}</span>
+                          {s.status === 'active' && sMeta.message && (
+                            <span className="sb-chunk-step-msg">{sMeta.message}</span>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
-                  {thread.error && (
-                    <div className="sb-qa-alert" style={{ marginTop: '4px' }}>
-                      {thread.error}
-                    </div>
-                  )}
+                  {thread.error && <div className="sb-chunk-error">{thread.error}</div>}
                 </div>
               );
             })}
           </div>
-        </>
-      )}
+        )}
 
-      {/* Aggregated transcript quality (same as old StepTranscribeChunks content) */}
-      <h3 className="sb-sub-heading">Aggregated Transcript</h3>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Source</span><span className="sb-kv-v">{isAudioSource ? 'Audio transcription (STT)' : result.transcriptSource || 'html'}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Whisper segments</span><span className="sb-kv-v">{audio.segmentCount}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Sentences</span><span className="sb-kv-v">{lines.length}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{totalWords.toLocaleString()}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Speech rate</span><span className="sb-kv-v">{dur > 0 ? Math.round(totalWords / (dur / 60)) : 0} words/min</span></div>
-      </div>
-
-      {validation && (
-        validation.isValid ? (
-          <div className="sb-qa-ok">
-            Transcript validation passed: {validation.reason}
-          </div>
-        ) : (
-          <div className="sb-qa-alert">
-            Transcript validation failed: {validation.reason}
-          </div>
-        )
-      )}
-
-      {isAudioSource ? (
-        <div className="sb-qa-ok">
-          Timestamped transcript ready. {lines.length} sentences covering {formatTimestamp(dur)}.
-          Per-chunk ad anchors forwarded to Step 7 for boundary refinement.
-        </div>
-      ) : (
-        <div className="sb-qa-alert">
-          Audio transcription did not produce the final transcript. Source used: {result.transcriptSource}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function StepTranscribeChunks({ result }: { result: SandboxResult }) {
-  const audio = result.audioDetails;
-  const isAudioSource = result.transcriptSource === 'audio-transcription' || result.transcriptSource === 'audio-transcription-chunked';
-  const { lines } = result.transcript;
-  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
-  const dur = result.episode.durationSec;
-  const validation = result.validation;
-
-  const avgWordsPerLine = lines.length > 0 ? Math.round(totalWords / lines.length) : 0;
-  const speakers = [...new Set(lines.filter(l => l.speaker).map(l => l.speaker))];
-  const wordsPerMinute = dur > 0 ? Math.round(totalWords / (dur / 60)) : 0;
-  const wordCounts = lines.map(l => l.wordCount);
-  const maxWordsLine = wordCounts.length > 0 ? Math.max(...wordCounts) : 0;
-  const minWordsLine = wordCounts.length > 0 ? Math.min(...wordCounts) : 0;
-
-  if (!audio || !audio.available) {
-    return (
-      <div className="sb-step-body">
-        <div className="sb-qa-alert">
-          Audio transcription skipped — no audio URL available.
-        </div>
-        <div className="sb-qa-callout">
-          Transcript was obtained from: <strong>{result.transcriptSource || 'html'}</strong>
-        </div>
-      </div>
-    );
-  }
-
-  if (audio.error) {
-    return (
-      <div className="sb-step-body">
-        <div className="sb-qa-alert">
-          Audio transcription failed: {audio.error}
-        </div>
-        <div className="sb-qa-callout">
-          Fell back to text transcript source: <strong>{result.transcriptSource || 'html'}</strong>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        Each audio chunk is sent to <strong>OpenAI {audio.transcriptionModel}</strong> for
-        speech-to-text with <code>verbose_json</code> format. Large segments are then split
-        into individual sentences. The output is a timestamped transcript for Step 6.
-      </div>
-
-      <h3 className="sb-sub-heading">Transcription Details</h3>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Model</span><span className="sb-kv-v">{audio.transcriptionModel}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Response format</span><span className="sb-kv-v">verbose_json (segment timestamps)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Whisper segments</span><span className="sb-kv-v">{audio.segmentCount}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Audio duration</span><span className="sb-kv-v">{audio.audioDurationSec > 0 ? `${formatTimestamp(audio.audioDurationSec)} (${audio.audioDurationSec.toFixed(1)}s)` : '(not reported)'}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Transcript source</span><span className="sb-kv-v">{isAudioSource ? 'Audio transcription (STT)' : result.transcriptSource || 'html'}</span></div>
-      </div>
-
-      <h3 className="sb-sub-heading">Transcript Quality</h3>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Sentences</span><span className="sb-kv-v">{lines.length} ({audio.segmentCount} Whisper segments → {lines.length} sentences after splitting)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{totalWords.toLocaleString()}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Avg words/sentence</span><span className="sb-kv-v">{avgWordsPerLine}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Min / Max words</span><span className="sb-kv-v">{minWordsLine} / {maxWordsLine}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Speech rate</span><span className="sb-kv-v">{wordsPerMinute} words/min (expected ~155 wpm)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Speakers detected</span><span className="sb-kv-v">{speakers.length > 0 ? speakers.join(', ') : '(none — typical for STT)'}</span></div>
-      </div>
-
-      {validation && (
-        validation.isValid ? (
-          <div className="sb-qa-ok">
-            Transcript validation passed: {validation.reason}
-          </div>
-        ) : (
-          <div className="sb-qa-alert">
-            Transcript validation failed: {validation.reason}
-          </div>
-        )
-      )}
-
-      {isAudioSource ? (
-        <div className="sb-qa-ok">
-          Timestamped transcript ready. {lines.length} sentences covering {formatTimestamp(dur)}.
-        </div>
-      ) : (
-        <div className="sb-qa-alert">
-          Audio transcription did not produce the final transcript. Source used: {result.transcriptSource}
-        </div>
-      )}
-
-      <h3 className="sb-sub-heading">Full Transcript ({lines.length} sentences)</h3>
-      <div className="sb-qa-callout">
-        This is the exact input Step 6 receives. Each sentence has a timestamp and word count.
-      </div>
-      <div className="sb-parsed-lines">
-        {lines.map(l => {
-          const approxTime = dur > 0 && totalWords > 0
-            ? (l.cumulativeWords / totalWords) * dur
-            : 0;
-          return (
-            <div key={l.lineNum} className="sb-parsed-line">
-              <span className="sb-pl-time">{formatTimestamp(approxTime)}</span>
-              <span className="sb-pl-num">[{l.lineNum}]</span>
-              <span className="sb-pl-text">
-                {l.speaker && <strong>{l.speaker}: </strong>}
-                {l.text}
-              </span>
-              <span className="sb-pl-wc">{l.wordCount}w</span>
+        {/* Aggregated transcript */}
+        {result && totalThreads > 0 && completedThreads === totalThreads && (
+          <div style={{ marginTop: '12px' }}>
+            <h4 className="sb-detail-subtitle">Aggregated Transcript</h4>
+            <div className="sb-kv-grid">
+              <div className="sb-kv"><span className="sb-kv-k">Source</span><span className="sb-kv-v">{isAudioSource ? 'Audio transcription (STT)' : result.transcriptSource || 'html'}</span></div>
+              <div className="sb-kv"><span className="sb-kv-k">Whisper segments</span><span className="sb-kv-v">{audio.segmentCount}</span></div>
+              <div className="sb-kv"><span className="sb-kv-k">Sentences</span><span className="sb-kv-v">{lines.length}</span></div>
+              <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{totalWords.toLocaleString()}</span></div>
+              <div className="sb-kv"><span className="sb-kv-k">Speech rate</span><span className="sb-kv-v">{dur > 0 ? Math.round(totalWords / (dur / 60)) : 0} wpm</span></div>
             </div>
-          );
-        })}
-      </div>
-    </div>
+            {result.validation && (
+              result.validation.isValid
+                ? <div className="sb-qa-ok">Validation passed: {result.validation.reason}</div>
+                : <div className="sb-qa-alert">Validation failed: {result.validation.reason}</div>
+            )}
+          </div>
+        )}
+      </DetailSection>
+    </>
   );
 }
 
-// StepRefineAdBoundaries and StepBuildSkipMap removed — refine + emit now run per-chunk
+function DetailFetchHtmlTranscript({ result, pipelineStep }: { result: SandboxResult | null; pipelineStep?: FlowProgressStep }) {
+  const meta = resolveStepMeta(pipelineStep?.meta);
 
-function StepFetchHtmlTranscript({ result }: { result: SandboxResult }) {
+  if (!result) {
+    return (
+      <>
+        <DetailSection title="INPUT"><div className="sb-qa-callout">Transcript URL from episode metadata</div></DetailSection>
+        <DetailSection title="CONFIG">
+          <div className="sb-kv-grid">
+            <div className="sb-kv"><span className="sb-kv-k">Endpoint</span><span className="sb-kv-v">/api/transcript</span></div>
+            <div className="sb-kv"><span className="sb-kv-k">Timeout</span><span className="sb-kv-v">15000ms</span></div>
+          </div>
+        </DetailSection>
+        <DetailSection title="OUTPUT">
+          {meta.message && <div className="sb-qa-ok">{meta.message}</div>}
+          {meta.error && <div className="sb-qa-alert">{meta.error}</div>}
+          {!meta.message && !meta.error && <div className="sb-qa-callout">Waiting...</div>}
+        </DetailSection>
+      </>
+    );
+  }
+
   const { rawHtml, transcript, qa } = result;
   const source = result.transcriptSource || 'html';
   const isAudioSource = source === 'audio-transcription' || source === 'audio-transcription-chunked';
   const sourceLabels: Record<string, string> = {
     'audio-transcription': 'Audio Transcription (speech-to-text)',
-    'audio-transcription-chunked': 'Audio Transcription (chunked, speech-to-text)',
+    'audio-transcription-chunked': 'Audio Transcription (chunked)',
     'srt': 'SRT subtitle file',
     'vtt': 'VTT subtitle file',
     'json': 'JSON transcript',
     'html': 'HTML page scraping',
     'fallback': 'Fallback (description only)',
   };
-
   const { lines } = transcript;
   const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
   const dur = result.episode.durationSec;
 
   return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        Runs in <strong>parallel</strong> with the audio pipeline (steps 3-7).
-        {isAudioSource
-          ? ' Since audio transcription succeeded, this HTML transcript serves as a cross-reference for validation in step 9.'
-          : ' This is the primary transcript source for this episode.'}
-      </div>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Source</span><span className="sb-kv-v">{sourceLabels[source] || source}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Content size</span><span className="sb-kv-v">{(rawHtml.length / 1024).toFixed(1)} KB ({rawHtml.length.toLocaleString()} chars)</span></div>
-        {source === 'html' && (
-          <div className="sb-kv"><span className="sb-kv-k">&lt;p&gt; tags found</span><span className="sb-kv-v">{rawHtml.pTagCount}</span></div>
-        )}
-        <div className="sb-kv"><span className="sb-kv-k">Lines parsed</span><span className="sb-kv-v">{lines.length}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{totalWords.toLocaleString()}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Speakers detected</span><span className="sb-kv-v">{new Set(lines.filter(l => l.speaker).map(l => l.speaker)).size}</span></div>
-      </div>
+    <>
+      <DetailSection title="INPUT">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Transcript URL</span><span className="sb-kv-v sb-kv-url">{result.episode.transcriptUrl || '(none)'}</span></div>
+        </div>
+        <div className="sb-qa-callout" style={{ marginTop: '8px' }}>
+          Runs in <strong>parallel</strong> with the audio pipeline.
+          {isAudioSource
+            ? ' HTML transcript serves as cross-reference for validation.'
+            : ' This is the primary transcript source.'}
+        </div>
+      </DetailSection>
+      <DetailSection title="CONFIG">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Endpoint</span><span className="sb-kv-v">/api/transcript</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Method</span><span className="sb-kv-v">GET</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Timeout</span><span className="sb-kv-v">15000ms</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Max attempts</span><span className="sb-kv-v">2</span></div>
+        </div>
+      </DetailSection>
+      <DetailSection title="OUTPUT">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Source</span><span className="sb-kv-v">{sourceLabels[source] || source}</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Content size</span><span className="sb-kv-v">{(rawHtml.length / 1024).toFixed(1)} KB</span></div>
+          {source === 'html' && (
+            <div className="sb-kv"><span className="sb-kv-k">&lt;p&gt; tags</span><span className="sb-kv-v">{rawHtml.pTagCount}</span></div>
+          )}
+          <div className="sb-kv"><span className="sb-kv-k">Lines parsed</span><span className="sb-kv-v">{lines.length}</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{totalWords.toLocaleString()}</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Speakers</span><span className="sb-kv-v">{new Set(lines.filter(l => l.speaker).map(l => l.speaker)).size}</span></div>
+        </div>
 
-      {source === 'html' && rawHtml.pTagCount === 0 && (
-        <div className="sb-qa-alert">
-          Zero &lt;p&gt; tags found. The transcript HTML may have changed structure,
-          or NPR may be blocking the request.
+        {/* Duration vs Speech Math */}
+        <h4 className="sb-detail-subtitle" style={{ marginTop: '12px' }}>Duration vs Speech</h4>
+        <div className="sb-qa-math">
+          <div className="sb-qa-row">
+            <span className="sb-qa-label">Audio duration</span>
+            <span className="sb-qa-val">{formatTime(qa.audioDurationSec)} ({qa.audioDurationSec}s)</span>
+          </div>
+          <div className="sb-qa-row">
+            <span className="sb-qa-label">Transcript words</span>
+            <span className="sb-qa-val">{qa.transcriptWords.toLocaleString()}</span>
+          </div>
+          <div className="sb-qa-row">
+            <span className="sb-qa-label">Expected speech @ {qa.speechRateWpm} wpm</span>
+            <span className="sb-qa-val">{formatTime(qa.expectedSpeechSec)}</span>
+          </div>
+          <div className="sb-qa-row sb-qa-highlight">
+            <span className="sb-qa-label">Implied ad time</span>
+            <span className="sb-qa-val">{formatTime(qa.impliedAdTimeSec)} ({qa.impliedAdTimeSec}s)</span>
+          </div>
         </div>
-      )}
 
-      <h3 className="sb-sub-heading">Duration vs Speech Math</h3>
-      <div className="sb-qa-math">
-        <div className="sb-qa-row">
-          <span className="sb-qa-label">Audio duration</span>
-          <span className="sb-qa-val">{formatTime(qa.audioDurationSec)} ({qa.audioDurationSec}s)</span>
+        {/* Parsed lines (scrollable) */}
+        <h4 className="sb-detail-subtitle" style={{ marginTop: '12px' }}>Parsed Lines ({lines.length})</h4>
+        <div className="sb-parsed-lines">
+          {lines.map(l => {
+            const approxTime = dur > 0 && totalWords > 0
+              ? (l.cumulativeWords / totalWords) * dur
+              : 0;
+            return (
+              <div key={l.lineNum} className="sb-parsed-line">
+                <span className="sb-pl-time">{formatTime(approxTime)}</span>
+                <span className="sb-pl-num">[{l.lineNum}]</span>
+                <span className="sb-pl-text">
+                  {l.speaker && <strong>{l.speaker}: </strong>}
+                  {l.text}
+                </span>
+                <span className="sb-pl-wc">{l.wordCount}w</span>
+              </div>
+            );
+          })}
         </div>
-        <div className="sb-qa-row">
-          <span className="sb-qa-label">Transcript words</span>
-          <span className="sb-qa-val">{qa.transcriptWords.toLocaleString()}</span>
-        </div>
-        <div className="sb-qa-row">
-          <span className="sb-qa-label">Expected speech @ {qa.speechRateWpm} wpm</span>
-          <span className="sb-qa-val">{formatTime(qa.expectedSpeechSec)} ({qa.expectedSpeechSec}s)</span>
-        </div>
-        <div className="sb-qa-row sb-qa-highlight">
-          <span className="sb-qa-label">Unaccounted time (implied ads)</span>
-          <span className="sb-qa-val">{formatTime(qa.impliedAdTimeSec)} ({qa.impliedAdTimeSec}s)</span>
-        </div>
-      </div>
-
-      <h3 className="sb-sub-heading">Parsed Lines</h3>
-      <div className="sb-parsed-lines">
-        {lines.map(l => {
-          const approxTime = dur > 0 && totalWords > 0
-            ? (l.cumulativeWords / totalWords) * dur
-            : 0;
-          return (
-            <div key={l.lineNum} className="sb-parsed-line">
-              <span className="sb-pl-time">{formatTime(approxTime)}</span>
-              <span className="sb-pl-num">[{l.lineNum}]</span>
-              <span className="sb-pl-text">
-                {l.speaker && <strong>{l.speaker}: </strong>}
-                {l.text}
-              </span>
-              <span className="sb-pl-wc">{l.wordCount}w</span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
+      </DetailSection>
+    </>
   );
 }
 
-function StepFinalizePlayback({ result }: { result: SandboxResult }) {
-  const { summary } = result;
-  return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        Waits for <strong>both</strong> the audio pipeline (steps 3-7) and the HTML transcript
-        (step 8). Cross-references audio-detected ads against editorial transcript, validates
-        skip map, and produces episode summary + final playback config.
-      </div>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Total ad blocks</span><span className="sb-kv-v">{summary.totalAdBlocks}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Content time</span><span className="sb-kv-v">{summary.contentTimeSec}s</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Strategy</span><span className="sb-kv-v">{summary.strategy}</span></div>
-      </div>
+function DetailFinalizePlayback({ result, pipelineStep }: { result: SandboxResult | null; pipelineStep?: FlowProgressStep }) {
+  const meta = resolveStepMeta(pipelineStep?.meta);
 
-      <Timeline result={result} />
+  if (!result) {
+    return (
+      <>
+        <DetailSection title="INPUT"><div className="sb-qa-callout">Merged chunk results + HTML transcript</div></DetailSection>
+        <DetailSection title="CONFIG">
+          <div className="sb-kv-grid">
+            <div className="sb-kv"><span className="sb-kv-k">Timeout</span><span className="sb-kv-v">30000ms</span></div>
+          </div>
+        </DetailSection>
+        <DetailSection title="OUTPUT">
+          {meta.message && <div className="sb-qa-ok">{meta.message}</div>}
+          {meta.error && <div className="sb-qa-alert">{meta.error}</div>}
+          {!meta.message && !meta.error && <div className="sb-qa-callout">Waiting...</div>}
+        </DetailSection>
+      </>
+    );
+  }
 
-      <h3 className="sb-sub-heading">Skip Map (Player JSON)</h3>
-      <div className="sb-qa-callout">
-        This JSON is what the audio player uses to auto-skip ad segments.
-        Each entry defines a time range, confidence score, and reason.
-      </div>
-      {result.skipMap.length === 0 && (
-        <div className="sb-qa-alert">
-          Empty skip map — the player will not skip anything for this episode.
-        </div>
-      )}
-      <pre className="sb-code-block sb-json-text">
-        {JSON.stringify(result.skipMap, null, 2)}
-      </pre>
-    </div>
-  );
-}
-
-// ─── Shared sub-components ───────────────────────────────────────────────────
-
-function Timeline({ result }: { result: SandboxResult }) {
+  const { summary, adBlocks } = result;
   const dur = result.episode.durationSec;
-  if (!dur) return null;
 
+  // Timeline
   const W = 80;
   const cells = Array(W).fill(false);
-  for (const b of result.adBlocks) {
+  for (const b of adBlocks) {
     const s = Math.floor((b.startTimeSec / dur) * W);
     const e = Math.min(W - 1, Math.floor((b.endTimeSec / dur) * W));
     for (let i = s; i <= e; i++) cells[i] = true;
   }
-
-  const totalAdSec = result.adBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
+  const totalAdSec = adBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
 
   return (
-    <div className="sb-timeline">
-      <div className="sb-timeline-labels">
-        <span>{formatTimestamp(0)}</span>
-        <span>{formatTimestamp(dur)}</span>
-      </div>
-      <div className="sb-timeline-bar">
-        {cells.map((isAd, i) => (
-          <div key={i} className={`sb-timeline-cell ${isAd ? 'ad' : ''}`} />
-        ))}
-      </div>
-      <div className="sb-timeline-legend">
-        <span><span className="sb-legend-dot content" /> content ({formatTimestamp(dur - totalAdSec)})</span>
-        <span><span className="sb-legend-dot ad" /> ad ({formatTimestamp(totalAdSec)})</span>
-      </div>
-    </div>
+    <>
+      <DetailSection title="INPUT">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Chunk ad segments</span><span className="sb-kv-v">{adBlocks.length} blocks</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">HTML transcript</span><span className="sb-kv-v">{result.transcript.lineCount} lines</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Audio duration</span><span className="sb-kv-v">{formatTime(dur)} ({dur}s)</span></div>
+        </div>
+      </DetailSection>
+      <DetailSection title="CONFIG">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Strategy</span><span className="sb-kv-v">{summary.strategy}</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Step type</span><span className="sb-kv-v">ai.summarize (LLM reconciliation)</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Timeout</span><span className="sb-kv-v">30000ms</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Max attempts</span><span className="sb-kv-v">2</span></div>
+        </div>
+      </DetailSection>
+      <DetailSection title="OUTPUT">
+        <div className="sb-kv-grid">
+          <div className="sb-kv"><span className="sb-kv-k">Ad blocks</span><span className="sb-kv-v">{summary.totalAdBlocks}</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Content time</span><span className="sb-kv-v">{summary.contentTimeSec}s</span></div>
+          <div className="sb-kv"><span className="sb-kv-k">Ad word %</span><span className="sb-kv-v">{summary.adWordPercent}%</span></div>
+        </div>
+
+        {/* Timeline visualization */}
+        {dur > 0 && (
+          <div className="sb-timeline">
+            <div className="sb-timeline-labels">
+              <span>{formatTimestamp(0)}</span>
+              <span>{formatTimestamp(dur)}</span>
+            </div>
+            <div className="sb-timeline-bar">
+              {cells.map((isAd, i) => (
+                <div key={i} className={`sb-timeline-cell ${isAd ? 'ad' : ''}`} />
+              ))}
+            </div>
+            <div className="sb-timeline-legend">
+              <span><span className="sb-legend-dot content" /> content ({formatTimestamp(dur - totalAdSec)})</span>
+              <span><span className="sb-legend-dot ad" /> ad ({formatTimestamp(totalAdSec)})</span>
+            </div>
+          </div>
+        )}
+
+        {/* Skip Map JSON */}
+        <h4 className="sb-detail-subtitle" style={{ marginTop: '12px' }}>Skip Map (Player JSON)</h4>
+        {result.skipMap.length === 0 ? (
+          <div className="sb-qa-alert">Empty skip map — player will not skip anything.</div>
+        ) : (
+          <pre className="sb-code-block sb-json-text">
+            {JSON.stringify(result.skipMap, null, 2)}
+          </pre>
+        )}
+      </DetailSection>
+    </>
   );
 }
 
-function TranscriptViewer({
-  lines,
-  adBlocks,
-  durationSec,
-}: {
-  lines: SandboxLine[];
-  adBlocks: SandboxAdBlock[];
-  durationSec: number;
-}) {
-  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+// ─── Step Tracker Pill ───────────────────────────────────────────────────────
 
-  const adLineSet = new Set<number>();
-  const adLineToBlock = new Map<number, SandboxAdBlock>();
-  for (const b of adBlocks) {
-    for (let i = b.startLine; i <= b.endLine; i++) {
-      adLineSet.add(i);
-      adLineToBlock.set(i, b);
-    }
-  }
-
-  let lastWasAd = false;
-  const elements: JSX.Element[] = [];
-
-  for (const l of lines) {
-    const isAd = adLineSet.has(l.lineNum);
-    const approxTime = durationSec > 0 && totalWords > 0
-      ? (l.cumulativeWords / totalWords) * durationSec
-      : 0;
-
-    if (isAd && !lastWasAd) {
-      const block = adLineToBlock.get(l.lineNum)!;
-      elements.push(
-        <div key={`ad-start-${l.lineNum}`} className="sb-ad-banner start">
-          AD BLOCK (sentences {block.startLine}–{block.endLine}){' '}
-          {formatTimestamp(block.startTimeSec)} – {formatTimestamp(block.endTimeSec)}
-          {' — '}{block.reason}
-        </div>
-      );
-    }
-
-    elements.push(
-      <div key={l.lineNum} className={`sb-line ${isAd ? 'is-ad' : ''}`}>
-        <span className="sb-line-time">{formatTimestamp(approxTime)}</span>
-        <span className="sb-line-num">{l.lineNum}</span>
-        {isAd && <span className="sb-line-ad-mark" />}
-        <span className="sb-line-text">
-          {l.speaker && <strong>{l.speaker}: </strong>}
-          {l.text}
-        </span>
-      </div>
-    );
-
-    if (lastWasAd && !isAd) {
-      elements.push(
-        <div key={`ad-end-${l.lineNum}`} className="sb-ad-banner end">
-          END AD BLOCK
-        </div>
-      );
-    }
-    lastWasAd = isAd;
-  }
-  if (lastWasAd) {
-    elements.push(
-      <div key="ad-end-final" className="sb-ad-banner end">
-        END AD BLOCK
-      </div>
-    );
-  }
-
-  return <div className="sb-transcript">{elements}</div>;
-}
-
-// ─── Collapsible step wrapper ────────────────────────────────────────────────
-
-function StepSection({ index, step, children, defaultOpen = false, stepStatus }: {
-  index: number;
+function TrackerPill({ step, index, status, isSelected, onClick, meta }: {
   step: StepDef;
-  children: React.ReactNode;
-  defaultOpen?: boolean;
-  stepStatus?: string;
+  index: number;
+  status: string;
+  isSelected: boolean;
+  onClick: () => void;
+  meta?: string;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
-
-  const statusBadge = stepStatus === 'error' ? 'sb-status-error' :
-                       stepStatus === 'skipped' ? 'sb-status-skipped' :
-                       stepStatus === 'complete' ? 'sb-status-ok' : '';
+  const statusDotClass = status === 'complete' ? 'sb-tracker-dot-ok' :
+                          status === 'error' ? 'sb-tracker-dot-error' :
+                          status === 'active' ? 'sb-tracker-dot-active' :
+                          status === 'skipped' ? 'sb-tracker-dot-skipped' : 'sb-tracker-dot-pending';
 
   return (
-    <section className={`sb-section ${open ? 'open' : 'collapsed'}`}>
-      <button className="sb-section-header" onClick={() => setOpen(o => !o)}>
-        <span className="sb-step-badge">Step {index + 1}</span>
-        <span className="sb-step-type">{step.type}</span>
-        {statusBadge && <span className={`sb-step-status-dot ${statusBadge}`} />}
-        <h2 className="sb-step-title">{step.label}</h2>
-        <span className="sb-section-toggle">{open ? '\u25B2' : '\u25BC'}</span>
-      </button>
-      <p className="sb-step-subtitle">{step.subtitle}</p>
-      {open && children}
-    </section>
+    <button
+      className={`sb-tracker-pill ${isSelected ? 'selected' : ''} sb-tracker-${status}`}
+      onClick={onClick}
+      title={`${step.label}: ${step.subtitle}`}
+    >
+      <span className={`sb-tracker-dot ${statusDotClass}`} />
+      <span className="sb-tracker-num">{index + 1}</span>
+      <span className="sb-tracker-label">{step.label}</span>
+      {meta && <span className="sb-tracker-meta">{meta}</span>}
+    </button>
   );
 }
 
@@ -877,6 +746,8 @@ export function SandboxPage({
   parallelConfig,
 }: Props) {
   const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
+  const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
 
   const handleCopyFeedback = useCallback(() => {
     const text = buildFeedbackText(result, pipelineSteps, pipelineStatus, episode, podcastName);
@@ -884,7 +755,6 @@ export function SandboxPage({
       setCopyState('copied');
       setTimeout(() => setCopyState('idle'), 2000);
     }).catch(() => {
-      // Fallback: open in a prompt
       const textarea = document.createElement('textarea');
       textarea.value = text;
       document.body.appendChild(textarea);
@@ -896,141 +766,198 @@ export function SandboxPage({
     });
   }, [result, pipelineSteps, pipelineStatus, episode, podcastName]);
 
-  // Map step statuses for status dots
+  // Build status map for all steps (including virtual chunk step)
   const stepStatusMap = useMemo(() => {
     const map: Record<string, string> = {};
     for (const s of pipelineSteps) {
       map[s.id] = s.status;
     }
+    // Virtual chunk processing step status
+    if (chunkThreads.some(t => t.status === 'error')) {
+      map['step_chunk_processing'] = 'error';
+    } else if (chunkThreads.length > 0 && chunkThreads.every(t => t.status === 'complete')) {
+      map['step_chunk_processing'] = 'complete';
+    } else if (chunkThreads.some(t => t.status === 'running')) {
+      map['step_chunk_processing'] = 'active';
+    } else if (chunkThreads.length > 0) {
+      map['step_chunk_processing'] = 'active';
+    } else {
+      map['step_chunk_processing'] = 'pending';
+    }
     return map;
-  }, [pipelineSteps]);
+  }, [pipelineSteps, chunkThreads]);
 
-  // Counts for header
-  const errorCount = pipelineSteps.filter(s => s.status === 'error').length;
-  const skippedCount = pipelineSteps.filter(s => s.status === 'skipped').length;
-  const completeCount = pipelineSteps.filter(s => s.status === 'complete').length;
+  // Meta text for each step
+  const stepMetaMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const s of pipelineSteps) {
+      const resolved = resolveStepMeta(s.meta);
+      map[s.id] = resolved.message || resolved.error || resolved.skipReason || '';
+    }
+    // Chunk processing meta
+    const completed = chunkThreads.filter(t => t.status === 'complete').length;
+    const total = chunkThreads.length;
+    if (total > 0) {
+      map['step_chunk_processing'] = `${completed}/${total} chunks`;
+    }
+    return map;
+  }, [pipelineSteps, chunkThreads]);
 
-  // Derive flow-level activity from the active step's label only.
-  // Per-step detail is in meta.message — bilko-flow renders that at the step level.
-  const activity = useMemo(() => {
-    const active = pipelineSteps.find(s => s.status === 'active');
-    if (!active) return undefined;
-    return `${active.label}...`;
-  }, [pipelineSteps]);
+  // Auto-select the first active step, or the last completed step
+  useEffect(() => {
+    if (selectedStep !== null) return; // user has already selected
+    const activeIdx = ALL_STEPS.findIndex(s => stepStatusMap[s.id] === 'active');
+    if (activeIdx !== -1) {
+      setSelectedStep(activeIdx);
+      return;
+    }
+    // Find last completed step
+    let lastComplete = -1;
+    for (let i = ALL_STEPS.length - 1; i >= 0; i--) {
+      if (stepStatusMap[ALL_STEPS[i].id] === 'complete') {
+        lastComplete = i;
+        break;
+      }
+    }
+    if (lastComplete !== -1) setSelectedStep(lastComplete);
+  }, [stepStatusMap]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Scroll detail panel into view when step changes
+  useEffect(() => {
+    if (selectedStep !== null && detailRef.current) {
+      detailRef.current.scrollTop = 0;
+    }
+  }, [selectedStep]);
 
   const isIdle = pipelineStatus === 'idle';
-  const isRunning = pipelineStatus === 'running';
+
+  // Find pipeline step by ID
+  const findPipelineStep = (id: string) => pipelineSteps.find(s => s.id === id);
+
+  // Render the detail panel for the selected step
+  const renderDetail = () => {
+    if (selectedStep === null) return null;
+    const step = ALL_STEPS[selectedStep];
+    if (!step) return null;
+
+    switch (step.id) {
+      case 'step_fetch_rss':
+        return <DetailFetchRss podcastName={podcastName} podcastId={podcastId} pipelineStep={findPipelineStep('step_fetch_rss')} />;
+      case 'step_parse_episodes':
+        return <DetailParseEpisodes result={result} pipelineStep={findPipelineStep('step_parse_episodes')} />;
+      case 'step_resolve_audio_stream':
+        return <DetailResolveAudio result={result} pipelineStep={findPipelineStep('step_resolve_audio_stream')} />;
+      case 'step_plan_chunks':
+        return <DetailPlanChunks result={result} pipelineStep={findPipelineStep('step_plan_chunks')} />;
+      case 'step_chunk_processing':
+        return <DetailChunkProcessing result={result} chunkThreads={chunkThreads} pipelineStep={findPipelineStep('step_plan_chunks')} />;
+      case 'step_fetch_html_transcript':
+        return <DetailFetchHtmlTranscript result={result} pipelineStep={findPipelineStep('step_fetch_html_transcript')} />;
+      case 'step_finalize_playback':
+        return <DetailFinalizePlayback result={result} pipelineStep={findPipelineStep('step_finalize_playback')} />;
+      default:
+        return <div className="sb-qa-callout">Unknown step: {step.id}</div>;
+    }
+  };
 
   return (
     <div className="sb-page">
+      {/* Header */}
       <header className="sb-header">
         <button className="sb-back" onClick={onBack}>Back</button>
         <div className="sb-header-center">
-          <h1 className="sb-title">Pipeline Debug Report</h1>
-          {episode && (
-            <span className="sb-header-ep">{episode.title}</span>
-          )}
+          <h1 className="sb-title">Pipeline Debug</h1>
+          {episode && <span className="sb-header-ep">{episode.title}</span>}
         </div>
         <button
           className={`sb-copy-feedback ${copyState === 'copied' ? 'copied' : ''}`}
           onClick={handleCopyFeedback}
-          title="Copy pipeline debug info for an agent or developer"
+          title="Copy pipeline debug info"
         >
           {copyState === 'copied' ? 'Copied!' : 'Copy Feedback'}
         </button>
       </header>
 
-      {/* Pipeline overview — always visible, same flow as main screen */}
-      {!isIdle && (
-        <div className="sb-flow-overview">
-          <FlowErrorBoundary>
-            <PipelineWaterfall
-              steps={pipelineSteps}
-              status={pipelineStatus}
-              parallelThreads={chunkThreads}
-              label="Ad Detection Pipeline"
-              activity={activity}
-            />
-          </FlowErrorBoundary>
-          <div className="sb-flow-stats">
-            <span className="sb-stat sb-stat-ok">{completeCount} done</span>
-            {errorCount > 0 && <span className="sb-stat sb-stat-error">{errorCount} error{errorCount > 1 ? 's' : ''}</span>}
-            {skippedCount > 0 && <span className="sb-stat sb-stat-skip">{skippedCount} skipped</span>}
-          </div>
-        </div>
-      )}
-
-      {/* Idle: no episode selected yet */}
+      {/* Idle state */}
       {isIdle && (
         <div className="sb-error-full">
           <div className="sb-error-icon">?</div>
-          <p>No pipeline running. Select an episode on the main screen to start the analysis.</p>
-          <button className="sb-retry-btn" onClick={onBack}>
-            Go Back
-          </button>
+          <p>No pipeline running. Select an episode on the main screen to start.</p>
+          <button className="sb-retry-btn" onClick={onBack}>Go Back</button>
         </div>
       )}
 
-      {/* Running: flow is in progress, show the live tracker only */}
-      {isRunning && !result && (
-        <div className="sb-running-notice">
-          <div className="sb-loading-spinner" />
-          <p>Pipeline is processing. Step details will appear here as they complete.</p>
-        </div>
-      )}
+      {/* Active / complete state */}
+      {!isIdle && (
+        <>
+          {/* Step Tracker (horizontal, scrollable) */}
+          <div className="sb-tracker">
+            <div className="sb-tracker-scroll">
+              {ALL_STEPS.map((step, i) => (
+                <TrackerPill
+                  key={step.id}
+                  step={step}
+                  index={i}
+                  status={stepStatusMap[step.id] || 'pending'}
+                  isSelected={selectedStep === i}
+                  onClick={() => setSelectedStep(selectedStep === i ? null : i)}
+                  meta={stepMetaMap[step.id]}
+                />
+              ))}
+            </div>
+            {/* Pipeline stats bar */}
+            <div className="sb-tracker-stats">
+              <span className="sb-stat sb-stat-ok">
+                {pipelineSteps.filter(s => s.status === 'complete').length} done
+              </span>
+              {pipelineSteps.some(s => s.status === 'error') && (
+                <span className="sb-stat sb-stat-error">
+                  {pipelineSteps.filter(s => s.status === 'error').length} error
+                </span>
+              )}
+              {pipelineSteps.some(s => s.status === 'active') && (
+                <span className="sb-stat sb-stat-running">running</span>
+              )}
+              <span className="sb-tracker-status-label">
+                {pipelineStatus === 'running' ? 'Pipeline running...' :
+                 pipelineStatus === 'complete' ? 'Pipeline complete' :
+                 pipelineStatus === 'error' ? 'Pipeline error' : ''}
+              </span>
+            </div>
+          </div>
 
-      {/* Error with no result */}
-      {pipelineStatus === 'error' && !result && (
-        <div className="sb-error-full">
-          <div className="sb-error-icon">!</div>
-          <p>Pipeline failed. Use "Copy Feedback" above to capture debug info for investigation.</p>
-          <button className="sb-retry-btn" onClick={onBack}>
-            Go Back
-          </button>
-        </div>
-      )}
+          {/* Detail panel — appears below tracker when a step is selected */}
+          {selectedStep !== null && (
+            <div className="sb-detail-panel" ref={detailRef}>
+              <div className="sb-detail-header">
+                <span className="sb-detail-step-badge">Step {selectedStep + 1}</span>
+                <span className="sb-detail-step-type">{ALL_STEPS[selectedStep].type}</span>
+                <h2 className="sb-detail-step-title">{ALL_STEPS[selectedStep].label}</h2>
+                <button className="sb-detail-close" onClick={() => setSelectedStep(null)}>Close</button>
+              </div>
+              <p className="sb-detail-step-subtitle">{ALL_STEPS[selectedStep].subtitle}</p>
+              <div className="sb-detail-body">
+                {renderDetail()}
+              </div>
+            </div>
+          )}
 
-      {/* Result available (complete or error with partial result) — show full debug report */}
-      {result && (
-        <div className="sb-report-scroll">
-          <StepSection index={0} step={STEPS[0]} stepStatus={stepStatusMap['step_fetch_rss']}>
-            <StepFetchRss podcastName={podcastName} podcastId={podcastId} />
-          </StepSection>
-
-          <StepSection index={1} step={STEPS[1]} stepStatus={stepStatusMap['step_parse_episodes']}>
-            <StepParseEpisodes result={result} />
-          </StepSection>
-
-          <StepSection index={2} step={STEPS[2]} stepStatus={stepStatusMap['step_resolve_audio_stream']}>
-            <StepResolveAudioStream result={result} />
-          </StepSection>
-
-          <StepSection index={3} step={STEPS[3]} stepStatus={stepStatusMap['step_plan_chunks']}>
-            <StepStreamAudioChunks result={result} />
-          </StepSection>
-
-          {/* Per-chunk parallel processing (fork section — no join) */}
-          <StepSection
-            index={4}
-            step={{ id: 'step_chunk_processing', label: 'Per-Chunk Processing (Parallel)', subtitle: 'Each chunk: Fetch → Transcribe → Classify → Refine → Emit skip ranges', type: 'ai.speech-to-text' }}
-            stepStatus={
-              chunkThreads.some(t => t.status === 'error') ? 'error'
-              : chunkThreads.length > 0 && chunkThreads.every(t => t.status === 'complete') ? 'complete'
-              : chunkThreads.some(t => t.status === 'running') ? 'active'
-              : chunkThreads.length > 0 ? 'active' : 'pending'}
-            defaultOpen={true}
-          >
-            <StepPerChunkProcessing result={result} chunkThreads={chunkThreads} />
-          </StepSection>
-
-          <StepSection index={5} step={STEPS[4]} stepStatus={stepStatusMap['step_fetch_html_transcript']}>
-            <StepFetchHtmlTranscript result={result} />
-          </StepSection>
-
-          <StepSection index={6} step={STEPS[5]} stepStatus={stepStatusMap['step_finalize_playback']} defaultOpen={true}>
-            <StepFinalizePlayback result={result} />
-          </StepSection>
-        </div>
+          {/* When no step is selected, show a hint or the pipeline waterfall */}
+          {selectedStep === null && (
+            <div className="sb-no-selection">
+              <FlowErrorBoundary>
+                <PipelineWaterfall
+                  steps={pipelineSteps}
+                  status={pipelineStatus}
+                  parallelThreads={chunkThreads}
+                  label="Ad Detection Pipeline"
+                  activity={pipelineSteps.find(s => s.status === 'active')?.label}
+                />
+              </FlowErrorBoundary>
+              <p className="sb-no-selection-hint">Click a step above to inspect its INPUT, CONFIG, and OUTPUT.</p>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

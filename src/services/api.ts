@@ -303,11 +303,12 @@ export async function sandboxAnalyzeStream(
   podcastTranscripts?: PodcastTranscript[],
   audioUrl?: string,
   onPartialAds?: (event: PartialAdsEvent) => void,
+  testMode?: boolean,
 ): Promise<SandboxResult> {
   const res = await fetch(`${BASE}/sandbox/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ transcriptUrl, episodeTitle, durationSec, podcastTranscripts, audioUrl }),
+    body: JSON.stringify({ transcriptUrl, episodeTitle, durationSec, podcastTranscripts, audioUrl, testMode }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Unknown error' }));

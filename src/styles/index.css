@@ -133,6 +133,13 @@ button {
   color: var(--fg);
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .header-sandbox-link {
   font-size: 12px;
   font-weight: 600;
@@ -147,6 +154,43 @@ button {
   opacity: 0.25;
   cursor: not-allowed;
   pointer-events: auto;
+}
+
+/* ── Test mode toggle ── */
+.test-mode-toggle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  transition: all 0.15s;
+  border: 1px solid transparent;
+}
+.test-mode-toggle.on {
+  background: rgba(243, 156, 18, 0.15);
+  border-color: rgba(243, 156, 18, 0.4);
+  color: #f39c12;
+}
+.test-mode-toggle.off {
+  background: var(--surface);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: var(--fg3);
+}
+.test-mode-toggle:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+.test-mode-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+.test-mode-hint {
+  font-size: 9px;
+  font-weight: 500;
+  opacity: 0.7;
 }
 
 /* ── Scrollable Slider (reusable arrow wrapper) ── */
@@ -1888,4 +1932,366 @@ button {
   text-align: center;
   color: var(--fg2);
   font-size: 13px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* ── Sandbox v2: Step Tracker + Detail Panel layout                       ── */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Tracker bar (horizontal, scrollable pills) ── */
+.sb-tracker {
+  flex-shrink: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+  padding: 10px 12px 6px;
+}
+
+.sb-tracker-scroll {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-bottom: 6px;
+}
+.sb-tracker-scroll::-webkit-scrollbar { display: none; }
+
+.sb-tracker-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--surface);
+  color: var(--fg3);
+  border: 1px solid transparent;
+  transition: all 0.15s;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.sb-tracker-pill:hover {
+  background: var(--surface-hover);
+  color: var(--fg2);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+.sb-tracker-pill.selected {
+  background: rgba(129, 140, 248, 0.15);
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.sb-tracker-pill.sb-tracker-complete {
+  color: var(--fg2);
+}
+.sb-tracker-pill.sb-tracker-active {
+  border-color: rgba(52, 152, 219, 0.5);
+}
+.sb-tracker-pill.sb-tracker-error {
+  border-color: rgba(231, 76, 60, 0.5);
+}
+
+.sb-tracker-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sb-tracker-dot-ok { background: #2ecc71; }
+.sb-tracker-dot-error { background: #e74c3c; }
+.sb-tracker-dot-active {
+  background: #3498db;
+  animation: sb-pulse 1.2s ease-in-out infinite;
+}
+.sb-tracker-dot-skipped { background: #666; }
+.sb-tracker-dot-pending { background: rgba(255, 255, 255, 0.15); }
+
+@keyframes sb-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.sb-tracker-num {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+.sb-tracker-pill.selected .sb-tracker-num {
+  background: rgba(129, 140, 248, 0.3);
+  color: var(--accent);
+}
+
+.sb-tracker-label {
+  letter-spacing: -0.01em;
+}
+
+.sb-tracker-meta {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--fg3);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sb-tracker-stats {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding-top: 4px;
+  font-size: 11px;
+}
+
+.sb-stat-running {
+  background: rgba(52, 152, 219, 0.12);
+  color: #3498db;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.sb-tracker-status-label {
+  font-size: 11px;
+  color: var(--fg3);
+  margin-left: auto;
+  font-weight: 500;
+}
+
+/* ── Detail panel (below tracker, scrollable) ── */
+.sb-detail-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 20px 40px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.1) transparent;
+}
+
+.sb-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 0 8px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 5;
+}
+
+.sb-detail-step-badge {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.sb-detail-step-type {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.sb-detail-step-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--fg);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sb-detail-close {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg3);
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.sb-detail-close:hover {
+  background: var(--surface-hover);
+  color: var(--fg2);
+}
+
+.sb-detail-step-subtitle {
+  font-size: 13px;
+  color: var(--fg3);
+  font-weight: 500;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 0;
+}
+
+.sb-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ── Detail sections (INPUT / CONFIG / OUTPUT) ── */
+.sb-detail-section {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 16px 0;
+}
+.sb-detail-section:last-child {
+  border-bottom: none;
+}
+
+.sb-detail-section-title {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sb-detail-section-title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: rgba(129, 140, 248, 0.15);
+}
+
+.sb-detail-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sb-detail-subtitle {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--fg2);
+  margin: 0;
+}
+
+/* ── No-selection state (shows waterfall + hint) ── */
+.sb-no-selection {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.sb-no-selection-hint {
+  text-align: center;
+  font-size: 13px;
+  color: var(--fg3);
+  padding: 24px 0;
+  font-weight: 500;
+}
+
+/* ── Chunk processing grid (in detail panel) ── */
+.sb-chunk-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.sb-chunk-card {
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: border-color 0.15s;
+}
+.sb-chunk-card.sb-chunk-complete {
+  border-color: rgba(46, 204, 113, 0.25);
+}
+.sb-chunk-card.sb-chunk-running {
+  border-color: rgba(52, 152, 219, 0.4);
+}
+.sb-chunk-card.sb-chunk-error {
+  border-color: rgba(231, 76, 60, 0.4);
+}
+
+.sb-chunk-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.sb-chunk-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.sb-chunk-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--fg2);
+}
+
+.sb-chunk-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sb-chunk-step-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+}
+
+.sb-chunk-step-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sb-csd-complete { background: #2ecc71; }
+.sb-csd-active { background: #3498db; animation: sb-pulse 1.2s ease-in-out infinite; }
+.sb-csd-error { background: #e74c3c; }
+.sb-csd-pending { background: rgba(255, 255, 255, 0.15); }
+.sb-csd-skipped { background: #666; }
+
+.sb-chunk-step-name {
+  color: var(--fg3);
+  font-weight: 500;
+}
+
+.sb-chunk-step-msg {
+  color: var(--fg3);
+  font-size: 9px;
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 80px;
+}
+
+.sb-chunk-error {
+  font-size: 10px;
+  color: #f87171;
+  margin-top: 4px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: rgba(239, 68, 68, 0.1);
 }
