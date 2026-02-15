@@ -266,7 +266,7 @@ button {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--fg3);
-  padding: 0 2px;
+  padding: 0;
 }
 
 .ep-day-tiles {
@@ -285,8 +285,7 @@ button {
   text-align: left;
   border-radius: 16px;
   background: var(--surface);
-  transition: background 0.15s, border-color 0.15s;
-  border: 1.5px solid transparent;
+  transition: background 0.15s, box-shadow 0.15s;
   flex-shrink: 0;
   cursor: pointer;
 }
@@ -299,7 +298,7 @@ button {
 
 .ep-tile.on {
   background: var(--surface-hover);
-  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 
 .ep-tile-meta {
