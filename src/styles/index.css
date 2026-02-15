@@ -1593,3 +1593,16 @@ button {
 .sb-status-ok { background: #2ecc71; }
 .sb-status-error { background: #e74c3c; }
 .sb-status-skipped { background: #666; }
+
+/* ── Running notice (pipeline in progress) ── */
+.sb-running-notice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--fg2);
+  font-size: 13px;
+}
