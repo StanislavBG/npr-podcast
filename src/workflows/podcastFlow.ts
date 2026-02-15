@@ -318,7 +318,7 @@ const CHUNK_STEP_META: Record<string, { label: string; type: string }> = {
  * Used to split the FlowProgress into two sections so bilko-flow renders
  * the parallel threads at the correct visual position.
  */
-const FORK_INDEX = 5; // After step_refine_ad_boundaries (index 4), before step_build_skip_map (index 5)
+const FORK_INDEX = 4; // After step_start_audio_streaming (index 3), before step_refine_ad_boundaries (index 4)
 
 /** Export step order and metadata for consumers */
 export { STEP_ORDER, STEP_META, CHUNK_STEP_META, FORK_INDEX };

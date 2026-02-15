@@ -402,9 +402,9 @@ export default function App() {
           {showFlow && (
             <div className="flow-widget-container">
               <FlowErrorBoundary>
-                {/* Pre-fork: Steps 1-4 + parallel chunk threads */}
+                {/* Pre-fork: Steps 1-4 + parallel chunk threads (expanded: supports parallelThreads) */}
                 <FlowProgress
-                  mode="auto"
+                  mode="expanded"
                   steps={preForkSteps}
                   status={preForkStatus}
                   activity={activity}
@@ -414,7 +414,7 @@ export default function App() {
                   parallelConfig={parallelConfig}
                   radius={5}
                 />
-                {/* Post-join: Steps 7-9 (after all chunks complete) */}
+                {/* Post-join: Refine → Build → HTML → Finalize */}
                 {postJoinStatus !== 'idle' && (
                   <FlowProgress
                     mode="compact"

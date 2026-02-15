@@ -1191,7 +1191,7 @@ export function SandboxPage({
       {!isIdle && (
         <div className="sb-flow-overview">
           <FlowErrorBoundary>
-            {/* Pre-fork: Steps 1-4 + Refine + parallel chunk threads */}
+            {/* Pre-fork: Steps 1-4 + parallel chunk threads (expanded: supports parallelThreads) */}
             <FlowProgress
               mode="expanded"
               steps={preForkSteps}
@@ -1203,7 +1203,7 @@ export function SandboxPage({
               radius={5}
               statusMap={{ done: 'complete', skipped: 'skipped' }}
             />
-            {/* Post-join: Steps 8, 8b, 9 */}
+            {/* Post-join: Refine → Build → HTML → Finalize */}
             {postJoinStatus !== 'idle' && (
               <FlowProgress
                 mode="compact"
