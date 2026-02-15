@@ -168,3 +168,95 @@ const FORK_INDEX = 4; // After step_plan_chunks (index 3)
 
 /** Export step order and metadata for consumers */
 export { STEP_ORDER, STEP_META, CHUNK_STEP_META, FORK_INDEX };
+
+// ─── FlowDefinition bridge for bilko-flow StepDetail ──────────────────────
+
+import type { FlowStep, FlowDefinition, UIStepType } from 'bilko-flow/react/components';
+
+/** Map pipeline step types to bilko-flow UIStepType */
+const TYPE_MAP: Record<string, UIStepType> = {
+  'http.request':       'external-input',
+  'compute':            'transform',
+  'ai.speech-to-text':  'llm',
+  'ai.generate-text':   'llm',
+};
+
+/** Step descriptions for the StepDetail prompt/schema tabs */
+const STEP_DESCRIPTIONS: Record<string, { description: string; prompt?: string }> = {
+  step_fetch_rss: {
+    description: 'Pull the podcast RSS feed from NPR and return the raw XML.',
+  },
+  step_parse_episodes: {
+    description: 'Extract episode metadata (title, duration, audio URL, transcript URL) from the RSS XML.',
+  },
+  step_resolve_audio_stream: {
+    description: 'HEAD request to follow podtrac → megaphone → CDN redirects. Returns final URL, Content-Length, Content-Type, Accept-Ranges.',
+  },
+  step_plan_chunks: {
+    description: 'Pure computation — divide Content-Length into 1 MB byte-range chunks for parallel processing.',
+  },
+};
+
+/** Build a FlowStep from our pipeline step metadata */
+function toFlowStep(id: string, index: number): FlowStep {
+  const meta = STEP_META[id];
+  const desc = STEP_DESCRIPTIONS[id];
+  const dslStep = {
+    step_fetch_rss: { dependsOn: [] as string[], inputs: { url: '/api/podcast/{id}/episodes', method: 'GET' } },
+    step_parse_episodes: { dependsOn: ['step_fetch_rss'], inputs: { transform: 'extract_episode_metadata' } },
+    step_resolve_audio_stream: { dependsOn: ['step_parse_episodes'], inputs: { url: '/api/audio/resolve', method: 'HEAD' } },
+    step_plan_chunks: { dependsOn: ['step_resolve_audio_stream'], inputs: { chunkSizeBytes: 1_048_576, strategy: 'byte-range' } },
+  }[id] || { dependsOn: [] as string[], inputs: {} };
+
+  return {
+    id,
+    name: meta.label,
+    type: TYPE_MAP[meta.type] || 'transform',
+    description: desc?.description || '',
+    prompt: desc?.prompt,
+    dependsOn: dslStep.dependsOn,
+    inputSchema: Object.entries(dslStep.inputs).map(([name, value]) => ({
+      name,
+      type: typeof value,
+      required: true,
+    })),
+    outputSchema: [],
+  };
+}
+
+/** Per-chunk thread FlowSteps for StepDetail */
+const CHUNK_FLOW_STEPS: FlowStep[] = Object.entries(CHUNK_STEP_META).map(([id, meta]) => ({
+  id,
+  name: meta.label,
+  type: TYPE_MAP[meta.type] || 'transform',
+  description: {
+    step_fetch_chunk: 'HTTP Range request for 1 MB audio slice.',
+    step_transcribe_chunk: 'Speech-to-text via Whisper on chunk audio.',
+    step_classify_chunk: 'LLM classifies chunk transcript as content or ad.',
+    step_refine_chunk: 'LLM refines ad block boundaries within chunk.',
+    step_emit_skips: 'Push skip ranges for this chunk to the player.',
+  }[id] || '',
+  dependsOn: [],
+  inputSchema: [],
+  outputSchema: [],
+}));
+
+/**
+ * Build a bilko-flow FlowDefinition from the pipeline step definitions.
+ * Used by StepDetail to resolve step names, dependencies, and schema.
+ */
+export function createFlowDefinition(): FlowDefinition {
+  return {
+    id: 'flow_podcast_pipeline',
+    name: 'NPR Podcast Ad Detection Pipeline',
+    description: 'Fetch, transcribe, classify, and skip ads in NPR podcast episodes.',
+    version: '3.0.0',
+    steps: [
+      ...STEP_ORDER.map((id, i) => toFlowStep(id, i)),
+      ...CHUNK_FLOW_STEPS,
+    ],
+    tags: ['podcast', 'ad-detection', 'audio', 'llm'],
+  };
+}
+
+export { CHUNK_FLOW_STEPS };

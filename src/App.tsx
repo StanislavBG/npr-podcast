@@ -18,8 +18,8 @@ import {
 } from './services/api';
 import type { AdDetectionResult, AdSegment } from './services/adDetector';
 import { mergeChunkAdSegments } from './services/adDetector';
-import { STEP_ORDER, STEP_META } from './workflows/podcastFlow';
-import type { FlowProgressStep, ParallelThread, ParallelConfig } from 'bilko-flow/react/components';
+import { STEP_ORDER, STEP_META, createFlowDefinition } from './workflows/podcastFlow';
+import type { FlowProgressStep, ParallelThread, ParallelConfig, StepExecution } from 'bilko-flow/react/components';
 
 // ─── Pipeline step tracking ────────────────────────────────────────────────
 
@@ -96,6 +96,10 @@ export default function App() {
   const [scanProgress, setScanProgress] = useState<{ totalChunks: number; completedChunks: Set<number> }>({ totalChunks: 0, completedChunks: new Set() });
   // Accumulator ref for partial ads (avoids stale closure in SSE callback)
   const accumulatedAdsRef = useRef<AdSegment[]>([]);
+  // Execution tracking for StepDetail analysis
+  const [stepExecutions, setStepExecutions] = useState<Record<string, StepExecution>>({});
+  const stepStartTimesRef = useRef<Record<string, number>>({});
+  const flowDefinition = useMemo(() => createFlowDefinition(), []);
 
   // Derived: has the pipeline started? (View Details enabled as soon as flow is non-idle)
   const pipelineStarted = pipelineStatus !== 'idle';
@@ -121,6 +125,14 @@ export default function App() {
     ));
   }, []);
 
+  // Helper: update execution tracking for a step
+  const updateExecution = useCallback((stepId: string, updates: Partial<StepExecution>) => {
+    setStepExecutions(prev => ({
+      ...prev,
+      [stepId]: { ...prev[stepId], stepId, status: prev[stepId]?.status || 'idle', ...updates } as StepExecution,
+    }));
+  }, []);
+
   const load = useCallback(
     async (id: string) => {
       setLoading(true);
@@ -131,18 +143,27 @@ export default function App() {
       setPipelineSteps(createInitialSteps());
       setPipelineStatus('idle');
       setChunkThreads([]);
+      setStepExecutions({});
+      stepStartTimesRef.current = {};
 
       // Steps 1-2: Fetch RSS and parse episodes (client-side)
       updateStep('step_fetch_rss', { status: 'active', meta: { message: 'Loading...' } });
+      const fetchStart = Date.now();
+      updateExecution('step_fetch_rss', { status: 'running', startedAt: fetchStart, input: { podcastId: id, url: `/api/podcast/${id}/episodes` } });
 
       try {
         const data = await fetchEpisodes(id);
         setEpisodes(data.episodes);
         setPodcastName(data.podcastName);
+        const fetchEnd = Date.now();
         updateStep('step_fetch_rss', { status: 'complete', meta: { message: 'RSS loaded' } });
+        updateExecution('step_fetch_rss', { status: 'success', completedAt: fetchEnd, durationMs: fetchEnd - fetchStart, output: { podcastName: data.podcastName, episodeCount: data.episodes.length } });
         updateStep('step_parse_episodes', { status: 'complete', meta: { message: `${data.episodes.length} episodes` } });
-      } catch {
+        updateExecution('step_parse_episodes', { status: 'success', startedAt: fetchStart, completedAt: fetchEnd, durationMs: fetchEnd - fetchStart, output: { episodes: data.episodes.length } });
+      } catch (e: any) {
+        const fetchEnd = Date.now();
         updateStep('step_fetch_rss', { status: 'error', meta: { error: 'Failed' } });
+        updateExecution('step_fetch_rss', { status: 'error', completedAt: fetchEnd, durationMs: fetchEnd - fetchStart, error: e?.message || 'Failed' });
         setError('Could not load episodes. Check your connection.');
       } finally {
         setLoading(false);
@@ -243,19 +264,30 @@ export default function App() {
         } else {
           // Main pipeline step — use bilko-flow well-known meta keys
           const stepId = evt.step;
+          const now = Date.now();
+          // Capture all extra event fields as execution output data
+          const { step: _s, status: _st, message: _m, threadId: _t, chunkIndex: _ci, totalChunks: _tc, ...extraData } = evt;
           if (evt.status === 'done') {
+            const startedAt = stepStartTimesRef.current[stepId] || now;
             updateStep(stepId, { status: 'complete', meta: { message: evt.message } });
+            updateExecution(stepId, { status: 'success', completedAt: now, durationMs: now - startedAt, output: Object.keys(extraData).length > 0 ? extraData : { message: evt.message } });
           } else if (evt.status === 'error') {
+            const startedAt = stepStartTimesRef.current[stepId] || now;
             updateStep(stepId, { status: 'error', meta: { error: evt.message } });
+            updateExecution(stepId, { status: 'error', completedAt: now, durationMs: now - startedAt, error: evt.message });
           } else if (evt.status === 'skipped') {
             updateStep(stepId, { status: 'skipped', meta: { skipReason: evt.message } });
+            updateExecution(stepId, { status: 'skipped' });
           } else {
+            if (!stepStartTimesRef.current[stepId]) {
+              stepStartTimesRef.current[stepId] = now;
+            }
             updateStep(stepId, { status: 'active', meta: {
               message: evt.message,
-              // Propagate chunk progress as bilko-flow well-known meta when available
               ...(evt.chunkIndex != null ? { chunksProcessed: evt.chunkIndex + 1 } : {}),
               ...(evt.totalChunks != null ? { chunksTotal: evt.totalChunks } : {}),
             } });
+            updateExecution(stepId, { status: 'running', startedAt: stepStartTimesRef.current[stepId], input: Object.keys(extraData).length > 0 ? extraData : undefined });
           }
         }
       };
@@ -297,6 +329,25 @@ export default function App() {
       const adResult = sandboxResultToAdDetection(result);
       setAds(adResult);
       setSandboxResult(result);
+
+      // Enrich step executions with final result data (prompts, LLM response, transcript)
+      if (result.prompts) {
+        // Find the chunk classify/refine steps or the overall classification
+        setStepExecutions(prev => {
+          const enriched = { ...prev };
+          // Attach prompts + LLM response to a synthetic 'pipeline_llm' key visible in analysis
+          if (result.prompts) {
+            enriched['pipeline_llm_classify'] = {
+              stepId: 'pipeline_llm_classify',
+              status: 'success',
+              input: { systemPrompt: result.prompts.system, userPrompt: result.prompts.user },
+              output: { adBlocks: result.adBlocks.length, skipMap: result.skipMap.length },
+              rawResponse: result.llmResponse || undefined,
+            };
+          }
+          return enriched;
+        });
+      }
 
       // Mark all remaining steps as done
       setPipelineSteps(prev => prev.map(s =>
@@ -369,6 +420,8 @@ export default function App() {
         pipelineStatus={pipelineStatus}
         chunkThreads={chunkThreads}
         parallelConfig={parallelConfig}
+        stepExecutions={stepExecutions}
+        flowDefinition={flowDefinition}
       />
     );
   }
