@@ -270,9 +270,11 @@ export interface SandboxResult {
 /** Progress event from the SSE sandbox stream */
 export interface SandboxProgressEvent {
   step: string;
-  status?: 'done' | 'error';
+  status?: 'done' | 'error' | 'skipped';
   message: string;
-  chunk?: number;
+  // Parallel chunk tracking — present for per-chunk Steps 5+6
+  threadId?: string;
+  chunkIndex?: number;
   totalChunks?: number;
   [key: string]: unknown;
 }

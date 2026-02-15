@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback } from 'react';
 import { FlowProgress } from 'bilko-flow/react/components';
-import type { FlowProgressStep } from 'bilko-flow/react/components';
+import type { FlowProgressStep, ParallelThread, ParallelConfig } from 'bilko-flow/react/components';
 import {
   formatTime,
   formatTimestamp,
@@ -21,6 +21,8 @@ interface Props {
   podcastId: string;
   pipelineSteps: FlowProgressStep[];
   pipelineStatus: 'idle' | 'running' | 'complete' | 'error';
+  chunkThreads: ParallelThread[];
+  parallelConfig: ParallelConfig;
 }
 
 // ─── Step definitions derived from podcastFlow.ts ────────────────────────────
@@ -37,15 +39,14 @@ const STEPS: StepDef[] = STEP_ORDER.map(id => ({
   label: STEP_META[id].label,
   type: STEP_META[id].type,
   subtitle: {
-    step_fetch_rss:             'Pull podcast RSS feed from NPR',
-    step_parse_episodes:        'Extract episode metadata from feed',
-    step_resolve_audio_stream:  'Resolve CDN URL, get audio metadata',
-    step_start_audio_streaming: 'Stream audio chunks ahead of playback',
-    step_transcribe_chunks:     'Produce timestamped transcript from audio via OpenAI STT',
-    step_mark_ad_locations:     'LLM classifies each sentence as content or ad',
-    step_build_skip_map:        'Merge adjacent ad segments into skip ranges',
-    step_fetch_html_transcript: 'Fetch NPR HTML transcript for cross-reference',
-    step_finalize_playback:     'Reconcile + summary + build player config',
+    step_fetch_rss:              'Pull podcast RSS feed from NPR',
+    step_parse_episodes:         'Extract episode metadata from feed',
+    step_resolve_audio_stream:   'Resolve CDN URL, get audio metadata',
+    step_start_audio_streaming:  'Download audio and split into ~5-min chunks',
+    step_refine_ad_boundaries:   'LLM refines per-chunk ad anchors to precise boundaries (0.1s)',
+    step_build_skip_map:         'Merge refined ad segments into skip ranges',
+    step_fetch_html_transcript:  'Fetch NPR HTML transcript for cross-reference',
+    step_finalize_playback:      'Reconcile + summary + build player config',
   }[id] || '',
 }));
 
@@ -467,7 +468,7 @@ function StepTranscribeChunks({ result }: { result: SandboxResult }) {
   );
 }
 
-function StepMarkAdLocations({ result }: { result: SandboxResult }) {
+function StepRefineAdBoundaries({ result }: { result: SandboxResult }) {
   const { adBlocks, episode, summary, transcript } = result;
   const { lines } = transcript;
   const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
@@ -481,8 +482,8 @@ function StepMarkAdLocations({ result }: { result: SandboxResult }) {
   return (
     <div className="sb-step-body">
       <div className="sb-qa-callout">
-        The LLM reads every sentence from Step 5 and classifies it as <strong>CONTENT</strong> or
-        {' '}<strong>AD</strong>. Adjacent ad sentences are grouped into blocks. Strategy: {summary.strategy}
+        Per-chunk ad anchors (from parallel Steps 5+6) are refined by the LLM examining surrounding
+        transcript context. Boundaries are adjusted to 0.1s precision. Strategy: {summary.strategy}
       </div>
 
       <h3 className="sb-sub-heading">Classification Summary</h3>
@@ -958,6 +959,8 @@ export function SandboxPage({
   podcastId,
   pipelineSteps,
   pipelineStatus,
+  chunkThreads,
+  parallelConfig,
 }: Props) {
   const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
 
@@ -1032,6 +1035,8 @@ export function SandboxPage({
             status={pipelineStatus}
             label="Ad Detection Pipeline"
             activity={activity}
+            parallelThreads={chunkThreads}
+            parallelConfig={parallelConfig}
           />
           <div className="sb-flow-stats">
             <span className="sb-stat sb-stat-ok">{completeCount} done</span>
@@ -1090,23 +1095,20 @@ export function SandboxPage({
             <StepStreamAudioChunks result={result} />
           </StepSection>
 
-          <StepSection index={4} step={STEPS[4]} stepStatus={stepStatusMap['step_transcribe_chunks']}>
-            <StepTranscribeChunks result={result} />
+          {/* Steps 5+6 per-chunk: shown via parallelThreads in the FlowProgress above */}
+          <StepSection index={4} step={STEPS[4]} stepStatus={stepStatusMap['step_refine_ad_boundaries']} defaultOpen={true}>
+            <StepRefineAdBoundaries result={result} />
           </StepSection>
 
-          <StepSection index={5} step={STEPS[5]} stepStatus={stepStatusMap['step_mark_ad_locations']} defaultOpen={true}>
-            <StepMarkAdLocations result={result} />
-          </StepSection>
-
-          <StepSection index={6} step={STEPS[6]} stepStatus={stepStatusMap['step_build_skip_map']}>
+          <StepSection index={5} step={STEPS[5]} stepStatus={stepStatusMap['step_build_skip_map']}>
             <StepBuildSkipMap result={result} />
           </StepSection>
 
-          <StepSection index={7} step={STEPS[7]} stepStatus={stepStatusMap['step_fetch_html_transcript']}>
+          <StepSection index={6} step={STEPS[6]} stepStatus={stepStatusMap['step_fetch_html_transcript']}>
             <StepFetchHtmlTranscript result={result} />
           </StepSection>
 
-          <StepSection index={8} step={STEPS[8]} stepStatus={stepStatusMap['step_finalize_playback']} defaultOpen={true}>
+          <StepSection index={7} step={STEPS[7]} stepStatus={stepStatusMap['step_finalize_playback']} defaultOpen={true}>
             <StepFinalizePlayback result={result} />
           </StepSection>
         </div>
