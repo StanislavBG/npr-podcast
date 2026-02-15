@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback } from 'react';
-import { FlowProgress } from 'bilko-flow/react/components';
+import { FlowProgress, FlowErrorBoundary, resolveStepMeta } from 'bilko-flow/react/components';
 import type { FlowProgressStep, ParallelThread, ParallelConfig } from 'bilko-flow/react/components';
 import {
   formatTime,
@@ -82,8 +82,8 @@ function buildFeedbackText(
   lines.push(`Overall: ${pipelineStatus}`);
   lines.push('');
   for (const step of pipelineSteps) {
-    const meta = step.meta as Record<string, unknown> | undefined;
-    const msg = meta?.message || meta?.error || meta?.skipReason || '';
+    const resolved = resolveStepMeta(step.meta);
+    const msg = resolved.message || resolved.error || resolved.skipReason || '';
     const icon = step.status === 'complete' ? '[OK]' :
                  step.status === 'error' ? '[ERROR]' :
                  step.status === 'skipped' ? '[SKIP]' :
@@ -97,11 +97,11 @@ function buildFeedbackText(
   if (errorSteps.length > 0) {
     lines.push('## Errors');
     for (const step of errorSteps) {
-      const meta = step.meta as Record<string, unknown> | undefined;
+      const resolved = resolveStepMeta(step.meta);
       lines.push(`### ${step.label}`);
       lines.push(`- Step ID: ${step.id}`);
       lines.push(`- Type: ${step.type || 'unknown'}`);
-      lines.push(`- Error: ${meta?.error || 'Unknown error'}`);
+      lines.push(`- Error: ${resolved.error || 'Unknown error'}`);
       lines.push('');
     }
   }
@@ -346,6 +346,144 @@ function StepStreamAudioChunks({ result }: { result: SandboxResult }) {
           <div className="sb-qa-callout" style={{ marginTop: '4px', fontSize: '11px' }}>
             Streams directly from CDN. Listen to verify audio is accessible and audible.
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StepPerChunkProcessing({ result, chunkThreads }: { result: SandboxResult; chunkThreads: ParallelThread[] }) {
+  const audio = result.audioDetails;
+  const isAudioSource = result.transcriptSource === 'audio-transcription' || result.transcriptSource === 'audio-transcription-chunked';
+  const { lines } = result.transcript;
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+  const dur = result.episode.durationSec;
+  const validation = result.validation;
+
+  if (!audio || !audio.available) {
+    return (
+      <div className="sb-step-body">
+        <div className="sb-qa-alert">
+          Audio pipeline skipped — no audio URL. Per-chunk processing was not performed.
+        </div>
+        <div className="sb-qa-callout">
+          Transcript was obtained from: <strong>{result.transcriptSource || 'html'}</strong>
+        </div>
+      </div>
+    );
+  }
+
+  const completedThreads = chunkThreads.filter(t => t.status === 'complete').length;
+  const errorThreads = chunkThreads.filter(t => t.status === 'error').length;
+  const totalThreads = chunkThreads.length;
+
+  return (
+    <div className="sb-step-body">
+      <div className="sb-qa-callout">
+        Each audio chunk is processed <strong>in parallel</strong> (up to 3 concurrent). For each chunk:
+        <br />
+        <strong>Step 5</strong> (Transcribe) sends the chunk to OpenAI {audio.transcriptionModel} for speech-to-text.
+        <br />
+        <strong>Step 6</strong> (Classify) uses an LLM to identify ad vs. content sentences within the chunk.
+      </div>
+
+      {/* Thread status summary */}
+      <h3 className="sb-sub-heading">Chunk Thread Status ({totalThreads} chunks)</h3>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Total chunks</span><span className="sb-kv-v">{totalThreads}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Completed</span><span className="sb-kv-v">{completedThreads}</span></div>
+        {errorThreads > 0 && (
+          <div className="sb-kv"><span className="sb-kv-k">Errors</span><span className="sb-kv-v" style={{ color: '#e74c3c' }}>{errorThreads}</span></div>
+        )}
+        <div className="sb-kv"><span className="sb-kv-k">Concurrency</span><span className="sb-kv-v">3 parallel STT calls (semaphore)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Model</span><span className="sb-kv-v">{audio.transcriptionModel}</span></div>
+      </div>
+
+      {/* Per-thread detail */}
+      {chunkThreads.length > 0 && (
+        <>
+          <h3 className="sb-sub-heading">Per-Chunk Results</h3>
+          <div className="sb-ad-list">
+            {chunkThreads.map(thread => {
+              const transcribeStep = thread.steps.find(s => s.id.endsWith('-transcribe'));
+              const classifyStep = thread.steps.find(s => s.id.endsWith('-classify'));
+              const tMeta = resolveStepMeta(transcribeStep?.meta);
+              const cMeta = resolveStepMeta(classifyStep?.meta);
+              const statusIcon = thread.status === 'complete' ? '[OK]' :
+                                  thread.status === 'error' ? '[ERR]' :
+                                  thread.status === 'running' ? '[...]' : '[--]';
+              return (
+                <div key={thread.id} className="sb-ad-card">
+                  <div className="sb-ad-card-header">
+                    <span className="sb-ad-badge" style={{
+                      background: thread.status === 'complete' ? '#27ae60' :
+                                  thread.status === 'error' ? '#e74c3c' :
+                                  thread.status === 'running' ? '#f39c12' : '#7f8c8d',
+                    }}>{statusIcon}</span>
+                    <span className="sb-ad-lines">{thread.label}</span>
+                  </div>
+                  <div className="sb-qa-math" style={{ marginTop: '0.5rem' }}>
+                    <div className="sb-qa-row">
+                      <span className="sb-qa-label">Transcribe (Step 5)</span>
+                      <span className="sb-qa-val">
+                        {transcribeStep?.status === 'complete' ? 'Done' :
+                         transcribeStep?.status === 'active' ? 'Running...' :
+                         transcribeStep?.status === 'error' ? `Error: ${tMeta.error || tMeta.message}` : 'Pending'}
+                        {tMeta.message && transcribeStep?.status === 'complete' && ` — ${tMeta.message}`}
+                      </span>
+                    </div>
+                    <div className="sb-qa-row">
+                      <span className="sb-qa-label">Classify (Step 6)</span>
+                      <span className="sb-qa-val">
+                        {classifyStep?.status === 'complete' ? 'Done' :
+                         classifyStep?.status === 'active' ? 'Running...' :
+                         classifyStep?.status === 'error' ? `Error: ${cMeta.error || cMeta.message}` : 'Pending'}
+                        {cMeta.message && classifyStep?.status === 'complete' && ` — ${cMeta.message}`}
+                      </span>
+                    </div>
+                  </div>
+                  {thread.error && (
+                    <div className="sb-qa-alert" style={{ marginTop: '4px' }}>
+                      {thread.error}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* Aggregated transcript quality (same as old StepTranscribeChunks content) */}
+      <h3 className="sb-sub-heading">Aggregated Transcript</h3>
+      <div className="sb-kv-grid">
+        <div className="sb-kv"><span className="sb-kv-k">Source</span><span className="sb-kv-v">{isAudioSource ? 'Audio transcription (STT)' : result.transcriptSource || 'html'}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Whisper segments</span><span className="sb-kv-v">{audio.segmentCount}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Sentences</span><span className="sb-kv-v">{lines.length}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{totalWords.toLocaleString()}</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Speech rate</span><span className="sb-kv-v">{dur > 0 ? Math.round(totalWords / (dur / 60)) : 0} words/min</span></div>
+      </div>
+
+      {validation && (
+        validation.isValid ? (
+          <div className="sb-qa-ok">
+            Transcript validation passed: {validation.reason}
+          </div>
+        ) : (
+          <div className="sb-qa-alert">
+            Transcript validation failed: {validation.reason}
+          </div>
+        )
+      )}
+
+      {isAudioSource ? (
+        <div className="sb-qa-ok">
+          Timestamped transcript ready. {lines.length} sentences covering {formatTimestamp(dur)}.
+          Per-chunk ad anchors forwarded to Step 7 for boundary refinement.
+        </div>
+      ) : (
+        <div className="sb-qa-alert">
+          Audio transcription did not produce the final transcript. Source used: {result.transcriptSource}
         </div>
       )}
     </div>
@@ -1029,15 +1167,19 @@ export function SandboxPage({
       {/* Pipeline overview — always visible, same flow as main screen */}
       {!isIdle && (
         <div className="sb-flow-overview">
-          <FlowProgress
-            mode="expanded"
-            steps={pipelineSteps}
-            status={pipelineStatus}
-            label="Ad Detection Pipeline"
-            activity={activity}
-            parallelThreads={chunkThreads}
-            parallelConfig={parallelConfig}
-          />
+          <FlowErrorBoundary>
+            <FlowProgress
+              mode="expanded"
+              steps={pipelineSteps}
+              status={pipelineStatus}
+              label="Ad Detection Pipeline"
+              activity={activity}
+              parallelThreads={chunkThreads}
+              parallelConfig={parallelConfig}
+              radius={5}
+              statusMap={{ done: 'complete', skipped: 'skipped' }}
+            />
+          </FlowErrorBoundary>
           <div className="sb-flow-stats">
             <span className="sb-stat sb-stat-ok">{completeCount} done</span>
             {errorCount > 0 && <span className="sb-stat sb-stat-error">{errorCount} error{errorCount > 1 ? 's' : ''}</span>}
@@ -1095,20 +1237,31 @@ export function SandboxPage({
             <StepStreamAudioChunks result={result} />
           </StepSection>
 
-          {/* Steps 5+6 per-chunk: shown via parallelThreads in the FlowProgress above */}
-          <StepSection index={4} step={STEPS[4]} stepStatus={stepStatusMap['step_refine_ad_boundaries']} defaultOpen={true}>
+          {/* Steps 5+6 per-chunk: parallel thread details */}
+          <StepSection
+            index={4}
+            step={{ id: 'step_chunk_processing', label: 'Per-Chunk Processing (Steps 5+6)', subtitle: 'Parallel: Transcribe each chunk (STT) then classify content vs ads (LLM)', type: 'ai.speech-to-text' }}
+            stepStatus={chunkThreads.length > 0 && chunkThreads.every(t => t.status === 'complete') ? 'complete'
+              : chunkThreads.some(t => t.status === 'error') ? 'error'
+              : chunkThreads.some(t => t.status === 'running') ? 'active' : 'pending'}
+            defaultOpen={true}
+          >
+            <StepPerChunkProcessing result={result} chunkThreads={chunkThreads} />
+          </StepSection>
+
+          <StepSection index={5} step={STEPS[4]} stepStatus={stepStatusMap['step_refine_ad_boundaries']} defaultOpen={true}>
             <StepRefineAdBoundaries result={result} />
           </StepSection>
 
-          <StepSection index={5} step={STEPS[5]} stepStatus={stepStatusMap['step_build_skip_map']}>
+          <StepSection index={6} step={STEPS[5]} stepStatus={stepStatusMap['step_build_skip_map']}>
             <StepBuildSkipMap result={result} />
           </StepSection>
 
-          <StepSection index={6} step={STEPS[6]} stepStatus={stepStatusMap['step_fetch_html_transcript']}>
+          <StepSection index={7} step={STEPS[6]} stepStatus={stepStatusMap['step_fetch_html_transcript']}>
             <StepFetchHtmlTranscript result={result} />
           </StepSection>
 
-          <StepSection index={7} step={STEPS[7]} stepStatus={stepStatusMap['step_finalize_playback']} defaultOpen={true}>
+          <StepSection index={8} step={STEPS[7]} stepStatus={stepStatusMap['step_finalize_playback']} defaultOpen={true}>
             <StepFinalizePlayback result={result} />
           </StepSection>
         </div>

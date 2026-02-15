@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
-import { FlowProgress } from 'bilko-flow/react/components';
+import { FlowProgress, FlowErrorBoundary } from 'bilko-flow/react/components';
 import { PodcastSelector } from './components/PodcastSelector';
 import { EpisodeList } from './components/EpisodeList';
 import { Player } from './components/Player';
@@ -171,9 +171,11 @@ export default function App() {
             const threads = prev.map(t => ({ ...t, steps: [...t.steps] }));
             let thread = threads.find(t => t.id === evt.threadId);
             if (!thread) {
+              const chunkNum = (evt.chunkIndex ?? 0) + 1;
+              const totalLabel = evt.totalChunks ? `/${evt.totalChunks}` : '';
               thread = {
                 id: evt.threadId!,
-                label: `Chunk ${(evt.chunkIndex ?? 0) + 1}`,
+                label: `Chunk ${chunkNum}${totalLabel}: Transcribe → Classify`,
                 status: 'running' as const,
                 steps: [
                   { id: `${evt.threadId}-transcribe`, label: 'Transcribe', status: 'pending' as const, type: 'ai.speech-to-text' },
@@ -186,15 +188,28 @@ export default function App() {
             const stepId = `${evt.threadId}-${stepSuffix}`;
             const mappedStatus = evt.status === 'done' ? 'complete' as const : evt.status === 'error' ? 'error' as const : 'active' as const;
             thread.steps = thread.steps.map(s =>
-              s.id === stepId ? { ...s, status: mappedStatus, meta: { message: evt.message } } : s
+              s.id === stepId ? { ...s, status: mappedStatus, meta: {
+                ...s.meta,
+                message: evt.message,
+                // bilko-flow well-known meta: chunk progress tracking
+                chunksProcessed: evt.chunkIndex != null ? evt.chunkIndex + 1 : undefined,
+                chunksTotal: evt.totalChunks,
+              } } : s
             );
             const allDone = thread.steps.every(s => s.status === 'complete' || s.status === 'skipped');
             const anyErr = thread.steps.some(s => s.status === 'error');
             thread.status = anyErr ? 'error' : allDone ? 'complete' : 'running';
+            // Set thread activity to describe what's currently happening
+            const activeStep = thread.steps.find(s => s.status === 'active');
+            thread.activity = activeStep ? `${activeStep.label}: ${evt.message}` : undefined;
+            if (anyErr) {
+              const errStep = thread.steps.find(s => s.status === 'error');
+              thread.error = errStep ? (errStep.meta as Record<string, unknown>)?.message as string || 'Failed' : 'Failed';
+            }
             return threads;
           });
         } else {
-          // Main pipeline step
+          // Main pipeline step — use bilko-flow well-known meta keys
           const stepId = evt.step;
           if (evt.status === 'done') {
             updateStep(stepId, { status: 'complete', meta: { message: evt.message } });
@@ -203,7 +218,12 @@ export default function App() {
           } else if (evt.status === 'skipped') {
             updateStep(stepId, { status: 'skipped', meta: { skipReason: evt.message } });
           } else {
-            updateStep(stepId, { status: 'active', meta: { message: evt.message } });
+            updateStep(stepId, { status: 'active', meta: {
+              message: evt.message,
+              // Propagate chunk progress as bilko-flow well-known meta when available
+              ...(evt.chunkIndex != null ? { chunksProcessed: evt.chunkIndex + 1 } : {}),
+              ...(evt.totalChunks != null ? { chunksTotal: evt.totalChunks } : {}),
+            } });
           }
         }
       };
@@ -356,16 +376,19 @@ export default function App() {
 
           {showFlow && (
             <div className="flow-widget-container">
-              <FlowProgress
-                mode="auto"
-                steps={pipelineSteps}
-                status={flowStatus}
-                activity={activity}
-                label="Ad Detection Pipeline"
-                statusMap={STATUS_MAP}
-                parallelThreads={chunkThreads}
-                parallelConfig={parallelConfig}
-              />
+              <FlowErrorBoundary>
+                <FlowProgress
+                  mode="auto"
+                  steps={pipelineSteps}
+                  status={flowStatus}
+                  activity={activity}
+                  label="Ad Detection Pipeline"
+                  statusMap={STATUS_MAP}
+                  parallelThreads={chunkThreads}
+                  parallelConfig={parallelConfig}
+                  radius={5}
+                />
+              </FlowErrorBoundary>
             </div>
           )}
         </main>
