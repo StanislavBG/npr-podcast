@@ -142,6 +142,12 @@ button {
   transition: opacity 0.15s;
 }
 .header-sandbox-link:hover { opacity: 1; }
+.header-sandbox-link.disabled,
+.header-sandbox-link:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+  pointer-events: auto;
+}
 
 /* ── Podcast Selector (pill row) ── */
 .shows {
@@ -511,7 +517,13 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Flow Widget (pipeline progress in main app) ── */
+/* ── Flow Widget Container (bilko-flow FlowProgress wrapper) ── */
+.flow-widget-container {
+  padding: 8px 12px;
+  border-top: 1px solid var(--surface);
+}
+
+/* ── Flow Widget (legacy inline pipeline progress) ── */
 .flow-widget {
   padding: 12px 16px;
   font-size: 12px;
@@ -1516,3 +1528,68 @@ button {
 .sb-section > .sb-step-body {
   padding: 0 16px 16px;
 }
+
+/* ── Copy Feedback button ── */
+.sb-copy-feedback {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--accent);
+  border: 1px solid rgba(129, 140, 248, 0.3);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.sb-copy-feedback:hover {
+  background: var(--surface-hover);
+  border-color: var(--accent);
+}
+.sb-copy-feedback.copied {
+  background: rgba(46, 204, 113, 0.15);
+  border-color: rgba(46, 204, 113, 0.4);
+  color: #2ecc71;
+}
+
+/* ── Flow overview (bilko-flow FlowProgress in sandbox header) ── */
+.sb-flow-overview {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+.sb-flow-stats {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 11px;
+}
+.sb-stat {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.sb-stat-ok {
+  background: rgba(46, 204, 113, 0.12);
+  color: #2ecc71;
+}
+.sb-stat-error {
+  background: rgba(231, 76, 60, 0.12);
+  color: #e74c3c;
+}
+.sb-stat-skip {
+  background: rgba(155, 155, 155, 0.12);
+  color: #999;
+}
+
+/* ── Step status dot (in collapsible header) ── */
+.sb-step-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sb-status-ok { background: #2ecc71; }
+.sb-status-error { background: #e74c3c; }
+.sb-status-skipped { background: #666; }
