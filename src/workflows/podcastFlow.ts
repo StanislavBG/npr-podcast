@@ -14,19 +14,15 @@ import {
  *     ── user selects episode ──
  *   3. resolve_audio_stream   – Resolve CDN URL, get duration/size     (http.request — HEAD)
  *   4. plan_chunks            – Calculate 1 MB byte-range chunks       (compute)
- *     ── parallel per-chunk threads (no join — each emits independently) ──
+ *     ── fork: parallel per-chunk threads (no join — each emits independently) ──
  *     Per chunk:
  *       a. fetch_chunk        – HTTP Range request for 1 MB slice      (http.request)
  *       b. transcribe_chunk   – STT on chunk audio                     (ai.speech-to-text)
  *       c. classify_chunk     – LLM classifies chunk as content/ad     (ai.generate-text)
  *       d. refine_chunk       – LLM refines ad boundaries locally      (ai.generate-text)
  *       e. emit_skips         – Push skip ranges to player             (compute)
- *   5. fetch_html_transcript  – Parallel: get NPR HTML for cross-ref   (http.request)
- *   6. finalize_playback      – Reconcile + summary + quality gate     (ai.summarize)
  *
  * Each chunk independently emits skip ranges to the player — no join needed.
- * Step 5 runs in parallel with the chunk pipeline.
- * Step 6 waits for all chunks + HTML transcript to complete.
  */
 
 export function createPodcastWorkflow(podcastId: string): Workflow {
@@ -114,69 +110,7 @@ export function createPodcastWorkflow(podcastId: string): Workflow {
     // Each chunk independently fetches, processes, and emits skip ranges.
     // No join — the player receives progressive results.
 
-    // ─── Parallel: HTML Transcript for Cross-Reference ──────────────────
-
-    {
-      id: 'step_fetch_html_transcript',
-      workflowId: `wf_podcast_${podcastId}`,
-      name: 'Fetch HTML Transcript',
-      type: 'http.request',
-      // Runs in PARALLEL with the streaming pipeline (steps 4-7).
-      // Only depends on episode selection (step 2), not on audio steps.
-      dependsOn: ['step_parse_episodes'],
-      inputs: {
-        url: '/api/transcript',
-        method: 'GET',
-        // HTML transcript provides:
-        //   - Accurate speaker names (audio STT often misses these)
-        //   - Editorial-only content (no dynamic ads)
-        //   - Cross-reference to validate audio-detected ad boundaries
-      },
-      policy: { timeoutMs: 15000, maxAttempts: 2 },
-      determinism: {
-        usesExternalApis: true,
-        pureFunction: false,
-        externalDependencies: [
-          {
-            name: 'NPR Transcript Page',
-            kind: 'http-api',
-            deterministic: false,
-            evidenceCapture: 'response-hash',
-          },
-        ],
-      },
-    },
-
-    // ─── Finalization Phase ─────────────────────────────────────────────
-
-    {
-      id: 'step_finalize_playback',
-      workflowId: `wf_podcast_${podcastId}`,
-      name: 'Finalize Playback',
-      type: 'ai.summarize',
-      // Waits for all chunk threads + HTML transcript
-      dependsOn: ['step_plan_chunks', 'step_fetch_html_transcript'],
-      inputs: {
-        // Final reconciliation. Merges per-chunk results and optionally
-        // cross-references against the HTML transcript.
-        prompt: 'Reconcile per-chunk ad segments, merge overlapping ranges, validate skip map, produce episode summary.',
-        model: 'configurable',
-        output: 'playback_config',
-      },
-      policy: { timeoutMs: 30000, maxAttempts: 2 },
-      determinism: {
-        usesExternalApis: true,
-        pureFunction: false,
-        externalDependencies: [
-          {
-            name: 'LLM Provider',
-            kind: 'http-api',
-            deterministic: false,
-            evidenceCapture: 'response-hash',
-          },
-        ],
-      },
-    },
+    // ─── Per-chunk threads emit independently — no join/finalize needed ──
   ];
 
   return {
@@ -205,19 +139,15 @@ const STEP_META: Record<string, { label: string; type: string }> = {
   step_resolve_audio_stream:   { label: 'Resolve Audio Stream',     type: 'http.request' },
   step_plan_chunks:            { label: 'Plan Chunks',              type: 'compute' },
   // Per-chunk thread steps live in parallelThreads, not here
-  step_fetch_html_transcript:  { label: 'Fetch HTML Transcript',    type: 'http.request' },
-  step_finalize_playback:      { label: 'Finalize Playback',        type: 'ai.summarize' },
 };
 
-/** Main chain step order. Per-chunk threads run between step 4 and step 5. */
+/** Main chain step order. Per-chunk threads fork after step_plan_chunks. */
 const STEP_ORDER = [
   'step_fetch_rss',
   'step_parse_episodes',
   'step_resolve_audio_stream',
   'step_plan_chunks',
   // ← parallelThreads (chunk-0..N: Fetch → Transcribe → Classify → Refine → Emit)
-  'step_fetch_html_transcript',
-  'step_finalize_playback',
 ];
 
 /** Per-chunk thread step definitions (used to build ParallelThread.steps) */

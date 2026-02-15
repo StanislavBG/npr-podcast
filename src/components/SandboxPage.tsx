@@ -33,35 +33,29 @@ interface StepDef {
   type: string;
 }
 
-const ALL_STEPS: StepDef[] = [
-  ...STEP_ORDER.slice(0, 4).map(id => ({
-    id,
-    label: STEP_META[id].label,
-    type: STEP_META[id].type,
-    subtitle: {
-      step_fetch_rss:              'Pull podcast RSS feed from NPR',
-      step_parse_episodes:         'Extract episode metadata from feed',
-      step_resolve_audio_stream:   'Resolve CDN URL, get audio metadata',
-      step_plan_chunks:            'Calculate 1 MB byte-range chunks for parallel processing',
-    }[id] || '',
-  })),
-  // Virtual step for chunk processing
-  {
-    id: 'step_chunk_processing',
-    label: 'Chunk Processing',
-    subtitle: 'Fetch → Transcribe → Classify → Refine → Emit (per chunk, parallel)',
-    type: 'ai.speech-to-text',
-  },
-  ...STEP_ORDER.slice(4).map(id => ({
-    id,
-    label: STEP_META[id].label,
-    type: STEP_META[id].type,
-    subtitle: {
-      step_fetch_html_transcript:  'Fetch NPR HTML transcript for cross-reference',
-      step_finalize_playback:      'Reconcile + summary + build player config',
-    }[id] || '',
-  })),
-];
+/** Sequential steps (before fork) */
+const SEQUENTIAL_STEPS: StepDef[] = STEP_ORDER.map(id => ({
+  id,
+  label: STEP_META[id].label,
+  type: STEP_META[id].type,
+  subtitle: {
+    step_fetch_rss:              'Pull podcast RSS feed from NPR',
+    step_parse_episodes:         'Extract episode metadata from feed',
+    step_resolve_audio_stream:   'Resolve CDN URL, get audio metadata',
+    step_plan_chunks:            'Calculate 1 MB byte-range chunks for parallel processing',
+  }[id] || '',
+}));
+
+/** Virtual step for the parallel chunk processing phase */
+const CHUNK_STEP: StepDef = {
+  id: 'step_chunk_processing',
+  label: 'Chunk Processing',
+  subtitle: 'Fetch → Transcribe → Classify → Refine → Emit (per chunk, parallel)',
+  type: 'parallel',
+};
+
+/** All steps including virtual chunk step */
+const ALL_STEPS: StepDef[] = [...SEQUENTIAL_STEPS, CHUNK_STEP];
 
 // ─── Copy Feedback: accumulate debug info for agent/developer ────────────────
 
@@ -494,216 +488,17 @@ function DetailChunkProcessing({ result, chunkThreads, pipelineStep }: { result:
   );
 }
 
-function DetailFetchHtmlTranscript({ result, pipelineStep }: { result: SandboxResult | null; pipelineStep?: FlowProgressStep }) {
-  const meta = resolveStepMeta(pipelineStep?.meta);
 
-  if (!result) {
-    return (
-      <>
-        <DetailSection title="INPUT"><div className="sb-qa-callout">Transcript URL from episode metadata</div></DetailSection>
-        <DetailSection title="CONFIG">
-          <div className="sb-kv-grid">
-            <div className="sb-kv"><span className="sb-kv-k">Endpoint</span><span className="sb-kv-v">/api/transcript</span></div>
-            <div className="sb-kv"><span className="sb-kv-k">Timeout</span><span className="sb-kv-v">15000ms</span></div>
-          </div>
-        </DetailSection>
-        <DetailSection title="OUTPUT">
-          {meta.message && <div className="sb-qa-ok">{meta.message}</div>}
-          {meta.error && <div className="sb-qa-alert">{meta.error}</div>}
-          {!meta.message && !meta.error && <div className="sb-qa-callout">Waiting...</div>}
-        </DetailSection>
-      </>
-    );
-  }
+// ─── Status dot helper ───────────────────────────────────────────────────────
 
-  const { rawHtml, transcript, qa } = result;
-  const source = result.transcriptSource || 'html';
-  const isAudioSource = source === 'audio-transcription' || source === 'audio-transcription-chunked';
-  const sourceLabels: Record<string, string> = {
-    'audio-transcription': 'Audio Transcription (speech-to-text)',
-    'audio-transcription-chunked': 'Audio Transcription (chunked)',
-    'srt': 'SRT subtitle file',
-    'vtt': 'VTT subtitle file',
-    'json': 'JSON transcript',
-    'html': 'HTML page scraping',
-    'fallback': 'Fallback (description only)',
-  };
-  const { lines } = transcript;
-  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
-  const dur = result.episode.durationSec;
-
-  return (
-    <>
-      <DetailSection title="INPUT">
-        <div className="sb-kv-grid">
-          <div className="sb-kv"><span className="sb-kv-k">Transcript URL</span><span className="sb-kv-v sb-kv-url">{result.episode.transcriptUrl || '(none)'}</span></div>
-        </div>
-        <div className="sb-qa-callout" style={{ marginTop: '8px' }}>
-          Runs in <strong>parallel</strong> with the audio pipeline.
-          {isAudioSource
-            ? ' HTML transcript serves as cross-reference for validation.'
-            : ' This is the primary transcript source.'}
-        </div>
-      </DetailSection>
-      <DetailSection title="CONFIG">
-        <div className="sb-kv-grid">
-          <div className="sb-kv"><span className="sb-kv-k">Endpoint</span><span className="sb-kv-v">/api/transcript</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Method</span><span className="sb-kv-v">GET</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Timeout</span><span className="sb-kv-v">15000ms</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Max attempts</span><span className="sb-kv-v">2</span></div>
-        </div>
-      </DetailSection>
-      <DetailSection title="OUTPUT">
-        <div className="sb-kv-grid">
-          <div className="sb-kv"><span className="sb-kv-k">Source</span><span className="sb-kv-v">{sourceLabels[source] || source}</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Content size</span><span className="sb-kv-v">{(rawHtml.length / 1024).toFixed(1)} KB</span></div>
-          {source === 'html' && (
-            <div className="sb-kv"><span className="sb-kv-k">&lt;p&gt; tags</span><span className="sb-kv-v">{rawHtml.pTagCount}</span></div>
-          )}
-          <div className="sb-kv"><span className="sb-kv-k">Lines parsed</span><span className="sb-kv-v">{lines.length}</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Total words</span><span className="sb-kv-v">{totalWords.toLocaleString()}</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Speakers</span><span className="sb-kv-v">{new Set(lines.filter(l => l.speaker).map(l => l.speaker)).size}</span></div>
-        </div>
-
-        {/* Duration vs Speech Math */}
-        <h4 className="sb-detail-subtitle" style={{ marginTop: '12px' }}>Duration vs Speech</h4>
-        <div className="sb-qa-math">
-          <div className="sb-qa-row">
-            <span className="sb-qa-label">Audio duration</span>
-            <span className="sb-qa-val">{formatTime(qa.audioDurationSec)} ({qa.audioDurationSec}s)</span>
-          </div>
-          <div className="sb-qa-row">
-            <span className="sb-qa-label">Transcript words</span>
-            <span className="sb-qa-val">{qa.transcriptWords.toLocaleString()}</span>
-          </div>
-          <div className="sb-qa-row">
-            <span className="sb-qa-label">Expected speech @ {qa.speechRateWpm} wpm</span>
-            <span className="sb-qa-val">{formatTime(qa.expectedSpeechSec)}</span>
-          </div>
-          <div className="sb-qa-row sb-qa-highlight">
-            <span className="sb-qa-label">Implied ad time</span>
-            <span className="sb-qa-val">{formatTime(qa.impliedAdTimeSec)} ({qa.impliedAdTimeSec}s)</span>
-          </div>
-        </div>
-
-        {/* Parsed lines (scrollable) */}
-        <h4 className="sb-detail-subtitle" style={{ marginTop: '12px' }}>Parsed Lines ({lines.length})</h4>
-        <div className="sb-parsed-lines">
-          {lines.map(l => {
-            const approxTime = dur > 0 && totalWords > 0
-              ? (l.cumulativeWords / totalWords) * dur
-              : 0;
-            return (
-              <div key={l.lineNum} className="sb-parsed-line">
-                <span className="sb-pl-time">{formatTime(approxTime)}</span>
-                <span className="sb-pl-num">[{l.lineNum}]</span>
-                <span className="sb-pl-text">
-                  {l.speaker && <strong>{l.speaker}: </strong>}
-                  {l.text}
-                </span>
-                <span className="sb-pl-wc">{l.wordCount}w</span>
-              </div>
-            );
-          })}
-        </div>
-      </DetailSection>
-    </>
-  );
+function statusDotClass(status: string): string {
+  return status === 'complete' ? 'sb-tracker-dot-ok' :
+         status === 'error' ? 'sb-tracker-dot-error' :
+         status === 'active' ? 'sb-tracker-dot-active' :
+         status === 'skipped' ? 'sb-tracker-dot-skipped' : 'sb-tracker-dot-pending';
 }
 
-function DetailFinalizePlayback({ result, pipelineStep }: { result: SandboxResult | null; pipelineStep?: FlowProgressStep }) {
-  const meta = resolveStepMeta(pipelineStep?.meta);
-
-  if (!result) {
-    return (
-      <>
-        <DetailSection title="INPUT"><div className="sb-qa-callout">Merged chunk results + HTML transcript</div></DetailSection>
-        <DetailSection title="CONFIG">
-          <div className="sb-kv-grid">
-            <div className="sb-kv"><span className="sb-kv-k">Timeout</span><span className="sb-kv-v">30000ms</span></div>
-          </div>
-        </DetailSection>
-        <DetailSection title="OUTPUT">
-          {meta.message && <div className="sb-qa-ok">{meta.message}</div>}
-          {meta.error && <div className="sb-qa-alert">{meta.error}</div>}
-          {!meta.message && !meta.error && <div className="sb-qa-callout">Waiting...</div>}
-        </DetailSection>
-      </>
-    );
-  }
-
-  const { summary, adBlocks } = result;
-  const dur = result.episode.durationSec;
-
-  // Timeline
-  const W = 80;
-  const cells = Array(W).fill(false);
-  for (const b of adBlocks) {
-    const s = Math.floor((b.startTimeSec / dur) * W);
-    const e = Math.min(W - 1, Math.floor((b.endTimeSec / dur) * W));
-    for (let i = s; i <= e; i++) cells[i] = true;
-  }
-  const totalAdSec = adBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
-
-  return (
-    <>
-      <DetailSection title="INPUT">
-        <div className="sb-kv-grid">
-          <div className="sb-kv"><span className="sb-kv-k">Chunk ad segments</span><span className="sb-kv-v">{adBlocks.length} blocks</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">HTML transcript</span><span className="sb-kv-v">{result.transcript.lineCount} lines</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Audio duration</span><span className="sb-kv-v">{formatTime(dur)} ({dur}s)</span></div>
-        </div>
-      </DetailSection>
-      <DetailSection title="CONFIG">
-        <div className="sb-kv-grid">
-          <div className="sb-kv"><span className="sb-kv-k">Strategy</span><span className="sb-kv-v">{summary.strategy}</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Step type</span><span className="sb-kv-v">ai.summarize (LLM reconciliation)</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Timeout</span><span className="sb-kv-v">30000ms</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Max attempts</span><span className="sb-kv-v">2</span></div>
-        </div>
-      </DetailSection>
-      <DetailSection title="OUTPUT">
-        <div className="sb-kv-grid">
-          <div className="sb-kv"><span className="sb-kv-k">Ad blocks</span><span className="sb-kv-v">{summary.totalAdBlocks}</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{summary.totalAdTimeSec}s</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Content time</span><span className="sb-kv-v">{summary.contentTimeSec}s</span></div>
-          <div className="sb-kv"><span className="sb-kv-k">Ad word %</span><span className="sb-kv-v">{summary.adWordPercent}%</span></div>
-        </div>
-
-        {/* Timeline visualization */}
-        {dur > 0 && (
-          <div className="sb-timeline">
-            <div className="sb-timeline-labels">
-              <span>{formatTimestamp(0)}</span>
-              <span>{formatTimestamp(dur)}</span>
-            </div>
-            <div className="sb-timeline-bar">
-              {cells.map((isAd, i) => (
-                <div key={i} className={`sb-timeline-cell ${isAd ? 'ad' : ''}`} />
-              ))}
-            </div>
-            <div className="sb-timeline-legend">
-              <span><span className="sb-legend-dot content" /> content ({formatTimestamp(dur - totalAdSec)})</span>
-              <span><span className="sb-legend-dot ad" /> ad ({formatTimestamp(totalAdSec)})</span>
-            </div>
-          </div>
-        )}
-
-        {/* Skip Map JSON */}
-        <h4 className="sb-detail-subtitle" style={{ marginTop: '12px' }}>Skip Map (Player JSON)</h4>
-        {result.skipMap.length === 0 ? (
-          <div className="sb-qa-alert">Empty skip map — player will not skip anything.</div>
-        ) : (
-          <pre className="sb-code-block sb-json-text">
-            {JSON.stringify(result.skipMap, null, 2)}
-          </pre>
-        )}
-      </DetailSection>
-    </>
-  );
-}
-
-// ─── Step Tracker Pill ───────────────────────────────────────────────────────
+// ─── Sequential step pill ────────────────────────────────────────────────────
 
 function TrackerPill({ step, index, status, isSelected, onClick, meta }: {
   step: StepDef;
@@ -713,22 +508,67 @@ function TrackerPill({ step, index, status, isSelected, onClick, meta }: {
   onClick: () => void;
   meta?: string;
 }) {
-  const statusDotClass = status === 'complete' ? 'sb-tracker-dot-ok' :
-                          status === 'error' ? 'sb-tracker-dot-error' :
-                          status === 'active' ? 'sb-tracker-dot-active' :
-                          status === 'skipped' ? 'sb-tracker-dot-skipped' : 'sb-tracker-dot-pending';
-
   return (
     <button
       className={`sb-tracker-pill ${isSelected ? 'selected' : ''} sb-tracker-${status}`}
       onClick={onClick}
       title={`${step.label}: ${step.subtitle}`}
     >
-      <span className={`sb-tracker-dot ${statusDotClass}`} />
+      <span className={`sb-tracker-dot ${statusDotClass(status)}`} />
       <span className="sb-tracker-num">{index + 1}</span>
       <span className="sb-tracker-label">{step.label}</span>
       {meta && <span className="sb-tracker-meta">{meta}</span>}
     </button>
+  );
+}
+
+// ─── Parallel chunk processing pill (visually distinct) ──────────────────────
+
+function TrackerParallelPill({ status, isSelected, onClick, meta, threads }: {
+  status: string;
+  isSelected: boolean;
+  onClick: () => void;
+  meta?: string;
+  threads: ParallelThread[];
+}) {
+  const completed = threads.filter(t => t.status === 'complete').length;
+  const total = threads.length;
+  const hasThreads = total > 0;
+
+  return (
+    <div className="sb-tracker-parallel-zone">
+      {/* Fork indicator */}
+      <div className="sb-tracker-fork">
+        <div className="sb-tracker-fork-line" />
+        <span className="sb-tracker-fork-label">fork</span>
+        <div className="sb-tracker-fork-line" />
+      </div>
+
+      {/* Main parallel pill */}
+      <button
+        className={`sb-tracker-pill sb-tracker-parallel ${isSelected ? 'selected' : ''} sb-tracker-${status}`}
+        onClick={onClick}
+        title="Chunk Processing: parallel per-chunk pipeline"
+      >
+        <span className={`sb-tracker-dot ${statusDotClass(status)}`} />
+        <span className="sb-tracker-label">Chunk Processing</span>
+        {meta && <span className="sb-tracker-meta">{meta}</span>}
+      </button>
+
+      {/* Mini thread indicators */}
+      {hasThreads && (
+        <div className="sb-tracker-threads">
+          {threads.map(t => (
+            <div
+              key={t.id}
+              className={`sb-tracker-thread-dot sb-tracker-thread-${t.status}`}
+              title={`${t.label}: ${t.status}`}
+            />
+          ))}
+          <span className="sb-tracker-thread-count">{completed}/{total}</span>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -851,10 +691,6 @@ export function SandboxPage({
         return <DetailPlanChunks result={result} pipelineStep={findPipelineStep('step_plan_chunks')} />;
       case 'step_chunk_processing':
         return <DetailChunkProcessing result={result} chunkThreads={chunkThreads} pipelineStep={findPipelineStep('step_plan_chunks')} />;
-      case 'step_fetch_html_transcript':
-        return <DetailFetchHtmlTranscript result={result} pipelineStep={findPipelineStep('step_fetch_html_transcript')} />;
-      case 'step_finalize_playback':
-        return <DetailFinalizePlayback result={result} pipelineStep={findPipelineStep('step_finalize_playback')} />;
       default:
         return <div className="sb-qa-callout">Unknown step: {step.id}</div>;
     }
@@ -890,21 +726,39 @@ export function SandboxPage({
       {/* Active / complete state */}
       {!isIdle && (
         <>
-          {/* Step Tracker (horizontal, scrollable) */}
+          {/* Step Tracker: sequential pills → fork → parallel chunk zone */}
           <div className="sb-tracker">
             <div className="sb-tracker-scroll">
-              {ALL_STEPS.map((step, i) => (
-                <TrackerPill
-                  key={step.id}
-                  step={step}
-                  index={i}
-                  status={stepStatusMap[step.id] || 'pending'}
-                  isSelected={selectedStep === i}
-                  onClick={() => setSelectedStep(selectedStep === i ? null : i)}
-                  meta={stepMetaMap[step.id]}
-                />
+              {/* Sequential steps (1-4) with connectors */}
+              {SEQUENTIAL_STEPS.map((step, i) => (
+                <div key={step.id} className="sb-tracker-seq-item">
+                  <TrackerPill
+                    step={step}
+                    index={i}
+                    status={stepStatusMap[step.id] || 'pending'}
+                    isSelected={selectedStep === i}
+                    onClick={() => setSelectedStep(selectedStep === i ? null : i)}
+                    meta={stepMetaMap[step.id]}
+                  />
+                  {/* Connector arrow between sequential steps */}
+                  <div className={`sb-tracker-connector ${
+                    stepStatusMap[step.id] === 'complete' ? 'sb-connector-done' : ''
+                  }`} />
+                </div>
               ))}
+
+              {/* Parallel chunk processing zone */}
+              <TrackerParallelPill
+                status={stepStatusMap['step_chunk_processing'] || 'pending'}
+                isSelected={selectedStep === SEQUENTIAL_STEPS.length}
+                onClick={() => setSelectedStep(
+                  selectedStep === SEQUENTIAL_STEPS.length ? null : SEQUENTIAL_STEPS.length
+                )}
+                meta={stepMetaMap['step_chunk_processing']}
+                threads={chunkThreads}
+              />
             </div>
+
             {/* Pipeline stats bar */}
             <div className="sb-tracker-stats">
               <span className="sb-stat sb-stat-ok">
