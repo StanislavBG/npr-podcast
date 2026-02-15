@@ -310,20 +310,52 @@ export default function App() {
             },
           };
 
+          // Always ensure config input is set on the first event for this step
+          const config = chunkStepConfig[evt.step];
+          const sseData = Object.keys(chunkExtraData).length > 0 ? chunkExtraData : undefined;
+          const inputData = config ? { ...config, ...sseData } : sseData;
+
+          if (!stepStartTimesRef.current[chunkStepId]) {
+            stepStartTimesRef.current[chunkStepId] = now;
+          }
+
           if (evt.status === 'done') {
-            const startedAt = stepStartTimesRef.current[chunkStepId] || now;
-            updateExecution(chunkStepId, { status: 'success', completedAt: now, durationMs: now - startedAt, output: Object.keys(chunkExtraData).length > 0 ? chunkExtraData : { message: evt.message } });
+            const startedAt = stepStartTimesRef.current[chunkStepId];
+            // Use functional updater to conditionally set input (preserve existing if already set)
+            setStepExecutions(prev => {
+              const existing = prev[chunkStepId];
+              return {
+                ...prev,
+                [chunkStepId]: {
+                  ...existing,
+                  stepId: chunkStepId,
+                  status: 'success' as const,
+                  completedAt: now,
+                  durationMs: now - startedAt,
+                  input: existing?.input ?? inputData,
+                  output: Object.keys(chunkExtraData).length > 0 ? chunkExtraData : { message: evt.message },
+                },
+              };
+            });
           } else if (evt.status === 'error') {
-            const startedAt = stepStartTimesRef.current[chunkStepId] || now;
-            updateExecution(chunkStepId, { status: 'error', completedAt: now, durationMs: now - startedAt, error: evt.message });
+            const startedAt = stepStartTimesRef.current[chunkStepId];
+            setStepExecutions(prev => {
+              const existing = prev[chunkStepId];
+              return {
+                ...prev,
+                [chunkStepId]: {
+                  ...existing,
+                  stepId: chunkStepId,
+                  status: 'error' as const,
+                  completedAt: now,
+                  durationMs: now - startedAt,
+                  input: existing?.input ?? inputData,
+                  error: evt.message,
+                },
+              };
+            });
           } else {
-            if (!stepStartTimesRef.current[chunkStepId]) {
-              stepStartTimesRef.current[chunkStepId] = now;
-            }
-            const config = chunkStepConfig[evt.step];
-            const sseData = Object.keys(chunkExtraData).length > 0 ? chunkExtraData : undefined;
-            const input = config ? { ...config, ...sseData } : sseData;
-            updateExecution(chunkStepId, { status: 'running', startedAt: stepStartTimesRef.current[chunkStepId], input });
+            updateExecution(chunkStepId, { status: 'running', startedAt: stepStartTimesRef.current[chunkStepId], input: inputData });
           }
 
           // Track scan progress: when a chunk's last step completes, mark it scanned
@@ -362,32 +394,63 @@ export default function App() {
             },
           };
 
+          // Pre-compute input data for all event types
+          const config = stepConfig[stepId];
+          const sseData = Object.keys(extraData).length > 0 ? extraData : undefined;
+          const inputData = config ? { ...config, ...sseData } : sseData;
+
+          if (!stepStartTimesRef.current[stepId]) {
+            stepStartTimesRef.current[stepId] = now;
+          }
+
           if (evt.status === 'done') {
-            const startedAt = stepStartTimesRef.current[stepId] || now;
+            const startedAt = stepStartTimesRef.current[stepId];
             updateStep(stepId, { status: 'complete', meta: { message: evt.message } });
             const baseOutput = Object.keys(extraData).length > 0 ? extraData : { message: evt.message };
-            updateExecution(stepId, { status: 'success', completedAt: now, durationMs: now - startedAt, output: baseOutput });
+            // Use functional updater to preserve input if already set
+            setStepExecutions(prev => {
+              const existing = prev[stepId];
+              return {
+                ...prev,
+                [stepId]: {
+                  ...existing,
+                  stepId,
+                  status: 'success' as const,
+                  completedAt: now,
+                  durationMs: now - startedAt,
+                  input: existing?.input ?? inputData,
+                  output: baseOutput,
+                },
+              };
+            });
           } else if (evt.status === 'error') {
-            const startedAt = stepStartTimesRef.current[stepId] || now;
+            const startedAt = stepStartTimesRef.current[stepId];
             updateStep(stepId, { status: 'error', meta: { error: evt.message } });
-            updateExecution(stepId, { status: 'error', completedAt: now, durationMs: now - startedAt, error: evt.message });
+            setStepExecutions(prev => {
+              const existing = prev[stepId];
+              return {
+                ...prev,
+                [stepId]: {
+                  ...existing,
+                  stepId,
+                  status: 'error' as const,
+                  completedAt: now,
+                  durationMs: now - startedAt,
+                  input: existing?.input ?? inputData,
+                  error: evt.message,
+                },
+              };
+            });
           } else if (evt.status === 'skipped') {
             updateStep(stepId, { status: 'skipped', meta: { skipReason: evt.message } });
             updateExecution(stepId, { status: 'skipped' });
           } else {
-            if (!stepStartTimesRef.current[stepId]) {
-              stepStartTimesRef.current[stepId] = now;
-            }
             updateStep(stepId, { status: 'active', meta: {
               message: evt.message,
               ...(evt.chunkIndex != null ? { chunksProcessed: evt.chunkIndex + 1 } : {}),
               ...(evt.totalChunks != null ? { chunksTotal: evt.totalChunks } : {}),
             } });
-            // Merge step-specific config into execution input
-            const config = stepConfig[stepId];
-            const sseData = Object.keys(extraData).length > 0 ? extraData : undefined;
-            const input = config ? { ...config, ...sseData } : sseData;
-            updateExecution(stepId, { status: 'running', startedAt: stepStartTimesRef.current[stepId], input });
+            updateExecution(stepId, { status: 'running', startedAt: stepStartTimesRef.current[stepId], input: inputData });
           }
         }
       };
