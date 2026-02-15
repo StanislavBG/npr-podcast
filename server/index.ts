@@ -1868,7 +1868,6 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         let allSegments: Array<{ start: number; end: number; text: string }> = [];
 
         // Step 5: Transcribe each chunk
-        sendEvent('progress', { step: 'step_transcribe_chunks', message: `Transcribing ${numChunks} chunks...`, chunk: 0, totalChunks: numChunks });
         let earlyAdsSent = false;
         for (let ci = 0; ci < numChunks; ci++) {
           const chunk = mp3Chunks[ci]!;

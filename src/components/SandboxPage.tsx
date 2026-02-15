@@ -993,11 +993,12 @@ export function SandboxPage({
   const skippedCount = pipelineSteps.filter(s => s.status === 'skipped').length;
   const completeCount = pipelineSteps.filter(s => s.status === 'complete').length;
 
-  // Derive activity text from the active step
+  // Derive flow-level activity from the active step's label only.
+  // Per-step detail is in meta.message — bilko-flow renders that at the step level.
   const activity = useMemo(() => {
     const active = pipelineSteps.find(s => s.status === 'active');
     if (!active) return undefined;
-    return (active.meta as Record<string, unknown>)?.message as string || `${active.label}...`;
+    return `${active.label}...`;
   }, [pipelineSteps]);
 
   const isIdle = pipelineStatus === 'idle';

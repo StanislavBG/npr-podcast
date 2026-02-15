@@ -251,11 +251,14 @@ export default function App() {
     return pipelineStatus;
   }, [pipelineSteps, pipelineStatus]);
 
-  // Derive activity text from the active step
+  // Derive flow-level activity text from the active step's label.
+  // Per-step detail (e.g. "Transcribing chunk 1/3") is already in meta.message —
+  // bilko-flow renders that at the step level, so we use only the label here
+  // to avoid showing the same text twice.
   const activity = useMemo(() => {
     const active = pipelineSteps.find(s => s.status === 'active');
     if (!active) return undefined;
-    return (active.meta as any)?.message || `${active.label}...`;
+    return `${active.label}...`;
   }, [pipelineSteps]);
 
   if (page === 'sandbox') {
