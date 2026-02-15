@@ -417,10 +417,10 @@ Return ONLY valid JSON.`;
     console.log(`  Lines ${b.startLine}-${b.endLine} → words ${b.startWord}-${b.endWord} → ${fmt(b.startTimeSec)} - ${fmt(b.endTimeSec)}`);
   }
 
-  // Step 5: Annotated transcript
+  // Annotated transcript
   printAnnotatedTranscript(lines, adBlocks, SAMPLE_EPISODE.durationSec);
 
-  // Step 6: Results + skip map
+  // Results + skip map
   printResults(adBlocks, lines, SAMPLE_EPISODE.durationSec);
 
   // Full debug JSON

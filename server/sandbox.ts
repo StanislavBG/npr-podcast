@@ -646,7 +646,7 @@ function mapBlocksToTimestamps(blocks: AdBlock[], lines: TranscriptLine[], audio
   return blocks;
 }
 
-// ─── Step 5: Print annotated transcript + results ───────────────────────────
+// ─── Print annotated transcript + results ────────────────────────────────────
 
 function printAnnotatedTranscript(lines: TranscriptLine[], blocks: AdBlock[], audioDurationSec: number) {
   banner('ANNOTATED TRANSCRIPT');
@@ -855,13 +855,13 @@ async function main() {
   // Step 4: Map ad-block line ranges to audio timestamps
   adBlocks = mapBlocksToTimestamps(adBlocks, lines, audioDurationSec);
 
-  // Step 5: Print annotated transcript with ad blocks highlighted
+  // Print annotated transcript with ad blocks highlighted
   printAnnotatedTranscript(lines, adBlocks, audioDurationSec);
 
-  // Step 6: Print results + skip map
+  // Print results + skip map
   printResults(adBlocks, lines, audioDurationSec);
 
-  // Step 7: Full JSON dump
+  // Full JSON dump
   printDebugDump(episode, lines, adBlocks, audioDurationSec);
 
   banner('SANDBOX COMPLETE');

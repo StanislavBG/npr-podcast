@@ -645,7 +645,7 @@ app.post('/api/audio/chunk', async (req, res) => {
 
     console.log(`[chunk ${chunkIndex}] Downloaded ${(audioBuffer.length / 1024 / 1024).toFixed(1)} MB`);
 
-    // Step 5: Transcribe chunk with Whisper
+    // Transcribe chunk with Whisper
     // Align to first valid MP3 frame sync — Range requests start at arbitrary
     // byte offsets which produce leading garbage that confuses Whisper.
     const compatBuffer = alignToMp3Frame(audioBuffer);
@@ -699,12 +699,12 @@ app.post('/api/audio/chunk', async (req, res) => {
   }
 });
 
-// ─── Step 6: Dedicated Ad Detection (separate from transcription) ────────────
+// ─── Dedicated Ad Detection (separate from transcription) ────────────────────
 
 /**
  * Detect ads from the full assembled transcript. Called AFTER all chunks have been
- * transcribed (Step 5 complete). Takes all transcript segments with timestamps and
- * uses a focused LLM call to find complete ad sentences.
+ * transcribed. Takes all transcript segments with timestamps and uses a focused
+ * LLM call to find complete ad sentences.
  */
 app.post('/api/audio/detect-ads', async (req, res) => {
   const {
@@ -1718,8 +1718,8 @@ Return JSON:
 }
 
 /**
- * Step 7: Refine ad block boundaries using LLM.
- * Takes anchor boundaries from per-chunk classification (Step 6) and examines surrounding
+ * Refine ad block boundaries using LLM.
+ * Takes anchor boundaries from per-chunk classification and examines surrounding
  * transcript context to find precise ad start/end times (0.1s precision).
  */
 async function refineBoundariesWithLLM(
@@ -1826,7 +1826,7 @@ Return JSON:
         }
       }
 
-      console.log(`[sandbox] Step 7 refined ${anchors.length} anchors → ${refinedBlocks.length} boundaries`);
+      console.log(`[sandbox] Refined ${anchors.length} anchors → ${refinedBlocks.length} boundaries`);
     }
   } else {
     llmRaw = '(no LLM key — using anchor boundaries as-is)';
@@ -2198,7 +2198,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
 
         console.log(`[sandbox] Audio transcription complete: ${lines.length} lines, ${cumW} words, ${allSegments.length} segments`);
 
-        // Per-chunk refine + emit already ran — no need for Step 7/8
+        // Per-chunk refine + emit already ran — no post-processing needed
         // Store merged ad blocks for the final result
         (audioDetails as any).chunkAdAnchors = allChunkAdBlocks;
       } catch (sttErr: any) {

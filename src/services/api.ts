@@ -71,7 +71,7 @@ export async function llmParseTranscript(html: string): Promise<LLMTranscriptRes
   return res.json();
 }
 
-/** Step 5: LLM analyzes transcript + duration to produce ad time ranges */
+/** LLM analyzes transcript + duration to produce ad time ranges */
 export async function llmDetectAds(
   transcript: LLMTranscriptResult,
   audioDurationSeconds: number,
@@ -89,7 +89,7 @@ export async function llmDetectAds(
   return res.json();
 }
 
-/** Step 6: LLM summarizes episode and produces final skip map */
+/** LLM summarizes episode and produces final skip map */
 export async function llmPreparePlayback(
   transcript: LLMTranscriptResult,
   adDetection: AdDetectionResult,
@@ -130,7 +130,7 @@ export interface ChunkResult {
   trailingText: string;
 }
 
-/** Step 3: Resolve audio URL — HEAD request, follow redirects, get metadata */
+/** Resolve audio URL — HEAD request, follow redirects, get metadata */
 export async function resolveAudio(audioUrl: string): Promise<AudioMeta> {
   const res = await fetch(`${BASE}/audio/resolve`, {
     method: 'POST',
@@ -144,7 +144,7 @@ export async function resolveAudio(audioUrl: string): Promise<AudioMeta> {
   return res.json();
 }
 
-/** Step 6: Detect ads from the full assembled transcript (all chunks) */
+/** Detect ads from the full assembled transcript (all chunks) */
 export async function detectAdsFromTranscript(params: {
   segments: Array<{ start: number; end: number; text: string }>;
   episodeTitle: string;
@@ -272,7 +272,7 @@ export interface SandboxProgressEvent {
   step: string;
   status?: 'done' | 'error' | 'skipped';
   message: string;
-  // Parallel chunk tracking — present for per-chunk Steps 5+6
+  // Parallel chunk tracking — present for per-chunk thread events
   threadId?: string;
   chunkIndex?: number;
   totalChunks?: number;
