@@ -2036,6 +2036,10 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           sendEvent('progress', {
             step: 'step_fetch_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
             status: 'done', message: `${chunkSizeKB} KB fetched`,
+            bytesFetched: endByte - startByte + 1,
+            byteRange: `${startByte}-${endByte}`,
+            offsetSec: Math.round(offsetSec * 10) / 10,
+            audioUrl: resolvedUrl.slice(0, 120),
           });
 
           // ── Transcribe chunk with Whisper ──
@@ -2072,9 +2076,14 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             releaseSemaphore();
           }
 
+          const chunkWordCount = chunkText.split(/\s+/).filter(Boolean).length;
           sendEvent('progress', {
             step: 'step_transcribe_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-            status: 'done', message: `${segs.length} segments`,
+            status: 'done', message: `${segs.length} segments, ${chunkWordCount} words`,
+            segmentCount: segs.length,
+            wordCount: chunkWordCount,
+            transcriptPreview: chunkText.slice(0, 300) + (chunkText.length > 300 ? '...' : ''),
+            durationSec: segs.length > 0 ? Math.round((segs[segs.length - 1].end - segs[0].start) * 10) / 10 : 0,
           });
 
           // ── Classify ads in this chunk ──
@@ -2097,11 +2106,15 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             sendEvent('progress', {
               step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
               status: 'done', message: `${chunkAdBlocks.length} ad blocks`,
+              adBlockCount: chunkAdBlocks.length,
+              linesAnalyzed: chunkLines.length,
             });
           } else {
             sendEvent('progress', {
               step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
               status: 'done', message: `skipped (${chunkLines.length} lines)`,
+              adBlockCount: 0,
+              linesAnalyzed: chunkLines.length,
             });
           }
 
@@ -2117,15 +2130,19 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             } catch (refineErr: any) {
               console.warn(`[sandbox] Chunk ${ci + 1} refine failed (non-fatal): ${refineErr.message}`);
             }
+            const refinedAdTimeSec = chunkAdBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
             sendEvent('progress', {
               step: 'step_refine_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
               status: 'done', message: `${chunkAdBlocks.length} refined`,
+              refinedBlocks: chunkAdBlocks.length,
+              totalAdTimeSec: Math.round(refinedAdTimeSec * 10) / 10,
             });
           } else {
             sendEvent('progress', {
               step: 'step_refine_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-              status: chunkAdBlocks.length === 0 ? 'done' : 'done',
+              status: 'done',
               message: chunkAdBlocks.length === 0 ? 'no ads found' : 'no LLM key',
+              refinedBlocks: 0,
             });
           }
 
@@ -2148,6 +2165,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           sendEvent('progress', {
             step: 'step_emit_skips', threadId, chunkIndex: ci, totalChunks: numChunks,
             status: 'done', message: chunkAdBlocks.length > 0 ? `${chunkAdBlocks.length} ranges emitted` : 'no ads',
+            emittedRanges: chunkAdBlocks.length,
           });
 
           chunkResults[ci] = { chunkIndex: ci, text: chunkText, segments: segs, lines: chunkLines, adBlocks: chunkAdBlocks };

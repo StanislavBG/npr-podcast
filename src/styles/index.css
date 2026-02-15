@@ -1005,6 +1005,17 @@ button {
   overflow: hidden;
 }
 
+/* Scrollable content area below header */
+.sb-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.1) transparent;
+}
+
 /* ── Header ── */
 .sb-header {
   display: flex;
@@ -1943,7 +1954,15 @@ button {
   flex-shrink: 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.02);
-  padding: 10px 12px 6px;
+  padding: 10px 12px 10px;
+}
+
+/* Allow bilko-flow FlowProgress to expand fully when threads are open */
+.sb-tracker [data-testid="expanded-mode"] {
+  overflow: visible;
+}
+.sb-tracker [data-testid="parallel-thread-lanes"] {
+  overflow: visible;
 }
 
 .sb-tracker-scroll {
@@ -2064,13 +2083,10 @@ button {
   font-weight: 500;
 }
 
-/* ── Detail panel (below tracker, scrollable) ── */
+/* ── Detail panel (below tracker, inside scrollable body) ── */
 .sb-detail-panel {
   flex: 1;
-  overflow-y: auto;
   padding: 0 20px 40px;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255,255,255,0.1) transparent;
 }
 
 .sb-detail-header {
@@ -2190,7 +2206,6 @@ button {
 /* ── No-selection state (shows waterfall + hint) ── */
 .sb-no-selection {
   flex: 1;
-  overflow-y: auto;
   padding: 20px;
 }
 
