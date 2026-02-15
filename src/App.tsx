@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { FlowErrorBoundary } from 'bilko-flow/react/components';
 import { PodcastSelector } from './components/PodcastSelector';
 import { EpisodeList } from './components/EpisodeList';
@@ -17,6 +17,7 @@ import {
   type PartialAdsEvent,
 } from './services/api';
 import type { AdDetectionResult, AdSegment } from './services/adDetector';
+import { mergeChunkAdSegments } from './services/adDetector';
 import { STEP_ORDER, STEP_META } from './workflows/podcastFlow';
 import type { FlowProgressStep, ParallelThread, ParallelConfig } from 'bilko-flow/react/components';
 
@@ -89,6 +90,10 @@ export default function App() {
   const [sandboxResult, setSandboxResult] = useState<SandboxResult | null>(null);
   const [podcastName, setPodcastName] = useState('');
   const [chunkThreads, setChunkThreads] = useState<ParallelThread[]>([]);
+  // Tracks which chunks have completed scanning — used by Player scrubber
+  const [scanProgress, setScanProgress] = useState<{ totalChunks: number; completedChunks: Set<number> }>({ totalChunks: 0, completedChunks: new Set() });
+  // Accumulator ref for partial ads (avoids stale closure in SSE callback)
+  const accumulatedAdsRef = useRef<AdSegment[]>([]);
 
   // Derived: has the pipeline started? (View Details enabled as soon as flow is non-idle)
   const pipelineStarted = pipelineStatus !== 'idle';
@@ -155,6 +160,8 @@ export default function App() {
     setSandboxResult(null);
     setPipelineStatus('running');
     setChunkThreads([]);
+    setScanProgress({ totalChunks: 0, completedChunks: new Set() });
+    accumulatedAdsRef.current = [];
 
     const steps = createInitialSteps();
     // Mark steps 1-2 as already done (episodes loaded)
@@ -219,6 +226,18 @@ export default function App() {
             }
             return threads;
           });
+          // Track scan progress: when a chunk's last step completes, mark it scanned
+          if (evt.step === 'step_emit_skips' && evt.status === 'done' && evt.chunkIndex != null) {
+            setScanProgress(prev => {
+              const next = new Set(prev.completedChunks);
+              next.add(evt.chunkIndex!);
+              return { totalChunks: evt.totalChunks || prev.totalChunks, completedChunks: next };
+            });
+          }
+          // Capture totalChunks as early as possible (first chunk event)
+          if (evt.totalChunks && evt.totalChunks > 0) {
+            setScanProgress(prev => prev.totalChunks === 0 ? { ...prev, totalChunks: evt.totalChunks! } : prev);
+          }
         } else {
           // Main pipeline step — use bilko-flow well-known meta keys
           const stepId = evt.step;
@@ -239,19 +258,21 @@ export default function App() {
         }
       };
 
-      // Handle early ad detection — apply partial results to the player immediately
+      // Handle early ad detection — accumulate and merge across chunks
       const handlePartialAds = (evt: PartialAdsEvent) => {
         if (evt.skipMap && evt.skipMap.length > 0) {
-          const segments: AdSegment[] = evt.skipMap.map(s => ({
+          const incoming: AdSegment[] = evt.skipMap.map(s => ({
             startTime: s.startTime,
             endTime: s.endTime,
             type: (s.type || 'mid-roll') as AdSegment['type'],
             confidence: s.confidence,
             reason: s.reason,
           }));
-          const totalAdTime = segments.reduce((sum, seg) => sum + (seg.endTime - seg.startTime), 0);
+          const merged = mergeChunkAdSegments(accumulatedAdsRef.current, incoming);
+          accumulatedAdsRef.current = merged;
+          const totalAdTime = merged.reduce((sum, seg) => sum + (seg.endTime - seg.startTime), 0);
           setAds({
-            segments,
+            segments: merged,
             totalAdTime,
             contentDuration: durationSec - totalAdTime,
             strategy: `early-${evt.source}`,
@@ -403,7 +424,13 @@ export default function App() {
         {/* Player dock pinned to bottom */}
         {episode && (
           <div className="player-dock">
-            <Player episode={episode} adDetection={ads} />
+            <Player
+              episode={episode}
+              adDetection={ads}
+              scanProgress={scanProgress}
+              pipelineStatus={pipelineStatus}
+              autoPlay
+            />
           </div>
         )}
       </div>

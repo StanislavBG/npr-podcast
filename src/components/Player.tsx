@@ -3,12 +3,20 @@ import type { Episode } from '../services/api';
 import { getAudioProxyUrl, formatTime } from '../services/api';
 import { isInAdSegment, getNextContentTime, type AdDetectionResult } from '../services/adDetector';
 
+interface ScanProgressInfo {
+  totalChunks: number;
+  completedChunks: Set<number>;
+}
+
 interface Props {
   episode: Episode;
   adDetection: AdDetectionResult | null;
+  scanProgress?: ScanProgressInfo;
+  pipelineStatus?: 'idle' | 'running' | 'complete' | 'error';
+  autoPlay?: boolean;
 }
 
-export function Player({ episode, adDetection }: Props) {
+export function Player({ episode, adDetection, scanProgress, pipelineStatus, autoPlay }: Props) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false);
@@ -44,7 +52,10 @@ export function Player({ episode, adDetection }: Props) {
     if (!a) return;
     setAudioError(null);
     const h = {
-      loadedmetadata: () => setDur(a.duration),
+      loadedmetadata: () => {
+        setDur(a.duration);
+        if (autoPlay) a.play().catch(() => { /* browser may block autoplay */ });
+      },
       timeupdate: () => setTime(a.currentTime),
       play: () => setPlaying(true),
       pause: () => setPlaying(false),
@@ -57,7 +68,7 @@ export function Player({ episode, adDetection }: Props) {
     return () => {
       (Object.keys(h) as (keyof typeof h)[]).forEach((e) => a.removeEventListener(e, h[e]));
     };
-  }, [episode]);
+  }, [episode, autoPlay]);
 
   const toggle = useCallback(() => {
     const a = audioRef.current;
@@ -146,6 +157,22 @@ export function Player({ episode, adDetection }: Props) {
           onPointerUp={onTrackPointerUp}
           onPointerCancel={onTrackPointerUp}
         >
+          {/* Scan progress: show which chunks have been scanned */}
+          {scanProgress && scanProgress.totalChunks > 0 && dur > 0 && (
+            Array.from({ length: scanProgress.totalChunks }, (_, i) => {
+              const chunkLeft = (i / scanProgress.totalChunks) * 100;
+              const chunkWidth = (1 / scanProgress.totalChunks) * 100;
+              const isScanned = scanProgress.completedChunks.has(i);
+              return (
+                <div
+                  key={`scan-${i}`}
+                  className={`timeline-scan ${isScanned ? 'scanned' : 'pending'}`}
+                  style={{ left: `${chunkLeft}%`, width: `${chunkWidth}%` }}
+                  title={`Chunk ${i + 1}/${scanProgress.totalChunks}: ${isScanned ? 'scanned' : 'scanning...'}`}
+                />
+              );
+            })
+          )}
           {/* Ad segments highlighted on the track */}
           {adDetection && dur > 0 && adDetection.segments.map((seg, i) => {
             const left = (seg.startTime / dur) * 100;
@@ -203,6 +230,12 @@ export function Player({ episode, adDetection }: Props) {
               <span className="ad-skip-toggle-knob" />
             </span>
           </button>
+        </div>
+      )}
+      {/* Scan progress indicator */}
+      {pipelineStatus === 'running' && scanProgress && scanProgress.totalChunks > 0 && (
+        <div className="scan-status">
+          Scanning {scanProgress.completedChunks.size}/{scanProgress.totalChunks} chunks
         </div>
       )}
     </div>
