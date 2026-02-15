@@ -8,25 +8,23 @@ import {
 /**
  * Podcast processing workflow using bilko-flow DSL.
  *
- * Clarified flow: audio streaming happens BEFORE transcription.
- * We stream audio ahead of the listener, transcribe chunks as they arrive,
- * and mark ad locations progressively so they're known before the user
- * reaches them.
- *
- * Pipeline:
+ * Pipeline (parallelized per-chunk):
  *   1. fetch_rss              – Pull the podcast RSS feed              (http.request)
  *   2. parse_episodes         – Extract episode list from XML          (http.request — server parses)
  *     ── user selects episode ──
  *   3. resolve_audio_stream   – Resolve CDN URL, get duration/size     (http.request — HEAD)
- *   4. start_audio_streaming  – Stream audio chunks ahead of playback  (stream.chunk)
- *   5. transcribe_chunks      – Speech-to-text on each audio chunk     (ai.speech-to-text)
- *   6. mark_ad_locations      – LLM classifies segments as content/ad  (ai.generate-text)
- *   7. build_skip_map         – Accumulate ad ranges into skip map     (compute)
- *   8. fetch_html_transcript  – Parallel: get NPR HTML for cross-ref   (http.request)
+ *   4. start_audio_streaming  – Download & split into ~5-min chunks    (stream.chunk)
+ *     ── parallel per-chunk threads (shown as tubes in UI) ──
+ *     5.x  transcribe_chunk   – STT on each chunk concurrently         (ai.speech-to-text)
+ *     6.x  classify_chunk     – LLM classifies chunk as content/ad     (ai.generate-text)
+ *     ── all threads join ──
+ *   7. refine_ad_boundaries   – LLM refines anchor → precise bounds   (ai.generate-text)
+ *   8. build_skip_map         – Accumulate ad ranges into skip map     (compute)
+ *   8b. fetch_html_transcript – Parallel: get NPR HTML for cross-ref   (http.request)
  *   9. finalize_playback      – Reconcile + summary + quality gate     (ai.summarize)
  *
- * Steps 4–7 run as a streaming pipeline: chunks flow through in order.
- * Step 8 runs in parallel with 4–7.
+ * Steps 5+6 run as parallel per-chunk threads (visualized via bilko-flow parallelThreads).
+ * Step 8b runs in parallel with the main pipeline.
  * Step 9 waits for both branches to complete.
  */
 
@@ -127,73 +125,25 @@ export function createPodcastWorkflow(podcastId: string): Workflow {
         ],
       },
     },
+    // ─── Steps 5+6 run as parallel per-chunk threads (not in main chain) ──
+
+    // ─── Step 7: Refine Ad Boundaries ────────────────────────────────────
     {
-      id: 'step_transcribe_chunks',
+      id: 'step_refine_ad_boundaries',
       workflowId: `wf_podcast_${podcastId}`,
-      name: 'Transcribe Audio Chunks',
-      type: 'ai.speech-to-text',
+      name: 'Refine Ad Boundaries',
+      type: 'ai.generate-text',
       dependsOn: ['step_start_audio_streaming'],
       inputs: {
-        // As each audio chunk arrives, transcribe it to timestamped text.
-        //
-        // Primary: OpenAI Realtime API (WebSocket streaming)
-        //   Protocol: wss://api.openai.com/v1/realtime
-        //   Model: gpt-4o-mini-transcribe
-        //   Input: raw PCM/MP3 audio frames
-        //   Output: streaming transcript with word-level timestamps
-        //
-        // Fallback: Chunked Whisper batch API
-        //   POST /v1/audio/transcriptions with response_format=verbose_json
-        //   Each chunk processed independently, timestamps offset by chunk position
-        //
-        model: 'gpt-4o-mini-transcribe',
-        responseFormat: 'verbose_json',
-        timestampGranularity: 'segment',
-        streamingMode: 'realtime-preferred',
+        // After all per-chunk threads complete, takes anchor boundaries
+        // from per-chunk classification and refines them using full
+        // transcript context. Outputs precise adStart/adEnd in seconds
+        // from episode start, 0.1s precision.
+        prompt: 'Refine per-chunk ad anchor boundaries using surrounding transcript context. Expand/contract to find precise ad start/end times.',
+        model: 'configurable',
+        precision: 0.1,
       },
-      policy: { timeoutMs: 30000, maxAttempts: 3 },
-      determinism: {
-        usesExternalApis: true,
-        pureFunction: false,
-        externalDependencies: [
-          {
-            name: 'OpenAI Speech-to-Text',
-            kind: 'http-api',
-            deterministic: false,
-            evidenceCapture: 'response-hash',
-          },
-        ],
-      },
-    },
-    {
-      id: 'step_mark_ad_locations',
-      workflowId: `wf_podcast_${podcastId}`,
-      name: 'Mark Ad Locations',
-      type: 'ai.generate-text',
-      dependsOn: ['step_transcribe_chunks'],
-      inputs: {
-        // As transcript segments arrive from each chunk, classify each as
-        // content or ad. Uses a lightweight LLM call per chunk (~500 tokens
-        // in, ~200 tokens out) so latency is minimal.
-        //
-        // Prompt approach: provide the transcript segment with ~2 sentences
-        // of surrounding context, ask the LLM to classify:
-        //   - "content"         → editorial podcast content
-        //   - "sponsor_read"    → host reading a sponsor message
-        //   - "funding_credit"  → NPR funding acknowledgment
-        //   - "npr_promo"       → NPR show/network promotion
-        //   - "dynamic_ad"      → inserted ad (detected via audio artifacts:
-        //                         volume shift, different speaker/mic quality,
-        //                         abrupt topic change)
-        //
-        // The "dynamic_ad" type is NEW — it catches Megaphone-inserted ads
-        // that only exist in the audio stream, never in the HTML transcript.
-        //
-        prompt: 'Classify each transcript segment as content or ad type. Look for: sponsor reads, funding credits, NPR promos, and dynamic ad insertions (volume/quality shifts, abrupt topic changes).',
-        model: 'gpt-4o-mini',
-        outputFormat: 'chatJSON',
-      },
-      policy: { timeoutMs: 15000, maxAttempts: 3 },
+      policy: { timeoutMs: 30000, maxAttempts: 2 },
       determinism: {
         usesExternalApis: true,
         pureFunction: false,
@@ -212,7 +162,7 @@ export function createPodcastWorkflow(podcastId: string): Workflow {
       workflowId: `wf_podcast_${podcastId}`,
       name: 'Build Skip Map',
       type: 'compute',
-      dependsOn: ['step_mark_ad_locations'],
+      dependsOn: ['step_refine_ad_boundaries'],
       inputs: {
         // Pure computation — no external calls.
         // As classified segments arrive:
@@ -335,25 +285,32 @@ const STEP_META: Record<string, { label: string; type: string }> = {
   step_fetch_rss:              { label: 'Fetch RSS Feed',           type: 'http.request' },
   step_parse_episodes:         { label: 'Parse Episodes',           type: 'http.request' },
   step_resolve_audio_stream:   { label: 'Resolve Audio Stream',     type: 'http.request' },
-  step_start_audio_streaming:  { label: 'Stream Audio Chunks',      type: 'stream.chunk' },
-  step_transcribe_chunks:      { label: 'Transcribe Audio Chunks',  type: 'ai.speech-to-text' },
-  step_mark_ad_locations:      { label: 'Mark Ad Locations',        type: 'ai.generate-text' },
+  step_start_audio_streaming:  { label: 'Download & Chunk Audio',   type: 'stream.chunk' },
+  // Steps 5+6 are per-chunk parallel threads — not in STEP_ORDER
+  step_refine_ad_boundaries:   { label: 'Refine Ad Boundaries',     type: 'ai.generate-text' },
   step_build_skip_map:         { label: 'Build Skip Map',           type: 'compute' },
   step_fetch_html_transcript:  { label: 'Fetch HTML Transcript',    type: 'http.request' },
   step_finalize_playback:      { label: 'Finalize Playback',        type: 'ai.summarize' },
 };
 
+/** Main chain step order. Per-chunk thread steps (5+6) live in parallelThreads, not here. */
 const STEP_ORDER = [
   'step_fetch_rss',
   'step_parse_episodes',
   'step_resolve_audio_stream',
   'step_start_audio_streaming',
-  'step_transcribe_chunks',
-  'step_mark_ad_locations',
+  // ← parallelThreads (chunk-0..N: Transcribe → Classify) inserted here visually
+  'step_refine_ad_boundaries',
   'step_build_skip_map',
   'step_fetch_html_transcript',
   'step_finalize_playback',
 ];
 
+/** Per-chunk thread step definitions (used to build ParallelThread.steps) */
+const CHUNK_STEP_META: Record<string, { label: string; type: string }> = {
+  step_transcribe_chunk:  { label: 'Transcribe', type: 'ai.speech-to-text' },
+  step_classify_chunk:    { label: 'Classify Ads', type: 'ai.generate-text' },
+};
+
 /** Export step order and metadata for consumers */
-export { STEP_ORDER, STEP_META };
+export { STEP_ORDER, STEP_META, CHUNK_STEP_META };

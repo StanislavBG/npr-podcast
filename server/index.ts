@@ -1718,6 +1718,123 @@ Return JSON:
   return { adBlocks, llmRaw, systemPrompt, userPrompt };
 }
 
+/**
+ * Step 7: Refine ad block boundaries using LLM.
+ * Takes anchor boundaries from per-chunk classification (Step 6) and examines surrounding
+ * transcript context to find precise ad start/end times (0.1s precision).
+ */
+async function refineBoundariesWithLLM(
+  anchors: SandboxAdBlock[],
+  lines: SandboxLine[],
+  durationSec: number,
+  episodeTitle: string,
+  topicContext?: string,
+): Promise<{ adBlocks: SandboxAdBlock[]; llmRaw: string; systemPrompt: string; userPrompt: string }> {
+  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
+  const dur = durationSec || 0;
+
+  // Build context windows around each anchor: ±5 sentences
+  const CONTEXT_WINDOW = 5;
+  const anchorContexts = anchors.map((anchor, i) => {
+    const startIdx = lines.findIndex(l => l.lineNum >= anchor.startLine);
+    const endIdx = lines.findIndex(l => l.lineNum >= anchor.endLine);
+    const contextStart = Math.max(0, (startIdx >= 0 ? startIdx : 0) - CONTEXT_WINDOW);
+    const contextEnd = Math.min(lines.length, (endIdx >= 0 ? endIdx : lines.length - 1) + CONTEXT_WINDOW + 1);
+    const contextLines = lines.slice(contextStart, contextEnd);
+
+    return {
+      anchorIndex: i,
+      anchorStartLine: anchor.startLine,
+      anchorEndLine: anchor.endLine,
+      reason: anchor.reason,
+      context: contextLines.map(l => {
+        const approxTime = dur > 0 && totalWords > 0 ? (l.cumulativeWords / totalWords) * dur : 0;
+        const isAnchor = l.lineNum >= anchor.startLine && l.lineNum <= anchor.endLine;
+        return `[${l.lineNum}] (${fmtTs(approxTime)}) ${isAnchor ? '>>AD>> ' : ''}${l.text}`;
+      }).join('\n'),
+    };
+  });
+
+  const systemPrompt = `You are refining ad segment boundaries in a podcast transcript.
+
+Each anchor below was identified by a per-chunk classifier. Your job is to find the PRECISE start and end of each ad segment by examining the surrounding transcript context.
+
+${topicContext ? `This episode is titled "${episodeTitle}". The main topic is: ${topicContext}\nAny discussion of this topic is EDITORIAL CONTENT, not advertising.\n` : ''}
+Rules:
+- Anchors are approximate. Examine sentences before and after each anchor boundary.
+- If sentences immediately before the anchor start are also ad content (sponsor reads, promos, funding credits), expand the boundary earlier.
+- If sentences immediately after the anchor end are also ad content, expand the boundary later.
+- If edge sentences are editorial content, contract the boundary inward.
+- An ad block is typically 3-10 consecutive sentences.
+- For each refined boundary, output adStart and adEnd as seconds from episode start, rounded to 0.1s.
+- Do NOT merge separate ad blocks — keep them as distinct segments.
+
+Return ONLY valid JSON.`;
+
+  const userPrompt = `Refine these ${anchors.length} ad anchor(s) in "${episodeTitle}" (${Math.round(dur / 60)} min).
+
+Lines marked with ">>AD>>" are the current anchor boundaries. Examine the surrounding context and adjust.
+
+${anchorContexts.map(ac => `--- Anchor ${ac.anchorIndex + 1} (lines ${ac.anchorStartLine}-${ac.anchorEndLine}): ${ac.reason} ---
+${ac.context}`).join('\n\n')}
+
+For each anchor, return the refined boundary in seconds from episode start (0.1s precision).
+Return JSON:
+{
+  "refinedBoundaries": [
+    { "adStart": <seconds>, "adEnd": <seconds>, "reason": "<what is being advertised>" }
+  ]
+}`;
+
+  let refinedBlocks: SandboxAdBlock[] = [...anchors];
+  let llmRaw = '';
+
+  if (LLM_API_KEY) {
+    const { parsed, rawText } = await callLLM(systemPrompt, userPrompt, 0, 2048);
+    llmRaw = rawText;
+    const result = parsed as { refinedBoundaries?: Array<{ adStart: number; adEnd: number; reason: string }> };
+
+    if (result.refinedBoundaries && result.refinedBoundaries.length > 0) {
+      refinedBlocks = result.refinedBoundaries
+        .filter(b => typeof b.adStart === 'number' && typeof b.adEnd === 'number' && b.adStart < b.adEnd && b.adStart >= 0 && b.adEnd <= dur + 1)
+        .map(b => ({
+          startLine: 0,
+          endLine: 0,
+          reason: b.reason || 'Refined ad boundary',
+          textPreview: '',
+          startWord: 0,
+          endWord: 0,
+          startTimeSec: Math.round(b.adStart * 10) / 10,
+          endTimeSec: Math.round(b.adEnd * 10) / 10,
+        }));
+
+      // Reconstruct word/line info from timestamps
+      for (const block of refinedBlocks) {
+        if (dur > 0 && totalWords > 0) {
+          block.startWord = Math.round((block.startTimeSec / dur) * totalWords);
+          block.endWord = Math.round((block.endTimeSec / dur) * totalWords);
+        }
+        // Find closest lines for preview
+        const matchingLines = lines.filter(l => {
+          const approxTime = dur > 0 && totalWords > 0 ? (l.cumulativeWords / totalWords) * dur : 0;
+          return approxTime >= block.startTimeSec && approxTime <= block.endTimeSec;
+        });
+        if (matchingLines.length > 0) {
+          block.startLine = matchingLines[0].lineNum;
+          block.endLine = matchingLines[matchingLines.length - 1].lineNum;
+          block.textPreview = matchingLines.map(l => l.text).join(' ').slice(0, 300);
+        }
+      }
+
+      console.log(`[sandbox] Step 7 refined ${anchors.length} anchors → ${refinedBlocks.length} boundaries`);
+    }
+  } else {
+    llmRaw = '(no LLM key — using anchor boundaries as-is)';
+  }
+
+  return { adBlocks: refinedBlocks, llmRaw, systemPrompt, userPrompt };
+}
+
 /** Derive a topic summary from the episode title and first ~200 words of transcript (no LLM call) */
 function deriveTopicContext(episodeTitle: string, lines: SandboxLine[]): string {
   // Take the first ~200 words of actual content
@@ -1864,74 +1981,141 @@ app.post('/api/sandbox/analyze', async (req, res) => {
 
         console.log(`[sandbox] Transcribing "${episodeTitle}" in ${numChunks} chunks, total duration ~${estDuration.toFixed(0)}s`);
 
-        let allText = '';
-        let allSegments: Array<{ start: number; end: number; text: string }> = [];
+        // ── Parallel per-chunk pipeline: Steps 5+6 run concurrently per chunk ──
+        // Semaphore limits concurrent OpenAI STT calls to avoid rate limits.
+        const STT_CONCURRENCY = 3;
+        let activeCalls = 0;
+        const waitQueue: Array<() => void> = [];
+        const acquireSemaphore = (): Promise<void> => {
+          if (activeCalls < STT_CONCURRENCY) { activeCalls++; return Promise.resolve(); }
+          return new Promise<void>(resolve => waitQueue.push(resolve));
+        };
+        const releaseSemaphore = () => {
+          activeCalls--;
+          if (waitQueue.length > 0) { activeCalls++; waitQueue.shift()!(); }
+        };
 
-        // Step 5: Transcribe each chunk
-        sendEvent('progress', { step: 'step_transcribe_chunks', message: `Transcribing ${numChunks} chunks...`, chunk: 0, totalChunks: numChunks });
-        let earlyAdsSent = false;
-        for (let ci = 0; ci < numChunks; ci++) {
+        interface ChunkResult {
+          chunkIndex: number;
+          text: string;
+          segments: Array<{ start: number; end: number; text: string }>;
+          lines: SandboxLine[];
+          adBlocks: SandboxAdBlock[];
+        }
+
+        // Ordered results array — filled by parallel workers
+        const chunkResults: (ChunkResult | null)[] = new Array(numChunks).fill(null);
+
+        // Process a single chunk: STT (Step 5.x) → Classify (Step 6.x) → partial_ads
+        const processChunk = async (ci: number): Promise<void> => {
           const chunk = mp3Chunks[ci]!;
           const chunkMB = (chunk.buffer.length / 1024 / 1024).toFixed(1);
-          console.log(`[sandbox] Chunk ${ci + 1}/${numChunks}: ${chunkMB} MB, offset ${chunk.offsetSec.toFixed(0)}s, duration ${chunk.durationSec.toFixed(0)}s`);
-          sendEvent('progress', { step: 'step_transcribe_chunks', message: `Transcribing chunk ${ci + 1}/${numChunks} (${chunkMB} MB)...`, chunk: ci + 1, totalChunks: numChunks });
+          const threadId = `chunk-${ci}`;
 
+          // Step 5.x: Transcribe
+          sendEvent('progress', {
+            step: 'step_transcribe_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+            message: `Transcribing chunk ${ci + 1}/${numChunks} (${chunkMB} MB)...`,
+          });
+          console.log(`[sandbox] Chunk ${ci + 1}/${numChunks}: ${chunkMB} MB, offset ${chunk.offsetSec.toFixed(0)}s, duration ${chunk.durationSec.toFixed(0)}s`);
+
+          let chunkText = '';
+          let segs: Array<{ start: number; end: number; text: string }> = [];
+
+          await acquireSemaphore();
           try {
             const { toFile } = await import('openai');
             const file = await toFile(chunk.buffer, `chunk_${ci}.mp3`);
             const result = await sttOpenai.audio.transcriptions.create({ file, model: 'gpt-4o-mini-transcribe', response_format: 'verbose_json' }) as any;
-
-            const chunkText = (result.text || '').trim();
-            allText += chunkText + ' ';
-            const segs = (result.segments || []).map((s: any) => ({
+            chunkText = (result.text || '').trim();
+            segs = (result.segments || []).map((s: any) => ({
               start: (s.start || 0) + chunk.offsetSec,
               end: (s.end || 0) + chunk.offsetSec,
               text: (s.text || '').trim(),
             }));
-            allSegments.push(...segs);
             console.log(`[sandbox] Chunk ${ci + 1}: ${segs.length} segments, ${chunkText.split(/\s+/).length} words`);
           } catch (chunkErr: any) {
-            console.warn(`[sandbox] Chunk ${ci + 1} transcription failed: ${chunkErr.message}`);
-            // Fallback: try plain text transcription
+            console.warn(`[sandbox] Chunk ${ci + 1} STT failed: ${chunkErr.message}`);
             try {
               const plainText = await speechToText(chunk.buffer, 'mp3');
               if (plainText) {
-                allText += plainText + ' ';
-                allSegments.push({ start: chunk.offsetSec, end: chunk.offsetSec + chunk.durationSec, text: plainText.trim() });
+                chunkText = plainText;
+                segs = [{ start: chunk.offsetSec, end: chunk.offsetSec + chunk.durationSec, text: plainText.trim() }];
               }
             } catch { /* skip chunk */ }
+          } finally {
+            releaseSemaphore();
           }
 
-          // ── Early ad detection: after first chunk, immediately classify what we have ──
-          // This gets ad data to the player ASAP — critical for ads at the start of an episode.
-          if (ci === 0 && !earlyAdsSent && allSegments.length > 0) {
-            earlyAdsSent = true;
-            const earlyLines = buildLinesFromSegments(allSegments);
-            if (earlyLines.length >= 3) {
-              console.log(`[sandbox] Running early ad detection on first chunk: ${earlyLines.length} sentences`);
-              try {
-                const earlyResult = await classifyAdsFromLines(earlyLines, episodeTitle, estDuration);
-                if (earlyResult.adBlocks.length > 0) {
-                  const earlySkipMap = earlyResult.adBlocks.map(b => ({
-                    startTime: Math.round(b.startTimeSec),
-                    endTime: Math.round(b.endTimeSec),
-                    type: 'mid-roll',
-                    confidence: 0.8,
-                    reason: b.reason,
-                  }));
-                  sendEvent('partial_ads', { skipMap: earlySkipMap, source: 'early-chunk-0' });
-                  console.log(`[sandbox] Early ad detection: ${earlyResult.adBlocks.length} blocks sent to player`);
-                } else {
-                  sendEvent('partial_ads', { skipMap: [], source: 'early-chunk-0' });
-                }
-              } catch (earlyErr: any) {
-                console.warn(`[sandbox] Early ad detection failed (non-fatal): ${earlyErr.message}`);
+          sendEvent('progress', {
+            step: 'step_transcribe_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+            status: 'done', message: `Chunk ${ci + 1} transcribed: ${segs.length} segments`,
+          });
+
+          // Build lines from this chunk's segments
+          const chunkLines = buildLinesFromSegments(segs);
+
+          // Step 6.x: Classify ads in this chunk
+          let chunkAdBlocks: SandboxAdBlock[] = [];
+          if (chunkLines.length >= 3) {
+            sendEvent('progress', {
+              step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+              message: `Classifying ads in chunk ${ci + 1}...`,
+            });
+
+            try {
+              const chunkClassify = await classifyAdsFromLines(chunkLines, episodeTitle, estDuration);
+              chunkAdBlocks = chunkClassify.adBlocks;
+
+              // Send partial ads to player immediately
+              if (chunkAdBlocks.length > 0) {
+                const partialSkipMap = chunkAdBlocks.map(b => ({
+                  startTime: Math.round(b.startTimeSec * 10) / 10,
+                  endTime: Math.round(b.endTimeSec * 10) / 10,
+                  type: 'mid-roll',
+                  confidence: 0.8,
+                  reason: b.reason,
+                }));
+                sendEvent('partial_ads', { skipMap: partialSkipMap, source: `chunk-${ci}` });
+                console.log(`[sandbox] Chunk ${ci + 1} ad detection: ${chunkAdBlocks.length} blocks sent to player`);
               }
+            } catch (classifyErr: any) {
+              console.warn(`[sandbox] Chunk ${ci + 1} ad classification failed (non-fatal): ${classifyErr.message}`);
             }
+
+            sendEvent('progress', {
+              step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+              status: 'done', message: `Chunk ${ci + 1}: ${chunkAdBlocks.length} ad blocks`,
+            });
+          } else {
+            // Not enough lines — skip classification
+            sendEvent('progress', {
+              step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+              status: 'done', message: `Chunk ${ci + 1}: skipped (${chunkLines.length} lines)`,
+            });
+          }
+
+          chunkResults[ci] = { chunkIndex: ci, text: chunkText, segments: segs, lines: chunkLines, adBlocks: chunkAdBlocks };
+        };
+
+        // Launch all chunks concurrently (semaphore throttles to STT_CONCURRENCY)
+        const chunkPromises = mp3Chunks.map((_, ci) => processChunk(ci));
+        await Promise.allSettled(chunkPromises);
+
+        // Merge results in order
+        let allText = '';
+        let allSegments: Array<{ start: number; end: number; text: string }> = [];
+        const allChunkAdBlocks: SandboxAdBlock[] = [];
+        for (let ci = 0; ci < numChunks; ci++) {
+          const cr = chunkResults[ci];
+          if (cr) {
+            allText += cr.text + ' ';
+            allSegments.push(...cr.segments);
+            allChunkAdBlocks.push(...cr.adBlocks);
           }
         }
 
-        // Build lines from all segments using the shared helper
+        // Build final lines from all segments
         lines = buildLinesFromSegments(allSegments);
         const cumW = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
 
@@ -1958,18 +2142,13 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         audioDetails.audioDurationSec = estDuration;
 
         console.log(`[sandbox] Audio transcription complete: ${lines.length} lines, ${cumW} words, ${allSegments.length} segments`);
-        sendEvent('progress', {
-          step: 'step_transcribe_chunks',
-          status: 'done',
-          message: `Transcription complete: ${lines.length} sentences, ${cumW} words`,
-          lineCount: lines.length,
-          totalWords: cumW,
-          segmentCount: allSegments.length,
-        });
+
+        // Store per-chunk anchor ad blocks for Step 7 refinement
+        (audioDetails as any).chunkAdAnchors = allChunkAdBlocks;
       } catch (sttErr: any) {
         audioDetails.error = sttErr.message;
         console.warn(`[sandbox] Audio transcription failed: ${sttErr.message} — falling back to text transcript`);
-        sendEvent('progress', { step: 'step_transcribe_chunks', status: 'error', message: `Audio transcription failed: ${sttErr.message}` });
+        sendEvent('progress', { step: 'step_transcribe_chunk', status: 'error', message: `Audio transcription failed: ${sttErr.message}` });
       }
     }
 
@@ -2062,31 +2241,86 @@ app.post('/api/sandbox/analyze', async (req, res) => {
     const topicContext = deriveTopicContext(episodeTitle, lines);
     console.log(`[sandbox] Topic context: "${topicContext.slice(0, 120)}..."`);
 
-    // Step 6: Call LLM for topic-aware ad classification
-    sendEvent('progress', { step: 'step_mark_ad_locations', message: 'Classifying sentences as content/ad via LLM (topic-aware)...' });
+    // Gather per-chunk ad anchors (from parallel Step 6) or fall back to full-transcript classification
+    const chunkAdAnchors: SandboxAdBlock[] = (audioDetails as any).chunkAdAnchors || [];
+    let adBlocks: SandboxAdBlock[];
+    let llmRaw = '';
+    let systemPrompt = '';
+    let userPrompt = '';
 
-    const classifyResult = await classifyAdsFromLines(lines, episodeTitle, dur, topicContext);
-    let adBlocks = classifyResult.adBlocks;
-    const llmRaw = classifyResult.llmRaw;
-    const systemPrompt = classifyResult.systemPrompt;
-    const userPrompt = classifyResult.userPrompt;
+    if (chunkAdAnchors.length > 0) {
+      // Per-chunk classification already ran — use those as anchors for Step 7 refinement
+      adBlocks = chunkAdAnchors;
+      llmRaw = `(per-chunk classification: ${chunkAdAnchors.length} anchors from parallel threads)`;
+    } else {
+      // No audio chunks ran — fall back to full-transcript classification (Step 6 equivalent)
+      sendEvent('progress', { step: 'step_refine_ad_boundaries', message: 'Classifying sentences as content/ad via LLM (topic-aware)...' });
+      const classifyResult = await classifyAdsFromLines(lines, episodeTitle, dur, topicContext);
+      adBlocks = classifyResult.adBlocks;
+      llmRaw = classifyResult.llmRaw;
+      systemPrompt = classifyResult.systemPrompt;
+      userPrompt = classifyResult.userPrompt;
+    }
 
-    sendEvent('progress', {
-      step: 'step_mark_ad_locations',
-      status: 'done',
-      message: `Ad classification complete: ${adBlocks.length} ad blocks found`,
-      adBlockCount: adBlocks.length,
-    });
+    // Step 7: Refine ad boundaries with LLM
+    // Takes per-chunk anchors and examines surrounding transcript context to find precise boundaries.
+    if (adBlocks.length > 0 && LLM_API_KEY && lines.length > 0) {
+      sendEvent('progress', { step: 'step_refine_ad_boundaries', message: `Refining ${adBlocks.length} ad boundaries with LLM...` });
 
-    // Step 7: Build skip map (timestamps already mapped by classifyAdsFromLines)
-    sendEvent('progress', { step: 'step_build_skip_map', message: 'Building skip map from ad blocks...' });
+      try {
+        const refinedResult = await refineBoundariesWithLLM(adBlocks, lines, dur, episodeTitle, topicContext);
+        adBlocks = refinedResult.adBlocks;
+        llmRaw = refinedResult.llmRaw;
+        systemPrompt = refinedResult.systemPrompt;
+        userPrompt = refinedResult.userPrompt;
 
-    // Build skip map
+        // Send refined boundaries to player (replaces any per-chunk partials)
+        if (adBlocks.length > 0) {
+          const refinedSkipMap = adBlocks.map(b => ({
+            startTime: Math.round(b.startTimeSec * 10) / 10,
+            endTime: Math.round(b.endTimeSec * 10) / 10,
+            type: 'mid-roll',
+            confidence: 0.92,
+            reason: b.reason,
+          }));
+          sendEvent('partial_ads', { skipMap: refinedSkipMap, source: 'step7-refined' });
+        }
+
+        sendEvent('progress', {
+          step: 'step_refine_ad_boundaries',
+          status: 'done',
+          message: `Refined ${adBlocks.length} ad boundaries (0.1s precision)`,
+        });
+      } catch (refineErr: any) {
+        console.warn(`[sandbox] Step 7 boundary refinement failed (non-fatal): ${refineErr.message}`);
+        sendEvent('progress', {
+          step: 'step_refine_ad_boundaries',
+          status: 'done',
+          message: `Refinement skipped: using ${adBlocks.length} anchor boundaries`,
+        });
+      }
+    } else if (adBlocks.length === 0) {
+      sendEvent('progress', {
+        step: 'step_refine_ad_boundaries',
+        status: 'done',
+        message: 'No ad anchors to refine',
+      });
+    } else {
+      sendEvent('progress', {
+        step: 'step_refine_ad_boundaries',
+        status: 'done',
+        message: `Using ${adBlocks.length} anchor boundaries (no LLM key)`,
+      });
+    }
+
+    // Step 8: Build skip map
+    sendEvent('progress', { step: 'step_build_skip_map', message: 'Building skip map from refined ad blocks...' });
+
     const skipMap = adBlocks.map(b => ({
-      startTime: Math.round(b.startTimeSec),
-      endTime: Math.round(b.endTimeSec),
+      startTime: Math.round(b.startTimeSec * 10) / 10,
+      endTime: Math.round(b.endTimeSec * 10) / 10,
       type: 'mid-roll' as const,
-      confidence: LLM_API_KEY ? 0.9 : 0.5,
+      confidence: LLM_API_KEY ? 0.92 : 0.5,
       reason: b.reason,
     }));
 

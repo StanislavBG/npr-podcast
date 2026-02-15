@@ -17,7 +17,7 @@ import {
 } from './services/api';
 import type { AdDetectionResult, AdSegment } from './services/adDetector';
 import { STEP_ORDER, STEP_META } from './workflows/podcastFlow';
-import type { FlowProgressStep } from 'bilko-flow/react/components';
+import type { FlowProgressStep, ParallelThread, ParallelConfig } from 'bilko-flow/react/components';
 
 // ─── Pipeline step tracking ────────────────────────────────────────────────
 
@@ -87,6 +87,7 @@ export default function App() {
   const [pipelineStatus, setPipelineStatus] = useState<'idle' | 'running' | 'complete' | 'error'>('idle');
   const [sandboxResult, setSandboxResult] = useState<SandboxResult | null>(null);
   const [podcastName, setPodcastName] = useState('');
+  const [chunkThreads, setChunkThreads] = useState<ParallelThread[]>([]);
 
   // Derived: has the pipeline started? (View Details enabled as soon as flow is non-idle)
   const pipelineStarted = pipelineStatus !== 'idle';
@@ -121,6 +122,7 @@ export default function App() {
       setSandboxResult(null);
       setPipelineSteps(createInitialSteps());
       setPipelineStatus('idle');
+      setChunkThreads([]);
 
       // Steps 1-2: Fetch RSS and parse episodes (client-side)
       updateStep('step_fetch_rss', { status: 'active', meta: { message: 'Loading...' } });
@@ -151,6 +153,7 @@ export default function App() {
     setAds(null);
     setSandboxResult(null);
     setPipelineStatus('running');
+    setChunkThreads([]);
 
     const steps = createInitialSteps();
     // Mark steps 1-2 as already done (episodes loaded)
@@ -162,15 +165,46 @@ export default function App() {
 
     try {
       const handleProgress = (evt: SandboxProgressEvent) => {
-        const stepId = evt.step;
-        if (evt.status === 'done') {
-          updateStep(stepId, { status: 'complete', meta: { message: evt.message } });
-        } else if (evt.status === 'error') {
-          updateStep(stepId, { status: 'error', meta: { error: evt.message } });
-        } else if (evt.status === 'skipped') {
-          updateStep(stepId, { status: 'skipped', meta: { skipReason: evt.message } });
+        if (evt.threadId) {
+          // Per-chunk progress → update parallel thread
+          setChunkThreads(prev => {
+            const threads = prev.map(t => ({ ...t, steps: [...t.steps] }));
+            let thread = threads.find(t => t.id === evt.threadId);
+            if (!thread) {
+              thread = {
+                id: evt.threadId!,
+                label: `Chunk ${(evt.chunkIndex ?? 0) + 1}`,
+                status: 'running' as const,
+                steps: [
+                  { id: `${evt.threadId}-transcribe`, label: 'Transcribe', status: 'pending' as const, type: 'ai.speech-to-text' },
+                  { id: `${evt.threadId}-classify`, label: 'Classify Ads', status: 'pending' as const, type: 'ai.generate-text' },
+                ],
+              };
+              threads.push(thread);
+            }
+            const stepSuffix = evt.step === 'step_transcribe_chunk' ? 'transcribe' : 'classify';
+            const stepId = `${evt.threadId}-${stepSuffix}`;
+            const mappedStatus = evt.status === 'done' ? 'complete' as const : evt.status === 'error' ? 'error' as const : 'active' as const;
+            thread.steps = thread.steps.map(s =>
+              s.id === stepId ? { ...s, status: mappedStatus, meta: { message: evt.message } } : s
+            );
+            const allDone = thread.steps.every(s => s.status === 'complete' || s.status === 'skipped');
+            const anyErr = thread.steps.some(s => s.status === 'error');
+            thread.status = anyErr ? 'error' : allDone ? 'complete' : 'running';
+            return threads;
+          });
         } else {
-          updateStep(stepId, { status: 'active', meta: { message: evt.message } });
+          // Main pipeline step
+          const stepId = evt.step;
+          if (evt.status === 'done') {
+            updateStep(stepId, { status: 'complete', meta: { message: evt.message } });
+          } else if (evt.status === 'error') {
+            updateStep(stepId, { status: 'error', meta: { error: evt.message } });
+          } else if (evt.status === 'skipped') {
+            updateStep(stepId, { status: 'skipped', meta: { skipReason: evt.message } });
+          } else {
+            updateStep(stepId, { status: 'active', meta: { message: evt.message } });
+          }
         }
       };
 
@@ -251,12 +285,22 @@ export default function App() {
     return pipelineStatus;
   }, [pipelineSteps, pipelineStatus]);
 
-  // Derive activity text from the active step
+  // Derive flow-level activity text from the active step's label.
+  // Per-step detail (e.g. "Transcribing chunk 1/3") is already in meta.message —
+  // bilko-flow renders that at the step level, so we use only the label here
+  // to avoid showing the same text twice.
   const activity = useMemo(() => {
     const active = pipelineSteps.find(s => s.status === 'active');
     if (!active) return undefined;
-    return (active.meta as any)?.message || `${active.label}...`;
+    return `${active.label}...`;
   }, [pipelineSteps]);
+
+  // Parallel thread config for bilko-flow tubes visualization
+  const parallelConfig: ParallelConfig = useMemo(() => ({
+    maxVisible: 5,
+    autoCollapseCompleted: true,
+    autoCollapseDelayMs: 2000,
+  }), []);
 
   if (page === 'sandbox') {
     return (
@@ -268,6 +312,8 @@ export default function App() {
         podcastId={selected}
         pipelineSteps={pipelineSteps}
         pipelineStatus={pipelineStatus}
+        chunkThreads={chunkThreads}
+        parallelConfig={parallelConfig}
       />
     );
   }
@@ -317,6 +363,8 @@ export default function App() {
                 activity={activity}
                 label="Ad Detection Pipeline"
                 statusMap={STATUS_MAP}
+                parallelThreads={chunkThreads}
+                parallelConfig={parallelConfig}
               />
             </div>
           )}
