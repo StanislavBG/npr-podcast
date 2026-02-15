@@ -88,8 +88,8 @@ export default function App() {
   const [sandboxResult, setSandboxResult] = useState<SandboxResult | null>(null);
   const [podcastName, setPodcastName] = useState('');
 
-  // Derived: is the pipeline done (so View Details can be enabled)?
-  const pipelineDone = pipelineStatus === 'complete' || pipelineStatus === 'error';
+  // Derived: has the pipeline started? (View Details enabled as soon as flow is non-idle)
+  const pipelineStarted = pipelineStatus !== 'idle';
 
   useEffect(() => {
     fetchPodcasts()
@@ -281,10 +281,10 @@ export default function App() {
         <header className="header">
           <h1 className="header-title">NPR Podcasts</h1>
           <button
-            className={`header-sandbox-link ${!pipelineDone ? 'disabled' : ''}`}
+            className={`header-sandbox-link ${!pipelineStarted ? 'disabled' : ''}`}
             onClick={goToSandbox}
-            disabled={!pipelineDone}
-            title={pipelineDone ? 'View pipeline debug details' : 'Select a podcast episode first'}
+            disabled={!pipelineStarted}
+            title={pipelineStarted ? 'View pipeline details' : 'Select an episode first'}
           >
             View Details
           </button>

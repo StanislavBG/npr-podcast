@@ -993,7 +993,15 @@ export function SandboxPage({
   const skippedCount = pipelineSteps.filter(s => s.status === 'skipped').length;
   const completeCount = pipelineSteps.filter(s => s.status === 'complete').length;
 
-  const hasNoData = !result && pipelineStatus !== 'error';
+  // Derive activity text from the active step
+  const activity = useMemo(() => {
+    const active = pipelineSteps.find(s => s.status === 'active');
+    if (!active) return undefined;
+    return (active.meta as Record<string, unknown>)?.message as string || `${active.label}...`;
+  }, [pipelineSteps]);
+
+  const isIdle = pipelineStatus === 'idle';
+  const isRunning = pipelineStatus === 'running';
 
   return (
     <div className="sb-page">
@@ -1014,31 +1022,44 @@ export function SandboxPage({
         </button>
       </header>
 
-      {/* Pipeline overview using bilko-flow FlowProgress */}
-      <div className="sb-flow-overview">
-        <FlowProgress
-          mode="expanded"
-          steps={pipelineSteps}
-          status={pipelineStatus}
-          label="Ad Detection Pipeline"
-        />
-        <div className="sb-flow-stats">
-          <span className="sb-stat sb-stat-ok">{completeCount} done</span>
-          {errorCount > 0 && <span className="sb-stat sb-stat-error">{errorCount} error{errorCount > 1 ? 's' : ''}</span>}
-          {skippedCount > 0 && <span className="sb-stat sb-stat-skip">{skippedCount} skipped</span>}
+      {/* Pipeline overview — always visible, same flow as main screen */}
+      {!isIdle && (
+        <div className="sb-flow-overview">
+          <FlowProgress
+            mode="expanded"
+            steps={pipelineSteps}
+            status={pipelineStatus}
+            label="Ad Detection Pipeline"
+            activity={activity}
+          />
+          <div className="sb-flow-stats">
+            <span className="sb-stat sb-stat-ok">{completeCount} done</span>
+            {errorCount > 0 && <span className="sb-stat sb-stat-error">{errorCount} error{errorCount > 1 ? 's' : ''}</span>}
+            {skippedCount > 0 && <span className="sb-stat sb-stat-skip">{skippedCount} skipped</span>}
+          </div>
         </div>
-      </div>
+      )}
 
-      {hasNoData && (
+      {/* Idle: no episode selected yet */}
+      {isIdle && (
         <div className="sb-error-full">
           <div className="sb-error-icon">?</div>
-          <p>No pipeline results available. Select an episode on the main screen first, then return here once the pipeline completes.</p>
+          <p>No pipeline running. Select an episode on the main screen to start the analysis.</p>
           <button className="sb-retry-btn" onClick={onBack}>
             Go Back
           </button>
         </div>
       )}
 
+      {/* Running: flow is in progress, show the live tracker only */}
+      {isRunning && !result && (
+        <div className="sb-running-notice">
+          <div className="sb-loading-spinner" />
+          <p>Pipeline is processing. Step details will appear here as they complete.</p>
+        </div>
+      )}
+
+      {/* Error with no result */}
       {pipelineStatus === 'error' && !result && (
         <div className="sb-error-full">
           <div className="sb-error-icon">!</div>
@@ -1049,6 +1070,7 @@ export function SandboxPage({
         </div>
       )}
 
+      {/* Result available (complete or error with partial result) — show full debug report */}
       {result && (
         <div className="sb-report-scroll">
           <StepSection index={0} step={STEPS[0]} stepStatus={stepStatusMap['step_fetch_rss']}>
