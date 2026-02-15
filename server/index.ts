@@ -361,12 +361,10 @@ app.get('/api/transcript', async (req, res) => {
 
 // ─── Audio Chunked Processing ────────────────────────────────────────────────
 //
-// Chunked strategy: process 5-minute chunks on-demand, staying 2 chunks ahead
-// of playback. Each chunk is ~4.7 MB at 128kbps — well under Whisper's 25 MB limit.
+// Chunked strategy: 1 MB byte-range chunks fetched via HTTP Range requests.
+// Each chunk is ~65s of audio at 128kbps — well under Whisper's 25 MB limit.
 
 const CHUNK_SIZE_BYTES = 1_048_576;  // 1 MB per chunk (~65s at 128kbps)
-const CHUNK_DURATION_SEC = 300;      // 5 minutes (legacy per-chunk endpoint)
-const CHUNK_OVERLAP_SEC = 10;        // 10s overlap (legacy per-chunk endpoint)
 const DEFAULT_BITRATE = 128000;      // 128kbps
 
 /**

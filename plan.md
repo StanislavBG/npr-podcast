@@ -366,9 +366,9 @@ const adEnd = Math.round(rawEnd * 10) / 10;
 
 ## Risks & Mitigations
 
-1. **OpenAI rate limits with 3 concurrent STT calls** — The semaphore caps concurrency at 3. If rate-limited, back off to 2. Each chunk is ~5 min of audio, so a 15-min episode = 3 chunks = 3 concurrent calls.
+1. **OpenAI rate limits with concurrent STT calls** — The semaphore caps concurrency at 3. If rate-limited, back off to 2. Each 1 MB chunk is ~65s of audio at 128 kbps, so a 28 MB episode = ~28 chunks processed 3-at-a-time.
 
-2. **bilko-flow 5-thread limit** — `MAX_PARALLEL_THREADS = 5`. Most episodes chunk into 2–4 pieces at 5 min each, so this fits. Long episodes (>25 min) would hit the limit; bilko-flow handles overflow with "+N more" indicator and `autoCollapseCompleted: true` collapses finished threads.
+2. **bilko-flow 5-thread limit** — `MAX_PARALLEL_THREADS = 5`. A 28 MB episode produces ~28 chunks, well above the display limit; bilko-flow handles overflow with "+N more" indicator and `autoCollapseCompleted: true` collapses finished threads.
 
 3. **Step 7 LLM accuracy** — The refinement prompt gets full transcript context around each anchor, making it more accurate than per-chunk classification. Validate that `adStart < adEnd` and both are within `[0, durationSec]`. Discard invalid pairs.
 

@@ -277,7 +277,7 @@ function StepResolveAudioStream({ result }: { result: SandboxResult }) {
       {tooLarge && (
         <div className="sb-qa-callout">
           Audio file is {fileSizeMb} MB — exceeds Whisper's 25 MB single-request limit.
-          Chunked processing (5-min chunks, ~4.7 MB each) handles this automatically.
+          Chunked processing (1 MB byte-range chunks) handles this automatically.
         </div>
       )}
     </div>
@@ -296,32 +296,29 @@ function StepStreamAudioChunks({ result }: { result: SandboxResult }) {
     );
   }
 
-  const chunkDurationSec = 300;
-  const bytesPerChunk = chunkDurationSec * (128000 / 8);
+  const CHUNK_SIZE_BYTES = 1_048_576; // 1 MB — must match podcastFlow / server
   const fileSizeMb = audio.contentLengthBytes > 0
     ? (audio.contentLengthBytes / 1024 / 1024).toFixed(1)
     : audio.downloadSizeMb;
   const estimatedChunks = audio.contentLengthBytes > 0
-    ? Math.ceil((audio.contentLengthBytes * 8 / 128000) / chunkDurationSec)
+    ? Math.ceil(audio.contentLengthBytes / CHUNK_SIZE_BYTES)
     : 0;
-  const chunkSizeMb = (bytesPerChunk / 1024 / 1024).toFixed(1);
+  const chunkDurationSec = Math.round(CHUNK_SIZE_BYTES / (128000 / 8));
 
   return (
     <div className="sb-step-body">
       <div className="sb-qa-callout">
-        Full audio is downloaded once, then <strong>split at MP3 frame boundaries</strong> into
-        ~5-minute chunks. Each chunk is a valid MP3 fragment (&lt;5 MB) — well under Whisper's
-        25 MB limit. Frame-accurate splitting ensures clean decoding.
+        Each chunk is fetched via <strong>HTTP Range request</strong> (1 MB per range),
+        then aligned to the nearest MP3 frame boundary. Each chunk is ~{chunkDurationSec}s
+        of audio at 128 kbps — well under Whisper's 25 MB limit.
       </div>
       <div className="sb-kv-grid">
         <div className="sb-kv"><span className="sb-kv-k">File size</span><span className="sb-kv-v">{fileSizeMb} MB ({audio.contentLengthBytes.toLocaleString()} bytes)</span></div>
         <div className="sb-kv"><span className="sb-kv-k">Format</span><span className="sb-kv-v">{audio.contentType}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Chunk strategy</span><span className="sb-kv-v">~5 min per chunk (~{chunkSizeMb} MB at 128kbps)</span></div>
+        <div className="sb-kv"><span className="sb-kv-k">Chunk strategy</span><span className="sb-kv-v">1 MB byte-range (~{chunkDurationSec}s at 128 kbps)</span></div>
         {estimatedChunks > 0 && (
           <div className="sb-kv"><span className="sb-kv-k">Estimated chunks</span><span className="sb-kv-v">{estimatedChunks}</span></div>
         )}
-        <div className="sb-kv"><span className="sb-kv-k">Lookahead</span><span className="sb-kv-v">2 chunks (~10 min ahead of playback)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Overlap</span><span className="sb-kv-v">10 seconds (boundary ad detection)</span></div>
       </div>
       {audio.error ? (
         <div className="sb-qa-alert">
