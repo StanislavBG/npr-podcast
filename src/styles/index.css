@@ -472,6 +472,39 @@ button {
   );
 }
 
+/* Scan progress segments — show which chunks have been scanned */
+.timeline-scan {
+  position: absolute;
+  top: 10px;
+  height: 6px;
+  pointer-events: none;
+  z-index: 0;
+  transition: background 0.4s ease;
+}
+.timeline-scan.scanned {
+  background: rgba(74, 222, 128, 0.25);
+}
+.timeline-scan.pending {
+  background: rgba(255, 255, 255, 0.04);
+}
+/* Pulse animation on the chunk currently being scanned (between scanned neighbors) */
+@keyframes scan-pulse {
+  0%, 100% { opacity: 0.04; }
+  50% { opacity: 0.12; }
+}
+.timeline-scan.pending {
+  animation: scan-pulse 1.5s ease-in-out infinite;
+}
+
+/* Scan status text below controls */
+.scan-status {
+  text-align: center;
+  font-size: 10px;
+  color: rgba(74, 222, 128, 0.7);
+  letter-spacing: 0.5px;
+  padding: 2px 0 4px;
+}
+
 /* Progress fill */
 .timeline-progress {
   position: absolute;
