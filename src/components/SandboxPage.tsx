@@ -283,7 +283,7 @@ export function SandboxPage({
 
       {/* Active / complete state */}
       {!isIdle && (
-        <>
+        <div className="sb-body">
           {/* bilko-flow FlowProgress replaces custom tracker */}
           <div className="sb-tracker">
             <FlowErrorBoundary>
@@ -397,7 +397,7 @@ export function SandboxPage({
             </div>
           )}
 
-        </>
+        </div>
       )}
     </div>
   );
