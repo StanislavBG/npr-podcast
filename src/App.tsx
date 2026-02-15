@@ -249,6 +249,32 @@ export default function App() {
             }
             return threads;
           });
+
+          // Track per-chunk-step execution data for StepDetail inspection
+          const STEP_SUFFIX_MAP_EXEC: Record<string, string> = {
+            step_fetch_chunk: 'fetch',
+            step_transcribe_chunk: 'transcribe',
+            step_classify_chunk: 'classify',
+            step_refine_chunk: 'refine',
+            step_emit_skips: 'emit',
+          };
+          const chunkSuffix = STEP_SUFFIX_MAP_EXEC[evt.step] || 'fetch';
+          const chunkStepId = `${evt.threadId}-${chunkSuffix}`;
+          const now = Date.now();
+          const { step: _cs, status: _cst, message: _cm, threadId: _ct, chunkIndex: _cci, totalChunks: _ctc, ...chunkExtraData } = evt;
+          if (evt.status === 'done') {
+            const startedAt = stepStartTimesRef.current[chunkStepId] || now;
+            updateExecution(chunkStepId, { status: 'success', completedAt: now, durationMs: now - startedAt, output: Object.keys(chunkExtraData).length > 0 ? chunkExtraData : { message: evt.message } });
+          } else if (evt.status === 'error') {
+            const startedAt = stepStartTimesRef.current[chunkStepId] || now;
+            updateExecution(chunkStepId, { status: 'error', completedAt: now, durationMs: now - startedAt, error: evt.message });
+          } else {
+            if (!stepStartTimesRef.current[chunkStepId]) {
+              stepStartTimesRef.current[chunkStepId] = now;
+            }
+            updateExecution(chunkStepId, { status: 'running', startedAt: stepStartTimesRef.current[chunkStepId], input: Object.keys(chunkExtraData).length > 0 ? chunkExtraData : undefined });
+          }
+
           // Track scan progress: when a chunk's last step completes, mark it scanned
           if (evt.step === 'step_emit_skips' && evt.status === 'done' && evt.chunkIndex != null) {
             setScanProgress(prev => {
