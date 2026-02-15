@@ -20,6 +20,26 @@ import {
 } from '../services/api';
 import { STEP_ORDER } from '../workflows/podcastFlow';
 
+// ─── Chunk thread step ID mapping ────────────────────────────────────────────
+
+/** Map a chunk thread step suffix to the generic chunk step ID for FlowStep lookup */
+const SUFFIX_TO_CHUNK_STEP: Record<string, string> = {
+  fetch: 'step_fetch_chunk',
+  transcribe: 'step_transcribe_chunk',
+  classify: 'step_classify_chunk',
+  refine: 'step_refine_chunk',
+  emit: 'step_emit_skips',
+};
+
+/** Parse a chunk thread step ID (e.g. "chunk-0-transcribe") into its generic step ID */
+function resolveChunkStepId(threadStepId: string): string | null {
+  // Format: chunk-{N}-{suffix}
+  const lastDash = threadStepId.lastIndexOf('-');
+  if (lastDash === -1) return null;
+  const suffix = threadStepId.slice(lastDash + 1);
+  return SUFFIX_TO_CHUNK_STEP[suffix] || null;
+}
+
 // ─── Props: SandboxPage receives data from App (no self-fetching) ────────────
 
 interface Props {
@@ -179,13 +199,26 @@ export function SandboxPage({
     setSelectedStepId(prev => prev === stepId ? null : stepId);
   }, []);
 
-  // Find the FlowStep definition for the selected step
+  // Find the FlowStep definition for the selected step.
+  // For chunk thread steps (e.g. "chunk-0-transcribe"), resolve to the generic
+  // FlowStep (e.g. step_transcribe_chunk) but customize the name with thread context.
   const selectedFlowStep = useMemo(() => {
     if (!selectedStepId) return null;
-    return flowDefinition.steps.find(s => s.id === selectedStepId) || null;
+    // Try direct lookup first (main pipeline steps)
+    const direct = flowDefinition.steps.find(s => s.id === selectedStepId);
+    if (direct) return direct;
+    // Try chunk thread step resolution
+    const genericId = resolveChunkStepId(selectedStepId);
+    if (!genericId) return null;
+    const generic = flowDefinition.steps.find(s => s.id === genericId);
+    if (!generic) return null;
+    // Extract thread label from the step ID (e.g. "chunk-0" from "chunk-0-transcribe")
+    const lastDash = selectedStepId.lastIndexOf('-');
+    const threadPart = selectedStepId.slice(0, lastDash);
+    return { ...generic, name: `${generic.name} (${threadPart})` };
   }, [selectedStepId, flowDefinition]);
 
-  // Get the execution data for the selected step
+  // Get the execution data for the selected step (works for both main + chunk steps)
   const selectedExecution = selectedStepId ? stepExecutions[selectedStepId] : undefined;
 
   // Activity text
@@ -197,18 +230,27 @@ export function SandboxPage({
   // Build execution list for analysis — all steps + chunk sub-steps
   const allExecutions = useMemo(() => {
     const entries: Array<{ id: string; label: string; execution: StepExecution }> = [];
+    // Main pipeline steps
     for (const id of STEP_ORDER) {
       if (stepExecutions[id]) {
         const step = pipelineSteps.find(s => s.id === id);
         entries.push({ id, label: step?.label || id, execution: stepExecutions[id] });
       }
     }
-    // Add synthetic LLM execution if present
+    // Per-chunk thread step executions
+    for (const thread of chunkThreads) {
+      for (const step of thread.steps) {
+        if (stepExecutions[step.id]) {
+          entries.push({ id: step.id, label: `${thread.label} > ${step.label}`, execution: stepExecutions[step.id] });
+        }
+      }
+    }
+    // Synthetic LLM execution if present
     if (stepExecutions['pipeline_llm_classify']) {
       entries.push({ id: 'pipeline_llm_classify', label: 'LLM Ad Classification', execution: stepExecutions['pipeline_llm_classify'] });
     }
     return entries;
-  }, [stepExecutions, pipelineSteps]);
+  }, [stepExecutions, pipelineSteps, chunkThreads]);
 
   const isIdle = pipelineStatus === 'idle';
 
@@ -246,7 +288,7 @@ export function SandboxPage({
           <div className="sb-tracker">
             <FlowErrorBoundary>
               <FlowProgress
-                mode="pipeline"
+                mode="expanded"
                 steps={pipelineSteps}
                 parallelThreads={chunkThreads}
                 parallelConfig={parallelConfig}
@@ -254,12 +296,6 @@ export function SandboxPage({
                 label="Ad Detection Pipeline"
                 activity={activity}
                 onStepClick={handleStepClick}
-                pipelineConfig={{
-                  showDuration: true,
-                  showStageNumbers: true,
-                  continuousTrack: true,
-                  stageSize: 44,
-                }}
               />
             </FlowErrorBoundary>
           </div>
@@ -310,8 +346,8 @@ export function SandboxPage({
                         key={id}
                         className="w-full text-left px-4 py-2.5 hover:bg-gray-800/30 transition-colors flex items-center gap-3"
                         onClick={() => {
-                          // If it's a main step, select it for StepDetail view
-                          if (flowDefinition.steps.find(s => s.id === id)) {
+                          // Main pipeline step or chunk thread step → open StepDetail
+                          if (flowDefinition.steps.find(s => s.id === id) || resolveChunkStepId(id)) {
                             setSelectedStepId(id);
                           }
                         }}
@@ -361,48 +397,6 @@ export function SandboxPage({
             </div>
           )}
 
-          {/* Chunk threads summary (visible alongside any view when chunks exist) */}
-          {chunkThreads.length > 0 && !selectedStepId && (
-            <div className="mt-3 px-4">
-              <div className="border border-gray-700 rounded-lg overflow-hidden">
-                <div className="bg-gray-800/50 px-4 py-2 border-b border-gray-700">
-                  <h3 className="text-sm font-medium text-gray-300">
-                    Chunk Threads ({chunkThreads.filter(t => t.status === 'complete').length}/{chunkThreads.length})
-                  </h3>
-                </div>
-                <div className="sb-chunk-grid p-3">
-                  {chunkThreads.map(thread => {
-                    const statusColor = thread.status === 'complete' ? '#2ecc71' :
-                                        thread.status === 'error' ? '#e74c3c' :
-                                        thread.status === 'running' ? '#3498db' : '#666';
-                    return (
-                      <div key={thread.id} className={`sb-chunk-card sb-chunk-${thread.status}`}>
-                        <div className="sb-chunk-card-header">
-                          <span className="sb-chunk-dot" style={{ background: statusColor }} />
-                          <span className="sb-chunk-label">{thread.label}</span>
-                        </div>
-                        <div className="sb-chunk-steps">
-                          {thread.steps.map(s => {
-                            const sMeta = resolveStepMeta(s.meta);
-                            return (
-                              <div key={s.id} className="sb-chunk-step-row">
-                                <span className={`sb-chunk-step-dot sb-csd-${s.status}`} />
-                                <span className="sb-chunk-step-name">{s.label}</span>
-                                {s.status === 'active' && sMeta.message && (
-                                  <span className="sb-chunk-step-msg">{sMeta.message}</span>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                        {thread.error && <div className="sb-chunk-error">{thread.error}</div>}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          )}
         </>
       )}
     </div>
