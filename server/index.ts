@@ -364,9 +364,10 @@ app.get('/api/transcript', async (req, res) => {
 // Chunked strategy: process 5-minute chunks on-demand, staying 2 chunks ahead
 // of playback. Each chunk is ~4.7 MB at 128kbps — well under Whisper's 25 MB limit.
 
-const CHUNK_DURATION_SEC = 300; // 5 minutes
-const CHUNK_OVERLAP_SEC = 10;   // 10s overlap to catch boundary ads
-const DEFAULT_BITRATE = 128000; // 128kbps
+const CHUNK_SIZE_BYTES = 1_048_576;  // 1 MB per chunk (~65s at 128kbps)
+const CHUNK_DURATION_SEC = 300;      // 5 minutes (legacy per-chunk endpoint)
+const CHUNK_OVERLAP_SEC = 10;        // 10s overlap (legacy per-chunk endpoint)
+const DEFAULT_BITRATE = 128000;      // 128kbps
 
 /**
  * Align a buffer to the first valid MP3 frame sync.
@@ -552,9 +553,9 @@ app.post('/api/audio/resolve', async (req, res) => {
     // Estimate duration from file size + assumed bitrate
     const bitrate = DEFAULT_BITRATE;
     const durationSec = contentLength > 0 ? Math.round((contentLength * 8) / bitrate) : 0;
-    const totalChunks = durationSec > 0 ? Math.ceil(durationSec / CHUNK_DURATION_SEC) : 1;
+    const totalChunks = contentLength > 0 ? Math.ceil(contentLength / CHUNK_SIZE_BYTES) : 1;
 
-    console.log(`[resolve] Resolved: ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${durationSec}s, ${totalChunks} chunks, ranges=${acceptRanges}`);
+    console.log(`[resolve] Resolved: ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${durationSec}s, ${totalChunks} chunks (1 MB each), ranges=${acceptRanges}`);
 
     res.json({
       resolvedUrl,
@@ -564,7 +565,7 @@ app.post('/api/audio/resolve', async (req, res) => {
       durationSec,
       bitrate,
       totalChunks,
-      chunkDurationSec: CHUNK_DURATION_SEC,
+      chunkSizeBytes: CHUNK_SIZE_BYTES,
     });
   } catch (err: any) {
     console.error('[resolve] Error:', err.message);
@@ -1954,35 +1955,25 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           audioDetails: { ...audioDetails },
         });
 
-        // Step 4: Download full audio, split at MP3 frame boundaries
-        sendEvent('progress', { step: 'step_start_audio_streaming', message: `Downloading audio (${audioDetails.downloadSizeMb} MB)...` });
+        // Step 4: Plan chunks — calculate 1 MB byte ranges (no download yet)
         const resolvedUrl = audioDetails.resolvedUrl;
-        const totalBytes = audioDetails.contentLengthBytes;
+        const contentLength = audioDetails.contentLengthBytes;
+        const bitrate = DEFAULT_BITRATE;
+        const numChunks = Math.ceil(contentLength / CHUNK_SIZE_BYTES);
+        const estChunkDuration = (CHUNK_SIZE_BYTES * 8) / bitrate; // ~65.5s at 128kbps
+        const estDuration = (contentLength * 8) / bitrate;
 
-        console.log(`[sandbox] Downloading full audio file: ${(totalBytes / 1024 / 1024).toFixed(1)} MB`);
-        const fullAudioRes = await fetch(resolvedUrl, {
-          headers: { 'User-Agent': 'NPR-Podcast-Player/1.0' },
-          redirect: 'follow',
-        });
-        if (!fullAudioRes.ok) throw new Error(`Audio download failed: ${fullAudioRes.status}`);
-        const fullAudioBuf = Buffer.from(await fullAudioRes.arrayBuffer());
-        console.log(`[sandbox] Downloaded ${(fullAudioBuf.length / 1024 / 1024).toFixed(1)} MB`);
-
-        // Split at MP3 frame boundaries into ~5 minute chunks
-        const mp3Chunks = splitMp3IntoChunks(fullAudioBuf, CHUNK_DURATION_SEC);
-        const numChunks = mp3Chunks.length;
-        const estDuration = mp3Chunks.reduce((sum, c) => sum + c.durationSec, 0);
-
+        sendEvent('progress', { step: 'step_plan_chunks', message: `Planning ${numChunks} chunks (1 MB each)...` });
+        console.log(`[sandbox] Planned ${numChunks} chunks for ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${estDuration.toFixed(0)}s`);
         sendEvent('progress', {
-          step: 'step_start_audio_streaming',
+          step: 'step_plan_chunks',
           status: 'done',
-          message: `Downloaded ${(fullAudioBuf.length / 1024 / 1024).toFixed(1)} MB, split into ${numChunks} chunks`,
+          message: `${numChunks} chunks planned (${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${Math.round(estDuration)}s)`,
           audioDetails: { ...audioDetails },
         });
 
-        console.log(`[sandbox] Transcribing "${episodeTitle}" in ${numChunks} chunks, total duration ~${estDuration.toFixed(0)}s`);
-
-        // ── Parallel per-chunk pipeline: Steps 5+6 run concurrently per chunk ──
+        // ── Parallel per-chunk pipeline: Fetch → Transcribe → Classify → Refine → Emit ──
+        // Each chunk independently fetches via Range request, processes, and emits skip ranges.
         // Semaphore limits concurrent OpenAI STT calls to avoid rate limits.
         const STT_CONCURRENCY = 3;
         let activeCalls = 0;
@@ -2007,18 +1998,46 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         // Ordered results array — filled by parallel workers
         const chunkResults: (ChunkResult | null)[] = new Array(numChunks).fill(null);
 
-        // Process a single chunk: STT (Step 5.x) → Classify (Step 6.x) → partial_ads
+        // Process a single chunk: Fetch → Transcribe → Classify → Refine → Emit
         const processChunk = async (ci: number): Promise<void> => {
-          const chunk = mp3Chunks[ci]!;
-          const chunkMB = (chunk.buffer.length / 1024 / 1024).toFixed(1);
           const threadId = `chunk-${ci}`;
+          const startByte = ci * CHUNK_SIZE_BYTES;
+          const endByte = Math.min((ci + 1) * CHUNK_SIZE_BYTES - 1, contentLength - 1);
+          const offsetSec = (startByte * 8) / bitrate;
+          const chunkSizeKB = ((endByte - startByte + 1) / 1024).toFixed(0);
 
-          // Step 5.x: Transcribe
+          // ── Fetch chunk via Range request ──
+          sendEvent('progress', {
+            step: 'step_fetch_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+            message: `Fetching chunk ${ci + 1}/${numChunks} (${chunkSizeKB} KB)...`,
+          });
+
+          let chunkBuf: Buffer;
+          const audioRes = await fetch(resolvedUrl, {
+            headers: {
+              'User-Agent': 'NPR-Podcast-Player/1.0',
+              'Range': `bytes=${startByte}-${endByte}`,
+            },
+          });
+          if (audioRes.status === 206 || audioRes.ok) {
+            chunkBuf = Buffer.from(await audioRes.arrayBuffer());
+          } else {
+            throw new Error(`Range request failed: ${audioRes.status}`);
+          }
+          // Align to first valid MP3 frame sync (Range start may be mid-frame)
+          chunkBuf = alignToMp3Frame(chunkBuf);
+          console.log(`[sandbox] Chunk ${ci + 1}/${numChunks}: fetched ${chunkSizeKB} KB, offset ~${offsetSec.toFixed(0)}s`);
+
+          sendEvent('progress', {
+            step: 'step_fetch_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+            status: 'done', message: `${chunkSizeKB} KB fetched`,
+          });
+
+          // ── Transcribe chunk with Whisper ──
           sendEvent('progress', {
             step: 'step_transcribe_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-            message: `Transcribing chunk ${ci + 1}/${numChunks} (${chunkMB} MB)...`,
+            message: `Transcribing chunk ${ci + 1}/${numChunks}...`,
           });
-          console.log(`[sandbox] Chunk ${ci + 1}/${numChunks}: ${chunkMB} MB, offset ${chunk.offsetSec.toFixed(0)}s, duration ${chunk.durationSec.toFixed(0)}s`);
 
           let chunkText = '';
           let segs: Array<{ start: number; end: number; text: string }> = [];
@@ -2026,22 +2045,22 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           await acquireSemaphore();
           try {
             const { toFile } = await import('openai');
-            const file = await toFile(chunk.buffer, `chunk_${ci}.mp3`);
+            const file = await toFile(chunkBuf, `chunk_${ci}.mp3`);
             const result = await sttOpenai.audio.transcriptions.create({ file, model: 'gpt-4o-mini-transcribe', response_format: 'verbose_json' }) as any;
             chunkText = (result.text || '').trim();
             segs = (result.segments || []).map((s: any) => ({
-              start: (s.start || 0) + chunk.offsetSec,
-              end: (s.end || 0) + chunk.offsetSec,
+              start: (s.start || 0) + offsetSec,
+              end: (s.end || 0) + offsetSec,
               text: (s.text || '').trim(),
             }));
             console.log(`[sandbox] Chunk ${ci + 1}: ${segs.length} segments, ${chunkText.split(/\s+/).length} words`);
           } catch (chunkErr: any) {
             console.warn(`[sandbox] Chunk ${ci + 1} STT failed: ${chunkErr.message}`);
             try {
-              const plainText = await speechToText(chunk.buffer, 'mp3');
+              const plainText = await speechToText(chunkBuf, 'mp3');
               if (plainText) {
                 chunkText = plainText;
-                segs = [{ start: chunk.offsetSec, end: chunk.offsetSec + chunk.durationSec, text: plainText.trim() }];
+                segs = [{ start: offsetSec, end: offsetSec + estChunkDuration, text: plainText.trim() }];
               }
             } catch { /* skip chunk */ }
           } finally {
@@ -2050,14 +2069,13 @@ app.post('/api/sandbox/analyze', async (req, res) => {
 
           sendEvent('progress', {
             step: 'step_transcribe_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-            status: 'done', message: `Chunk ${ci + 1} transcribed: ${segs.length} segments`,
+            status: 'done', message: `${segs.length} segments`,
           });
 
-          // Build lines from this chunk's segments
+          // ── Classify ads in this chunk ──
           const chunkLines = buildLinesFromSegments(segs);
-
-          // Step 6.x: Classify ads in this chunk
           let chunkAdBlocks: SandboxAdBlock[] = [];
+
           if (chunkLines.length >= 3) {
             sendEvent('progress', {
               step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
@@ -2067,40 +2085,71 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             try {
               const chunkClassify = await classifyAdsFromLines(chunkLines, episodeTitle, estDuration);
               chunkAdBlocks = chunkClassify.adBlocks;
-
-              // Send partial ads to player immediately
-              if (chunkAdBlocks.length > 0) {
-                const partialSkipMap = chunkAdBlocks.map(b => ({
-                  startTime: Math.round(b.startTimeSec * 10) / 10,
-                  endTime: Math.round(b.endTimeSec * 10) / 10,
-                  type: 'mid-roll',
-                  confidence: 0.8,
-                  reason: b.reason,
-                }));
-                sendEvent('partial_ads', { skipMap: partialSkipMap, source: `chunk-${ci}` });
-                console.log(`[sandbox] Chunk ${ci + 1} ad detection: ${chunkAdBlocks.length} blocks sent to player`);
-              }
             } catch (classifyErr: any) {
               console.warn(`[sandbox] Chunk ${ci + 1} ad classification failed (non-fatal): ${classifyErr.message}`);
             }
 
             sendEvent('progress', {
               step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-              status: 'done', message: `Chunk ${ci + 1}: ${chunkAdBlocks.length} ad blocks`,
+              status: 'done', message: `${chunkAdBlocks.length} ad blocks`,
             });
           } else {
-            // Not enough lines — skip classification
             sendEvent('progress', {
               step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-              status: 'done', message: `Chunk ${ci + 1}: skipped (${chunkLines.length} lines)`,
+              status: 'done', message: `skipped (${chunkLines.length} lines)`,
             });
           }
+
+          // ── Refine ad boundaries (per-chunk, local context only) ──
+          if (chunkAdBlocks.length > 0 && LLM_API_KEY) {
+            sendEvent('progress', {
+              step: 'step_refine_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+              message: `Refining ${chunkAdBlocks.length} boundaries...`,
+            });
+            try {
+              const refined = await refineBoundariesWithLLM(chunkAdBlocks, chunkLines, estDuration, episodeTitle, '');
+              chunkAdBlocks = refined.adBlocks;
+            } catch (refineErr: any) {
+              console.warn(`[sandbox] Chunk ${ci + 1} refine failed (non-fatal): ${refineErr.message}`);
+            }
+            sendEvent('progress', {
+              step: 'step_refine_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+              status: 'done', message: `${chunkAdBlocks.length} refined`,
+            });
+          } else {
+            sendEvent('progress', {
+              step: 'step_refine_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+              status: chunkAdBlocks.length === 0 ? 'done' : 'done',
+              message: chunkAdBlocks.length === 0 ? 'no ads found' : 'no LLM key',
+            });
+          }
+
+          // ── Emit skip ranges to player ──
+          if (chunkAdBlocks.length > 0) {
+            sendEvent('progress', {
+              step: 'step_emit_skips', threadId, chunkIndex: ci, totalChunks: numChunks,
+              message: `Emitting ${chunkAdBlocks.length} skip ranges...`,
+            });
+            const partialSkipMap = chunkAdBlocks.map(b => ({
+              startTime: Math.round(b.startTimeSec * 10) / 10,
+              endTime: Math.round(b.endTimeSec * 10) / 10,
+              type: 'mid-roll',
+              confidence: 0.85,
+              reason: b.reason,
+            }));
+            sendEvent('partial_ads', { skipMap: partialSkipMap, source: `chunk-${ci}` });
+            console.log(`[sandbox] Chunk ${ci + 1}: ${chunkAdBlocks.length} skip ranges emitted to player`);
+          }
+          sendEvent('progress', {
+            step: 'step_emit_skips', threadId, chunkIndex: ci, totalChunks: numChunks,
+            status: 'done', message: chunkAdBlocks.length > 0 ? `${chunkAdBlocks.length} ranges emitted` : 'no ads',
+          });
 
           chunkResults[ci] = { chunkIndex: ci, text: chunkText, segments: segs, lines: chunkLines, adBlocks: chunkAdBlocks };
         };
 
-        // Launch all chunks concurrently (semaphore throttles to STT_CONCURRENCY)
-        const chunkPromises = mp3Chunks.map((_, ci) => processChunk(ci));
+        // Launch all chunks concurrently (semaphore throttles STT to STT_CONCURRENCY)
+        const chunkPromises = Array.from({ length: numChunks }, (_, ci) => processChunk(ci));
         await Promise.allSettled(chunkPromises);
 
         // Merge results in order
@@ -2144,7 +2193,8 @@ app.post('/api/sandbox/analyze', async (req, res) => {
 
         console.log(`[sandbox] Audio transcription complete: ${lines.length} lines, ${cumW} words, ${allSegments.length} segments`);
 
-        // Store per-chunk anchor ad blocks for Step 7 refinement
+        // Per-chunk refine + emit already ran — no need for Step 7/8
+        // Store merged ad blocks for the final result
         (audioDetails as any).chunkAdAnchors = allChunkAdBlocks;
       } catch (sttErr: any) {
         audioDetails.error = sttErr.message;
@@ -2242,7 +2292,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
     const topicContext = deriveTopicContext(episodeTitle, lines);
     console.log(`[sandbox] Topic context: "${topicContext.slice(0, 120)}..."`);
 
-    // Gather per-chunk ad anchors (from parallel Step 6) or fall back to full-transcript classification
+    // Ad blocks already refined + emitted per-chunk — merge for final result
     const chunkAdAnchors: SandboxAdBlock[] = (audioDetails as any).chunkAdAnchors || [];
     let adBlocks: SandboxAdBlock[];
     let llmRaw = '';
@@ -2250,12 +2300,10 @@ app.post('/api/sandbox/analyze', async (req, res) => {
     let userPrompt = '';
 
     if (chunkAdAnchors.length > 0) {
-      // Per-chunk classification already ran — use those as anchors for Step 7 refinement
       adBlocks = chunkAdAnchors;
-      llmRaw = `(per-chunk classification: ${chunkAdAnchors.length} anchors from parallel threads)`;
+      llmRaw = `(per-chunk pipeline: ${chunkAdAnchors.length} ad blocks from ${new Set(chunkAdAnchors.map(b => Math.floor(b.startTimeSec / 65))).size} chunks)`;
     } else {
-      // No audio chunks ran — fall back to full-transcript classification (Step 6 equivalent)
-      sendEvent('progress', { step: 'step_refine_ad_boundaries', message: 'Classifying sentences as content/ad via LLM (topic-aware)...' });
+      // No audio chunks ran — fall back to full-transcript classification
       const classifyResult = await classifyAdsFromLines(lines, episodeTitle, dur, topicContext);
       adBlocks = classifyResult.adBlocks;
       llmRaw = classifyResult.llmRaw;
@@ -2263,76 +2311,18 @@ app.post('/api/sandbox/analyze', async (req, res) => {
       userPrompt = classifyResult.userPrompt;
     }
 
-    // Step 7: Refine ad boundaries with LLM
-    // Takes per-chunk anchors and examines surrounding transcript context to find precise boundaries.
-    if (adBlocks.length > 0 && LLM_API_KEY && lines.length > 0) {
-      sendEvent('progress', { step: 'step_refine_ad_boundaries', message: `Refining ${adBlocks.length} ad boundaries with LLM...` });
-
-      try {
-        const refinedResult = await refineBoundariesWithLLM(adBlocks, lines, dur, episodeTitle, topicContext);
-        adBlocks = refinedResult.adBlocks;
-        llmRaw = refinedResult.llmRaw;
-        systemPrompt = refinedResult.systemPrompt;
-        userPrompt = refinedResult.userPrompt;
-
-        // Send refined boundaries to player (replaces any per-chunk partials)
-        if (adBlocks.length > 0) {
-          const refinedSkipMap = adBlocks.map(b => ({
-            startTime: Math.round(b.startTimeSec * 10) / 10,
-            endTime: Math.round(b.endTimeSec * 10) / 10,
-            type: 'mid-roll',
-            confidence: 0.92,
-            reason: b.reason,
-          }));
-          sendEvent('partial_ads', { skipMap: refinedSkipMap, source: 'step7-refined' });
-        }
-
-        sendEvent('progress', {
-          step: 'step_refine_ad_boundaries',
-          status: 'done',
-          message: `Refined ${adBlocks.length} ad boundaries (0.1s precision)`,
-        });
-      } catch (refineErr: any) {
-        console.warn(`[sandbox] Step 7 boundary refinement failed (non-fatal): ${refineErr.message}`);
-        sendEvent('progress', {
-          step: 'step_refine_ad_boundaries',
-          status: 'done',
-          message: `Refinement skipped: using ${adBlocks.length} anchor boundaries`,
-        });
-      }
-    } else if (adBlocks.length === 0) {
-      sendEvent('progress', {
-        step: 'step_refine_ad_boundaries',
-        status: 'done',
-        message: 'No ad anchors to refine',
-      });
-    } else {
-      sendEvent('progress', {
-        step: 'step_refine_ad_boundaries',
-        status: 'done',
-        message: `Using ${adBlocks.length} anchor boundaries (no LLM key)`,
-      });
-    }
-
-    // Step 8: Build skip map
-    sendEvent('progress', { step: 'step_build_skip_map', message: 'Building skip map from refined ad blocks...' });
+    // Build final skip map (already emitted per-chunk, this is for the complete result)
 
     const skipMap = adBlocks.map(b => ({
       startTime: Math.round(b.startTimeSec * 10) / 10,
       endTime: Math.round(b.endTimeSec * 10) / 10,
       type: 'mid-roll' as const,
-      confidence: LLM_API_KEY ? 0.92 : 0.5,
+      confidence: LLM_API_KEY ? 0.85 : 0.5,
       reason: b.reason,
     }));
 
     const totalAdWords = adBlocks.reduce((s, b) => s + (b.endWord - b.startWord), 0);
     const totalAdTimeSec = adBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
-
-    sendEvent('progress', {
-      step: 'step_build_skip_map',
-      status: 'done',
-      message: `Skip map built: ${skipMap.length} ranges, ${Math.round(totalAdTimeSec)}s of ads`,
-    });
 
     // Compute QA diagnostics
     const speechRateWpm = 155;
