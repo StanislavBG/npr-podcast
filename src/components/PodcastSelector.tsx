@@ -1,4 +1,5 @@
 import type { Podcast } from '../services/api';
+import { ScrollableSlider } from './ScrollableSlider';
 
 interface Props {
   podcasts: Podcast[];
@@ -8,7 +9,7 @@ interface Props {
 
 export function PodcastSelector({ podcasts, selected, onSelect }: Props) {
   return (
-    <div className="shows">
+    <ScrollableSlider className="shows">
       {podcasts.map((p) => (
         <button
           key={p.id}
@@ -18,6 +19,6 @@ export function PodcastSelector({ podcasts, selected, onSelect }: Props) {
           {p.name.replace(/ from Planet Money$/, '')}
         </button>
       ))}
-    </div>
+    </ScrollableSlider>
   );
 }

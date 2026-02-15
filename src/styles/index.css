@@ -149,6 +149,47 @@ button {
   pointer-events: auto;
 }
 
+/* ── Scrollable Slider (reusable arrow wrapper) ── */
+.slider-wrapper {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.slider-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(30, 30, 40, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--fg2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.slider-arrow:hover {
+  background: rgba(50, 50, 65, 0.95);
+  color: var(--fg);
+}
+.slider-arrow:active {
+  transform: translateY(-50%) scale(0.92);
+}
+
+.slider-arrow-left {
+  left: 4px;
+}
+.slider-arrow-right {
+  right: 4px;
+}
+
 /* ── Podcast Selector (pill row) ── */
 .shows {
   display: flex;
@@ -202,7 +243,7 @@ button {
 .episodes-h {
   display: flex;
   gap: 12px;
-  padding: 0 16px;
+  padding: 0 20px;
   overflow-x: auto;
   scroll-snap-type: x mandatory;
   scrollbar-width: none;

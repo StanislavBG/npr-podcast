@@ -1,5 +1,6 @@
 import { useRef, useEffect, useMemo } from 'react';
 import type { Episode } from '../services/api';
+import { ScrollableSlider } from './ScrollableSlider';
 
 interface Props {
   episodes: Episode[];
@@ -43,7 +44,6 @@ function groupByDay(episodes: Episode[]): { label: string; eps: Episode[] }[] {
 }
 
 export function EpisodeList({ episodes, loading, selectedId, onSelect }: Props) {
-  const scrollRef = useRef<HTMLDivElement>(null);
   const selectedRef = useRef<HTMLButtonElement>(null);
 
   // Take latest 3 episodes per the request
@@ -68,7 +68,7 @@ export function EpisodeList({ episodes, loading, selectedId, onSelect }: Props) 
 
   return (
     <div className="episodes-h-wrapper">
-      <div className="episodes-h" ref={scrollRef}>
+      <ScrollableSlider className="episodes-h">
         {groups.map((group) => (
           <div key={group.label} className="ep-day-group">
             <div className="ep-day-label">{group.label}</div>
@@ -105,7 +105,7 @@ export function EpisodeList({ episodes, loading, selectedId, onSelect }: Props) 
             </div>
           </div>
         ))}
-      </div>
+      </ScrollableSlider>
       {episodes.length > 3 && (
         <div className="ep-swipe-hint">Swipe for more episodes</div>
       )}
