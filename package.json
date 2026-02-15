@@ -12,7 +12,8 @@
     "sandbox": "tsx server/sandbox.ts",
     "sandbox:indicator": "tsx server/sandbox.ts 510325",
     "sandbox:planetmoney": "tsx server/sandbox.ts 510289",
-    "sandbox:upfirst": "tsx server/sandbox.ts 344098539"
+    "sandbox:upfirst": "tsx server/sandbox.ts 344098539",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "bilko-flow": "github:StanislavBG/bilko-flow",
@@ -37,6 +38,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
+    "patch-package": "^8.0.1",
     "tailwindcss": "^4.1.18",
     "tsx": "^4.19.0",
     "typescript": "^5.6.3",
