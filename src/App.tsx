@@ -1,9 +1,10 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
-import { FlowProgress, FlowErrorBoundary } from 'bilko-flow/react/components';
+import { FlowErrorBoundary } from 'bilko-flow/react/components';
 import { PodcastSelector } from './components/PodcastSelector';
 import { EpisodeList } from './components/EpisodeList';
 import { Player } from './components/Player';
 import { SandboxPage } from './components/SandboxPage';
+import { PipelineWaterfall } from './components/PipelineWaterfall';
 import {
   fetchPodcasts,
   fetchEpisodes,
@@ -377,16 +378,12 @@ export default function App() {
           {showFlow && (
             <div className="flow-widget-container">
               <FlowErrorBoundary>
-                <FlowProgress
-                  mode="auto"
+                <PipelineWaterfall
                   steps={pipelineSteps}
                   status={flowStatus}
-                  activity={activity}
-                  label="Ad Detection Pipeline"
-                  statusMap={STATUS_MAP}
                   parallelThreads={chunkThreads}
-                  parallelConfig={parallelConfig}
-                  radius={5}
+                  label="Ad Detection Pipeline"
+                  activity={activity}
                 />
               </FlowErrorBoundary>
             </div>

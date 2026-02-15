@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback } from 'react';
-import { FlowProgress, FlowErrorBoundary, resolveStepMeta } from 'bilko-flow/react/components';
+import { FlowErrorBoundary, resolveStepMeta } from 'bilko-flow/react/components';
 import type { FlowProgressStep, ParallelThread, ParallelConfig } from 'bilko-flow/react/components';
+import { PipelineWaterfall } from './PipelineWaterfall';
 import {
   formatTime,
   formatTimestamp,
@@ -1168,16 +1169,12 @@ export function SandboxPage({
       {!isIdle && (
         <div className="sb-flow-overview">
           <FlowErrorBoundary>
-            <FlowProgress
-              mode="expanded"
+            <PipelineWaterfall
               steps={pipelineSteps}
               status={pipelineStatus}
+              parallelThreads={chunkThreads}
               label="Ad Detection Pipeline"
               activity={activity}
-              parallelThreads={chunkThreads}
-              parallelConfig={parallelConfig}
-              radius={5}
-              statusMap={{ done: 'complete', skipped: 'skipped' }}
             />
           </FlowErrorBoundary>
           <div className="sb-flow-stats">
@@ -1237,31 +1234,33 @@ export function SandboxPage({
             <StepStreamAudioChunks result={result} />
           </StepSection>
 
-          {/* Steps 5+6 per-chunk: parallel thread details */}
+          {/* Steps 5-7: Per-chunk processing + boundary refinement (fork section) */}
           <StepSection
             index={4}
-            step={{ id: 'step_chunk_processing', label: 'Per-Chunk Processing (Steps 5+6)', subtitle: 'Parallel: Transcribe each chunk (STT) then classify content vs ads (LLM)', type: 'ai.speech-to-text' }}
-            stepStatus={chunkThreads.length > 0 && chunkThreads.every(t => t.status === 'complete') ? 'complete'
+            step={{ id: 'step_chunk_processing', label: 'Per-Chunk Processing & Refine (Steps 5-7)', subtitle: 'Parallel: Transcribe + Classify each chunk, then LLM refines ad boundaries across all chunks', type: 'ai.speech-to-text' }}
+            stepStatus={
+              stepStatusMap['step_refine_ad_boundaries'] === 'complete' ? 'complete'
+              : stepStatusMap['step_refine_ad_boundaries'] === 'error' ? 'error'
               : chunkThreads.some(t => t.status === 'error') ? 'error'
-              : chunkThreads.some(t => t.status === 'running') ? 'active' : 'pending'}
+              : chunkThreads.some(t => t.status === 'running') || stepStatusMap['step_refine_ad_boundaries'] === 'active' ? 'active'
+              : chunkThreads.length > 0 && chunkThreads.every(t => t.status === 'complete') ? 'active' : 'pending'}
             defaultOpen={true}
           >
             <StepPerChunkProcessing result={result} chunkThreads={chunkThreads} />
-          </StepSection>
-
-          <StepSection index={5} step={STEPS[4]} stepStatus={stepStatusMap['step_refine_ad_boundaries']} defaultOpen={true}>
+            <hr className="sb-section-divider" />
+            <h3 className="sb-sub-heading">Step 7: Refine Ad Boundaries</h3>
             <StepRefineAdBoundaries result={result} />
           </StepSection>
 
-          <StepSection index={6} step={STEPS[5]} stepStatus={stepStatusMap['step_build_skip_map']}>
+          <StepSection index={5} step={STEPS[5]} stepStatus={stepStatusMap['step_build_skip_map']}>
             <StepBuildSkipMap result={result} />
           </StepSection>
 
-          <StepSection index={7} step={STEPS[6]} stepStatus={stepStatusMap['step_fetch_html_transcript']}>
+          <StepSection index={6} step={STEPS[6]} stepStatus={stepStatusMap['step_fetch_html_transcript']}>
             <StepFetchHtmlTranscript result={result} />
           </StepSection>
 
-          <StepSection index={8} step={STEPS[7]} stepStatus={stepStatusMap['step_finalize_playback']} defaultOpen={true}>
+          <StepSection index={7} step={STEPS[7]} stepStatus={stepStatusMap['step_finalize_playback']} defaultOpen={true}>
             <StepFinalizePlayback result={result} />
           </StepSection>
         </div>
