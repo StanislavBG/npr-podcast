@@ -523,6 +523,209 @@ button {
   border-top: 1px solid var(--surface);
 }
 
+/* ── PipelineWaterfall ─────────────────────────────────────────────────── */
+
+.pw-container {
+  padding: 8px 0;
+  font-size: 13px;
+}
+
+/* Header */
+.pw-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  margin-bottom: 8px;
+}
+.pw-header-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.pw-header-label { font-weight: 600; color: var(--fg1); }
+.pw-header-status { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+.pw-hs-running { color: #3498db; }
+.pw-hs-complete { color: #2ecc71; }
+.pw-hs-error { color: #e74c3c; }
+.pw-header-activity { font-size: 11px; color: var(--fg3); margin-left: auto; }
+
+/* Steps */
+.pw-steps { display: flex; flex-direction: column; }
+
+.pw-step {
+  display: flex;
+  align-items: stretch;
+  min-height: 32px;
+}
+
+/* Rail: vertical line + dot */
+.pw-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 24px;
+  flex-shrink: 0;
+}
+.pw-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  z-index: 1;
+}
+.pw-dot-sm { width: 8px; height: 8px; }
+.pw-dot-xs { width: 6px; height: 6px; }
+.pw-line {
+  width: 2px;
+  flex: 1;
+  background: rgba(255,255,255,0.1);
+  min-height: 8px;
+}
+.pw-line-sm { width: 1px; }
+.pw-line-done { background: rgba(46, 204, 113, 0.3); }
+
+/* Status colors */
+.pw-complete { background: #2ecc71; }
+.pw-active { background: #3498db; animation: pw-pulse 1.5s ease-in-out infinite; }
+.pw-error { background: #e74c3c; }
+.pw-skipped { background: #7f8c8d; }
+.pw-pending { background: rgba(255,255,255,0.15); }
+
+@keyframes pw-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Step body */
+.pw-step-body {
+  flex: 1;
+  padding: 4px 0 4px 8px;
+  min-width: 0;
+}
+.pw-step-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pw-step-num {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--fg3);
+  min-width: 14px;
+  text-align: right;
+}
+.pw-step-label {
+  color: var(--fg1);
+  font-weight: 500;
+}
+.pw-label-skipped {
+  text-decoration: line-through;
+  color: var(--fg3);
+}
+.pw-step-meta {
+  font-size: 11px;
+  color: var(--fg3);
+  padding-left: 20px;
+  margin-top: 1px;
+}
+
+/* Fork indicator */
+.pw-fork-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 4px 4px;
+}
+.pw-fork-text {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg3);
+  background: rgba(255,255,255,0.04);
+  border: 1px dashed rgba(255,255,255,0.12);
+  border-radius: 4px;
+  padding: 1px 8px;
+}
+
+/* Parallel threads container */
+.pw-threads {
+  display: flex;
+  gap: 6px;
+  padding: 4px 4px 4px 12px;
+  overflow-x: auto;
+}
+.pw-threads-pending {
+  font-size: 11px;
+  color: var(--fg3);
+  padding: 8px 12px;
+  font-style: italic;
+}
+
+/* Individual thread */
+.pw-thread {
+  flex: 1;
+  min-width: 100px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  padding: 6px;
+  background: rgba(255,255,255,0.02);
+}
+.pw-thread-complete { border-color: rgba(46, 204, 113, 0.2); }
+.pw-thread-error { border-color: rgba(231, 76, 60, 0.3); }
+.pw-thread-running { border-color: rgba(52, 152, 219, 0.25); }
+
+.pw-thread-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-bottom: 4px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.pw-thread-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pw-thread-steps { display: flex; flex-direction: column; }
+.pw-thread-step {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 20px;
+}
+.pw-rail-sm {
+  width: 14px;
+  align-items: center;
+}
+.pw-thread-step-label {
+  font-size: 11px;
+  color: var(--fg2);
+  white-space: nowrap;
+}
+.pw-done-text { color: var(--fg3); }
+.pw-thread-step-meta {
+  font-size: 10px;
+  color: var(--fg3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pw-thread-activity {
+  font-size: 10px;
+  color: #3498db;
+  padding-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pw-thread-error {
+  font-size: 10px;
+  color: #e74c3c;
+  padding-top: 2px;
+}
+
 /* ── Flow Widget (legacy inline pipeline progress) ── */
 .flow-widget {
   padding: 12px 16px;

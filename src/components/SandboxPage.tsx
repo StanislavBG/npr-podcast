@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback } from 'react';
-import { FlowProgress, FlowErrorBoundary, resolveStepMeta } from 'bilko-flow/react/components';
+import { FlowErrorBoundary, resolveStepMeta } from 'bilko-flow/react/components';
 import type { FlowProgressStep, ParallelThread, ParallelConfig } from 'bilko-flow/react/components';
+import { PipelineWaterfall } from './PipelineWaterfall';
 import {
   formatTime,
   formatTimestamp,
@@ -9,7 +10,7 @@ import {
   type SandboxLine,
   type Episode,
 } from '../services/api';
-import { STEP_ORDER, STEP_META, FORK_INDEX } from '../workflows/podcastFlow';
+import { STEP_ORDER, STEP_META } from '../workflows/podcastFlow';
 
 // ─── Props: SandboxPage receives data from App (no self-fetching) ────────────
 
@@ -1142,29 +1143,6 @@ export function SandboxPage({
     return `${active.label}...`;
   }, [pipelineSteps]);
 
-  // Split steps at the fork point for two-section FlowProgress rendering
-  const preForkSteps = useMemo(() => pipelineSteps.slice(0, FORK_INDEX), [pipelineSteps]);
-  const postJoinSteps = useMemo(() => pipelineSteps.slice(FORK_INDEX), [pipelineSteps]);
-
-  const preForkStatus = useMemo(() => {
-    if (preForkSteps.some(s => s.status === 'error')) return 'error' as const;
-    if (preForkSteps.every(s => s.status === 'complete' || s.status === 'skipped')) {
-      if (chunkThreads.length > 0 && chunkThreads.some(t => t.status !== 'complete' && t.status !== 'error')) return 'running' as const;
-      if (chunkThreads.some(t => t.status === 'error')) return 'error' as const;
-      return 'complete' as const;
-    }
-    if (preForkSteps.some(s => s.status === 'active')) return 'running' as const;
-    return pipelineStatus;
-  }, [preForkSteps, chunkThreads, pipelineStatus]);
-
-  const postJoinStatus = useMemo(() => {
-    if (postJoinSteps.some(s => s.status === 'error')) return 'error' as const;
-    if (postJoinSteps.every(s => s.status === 'complete' || s.status === 'skipped')) return 'complete' as const;
-    if (postJoinSteps.some(s => s.status === 'active')) return 'running' as const;
-    if (postJoinSteps.every(s => s.status === 'pending')) return 'idle' as const;
-    return pipelineStatus;
-  }, [postJoinSteps, pipelineStatus]);
-
   const isIdle = pipelineStatus === 'idle';
   const isRunning = pipelineStatus === 'running';
 
@@ -1191,28 +1169,13 @@ export function SandboxPage({
       {!isIdle && (
         <div className="sb-flow-overview">
           <FlowErrorBoundary>
-            {/* Pre-fork: Steps 1-4 + parallel chunk threads (expanded: supports parallelThreads) */}
-            <FlowProgress
-              mode="expanded"
-              steps={preForkSteps}
-              status={preForkStatus}
+            <PipelineWaterfall
+              steps={pipelineSteps}
+              status={pipelineStatus}
+              parallelThreads={chunkThreads}
               label="Ad Detection Pipeline"
               activity={activity}
-              parallelThreads={chunkThreads}
-              parallelConfig={parallelConfig}
-              radius={5}
-              statusMap={{ done: 'complete', skipped: 'skipped' }}
             />
-            {/* Post-join: Refine → Build → HTML → Finalize */}
-            {postJoinStatus !== 'idle' && (
-              <FlowProgress
-                mode="compact"
-                steps={postJoinSteps}
-                status={postJoinStatus}
-                statusMap={{ done: 'complete', skipped: 'skipped' }}
-                radius={5}
-              />
-            )}
           </FlowErrorBoundary>
           <div className="sb-flow-stats">
             <span className="sb-stat sb-stat-ok">{completeCount} done</span>

@@ -1,9 +1,10 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
-import { FlowProgress, FlowErrorBoundary } from 'bilko-flow/react/components';
+import { FlowErrorBoundary } from 'bilko-flow/react/components';
 import { PodcastSelector } from './components/PodcastSelector';
 import { EpisodeList } from './components/EpisodeList';
 import { Player } from './components/Player';
 import { SandboxPage } from './components/SandboxPage';
+import { PipelineWaterfall } from './components/PipelineWaterfall';
 import {
   fetchPodcasts,
   fetchEpisodes,
@@ -16,7 +17,7 @@ import {
   type PartialAdsEvent,
 } from './services/api';
 import type { AdDetectionResult, AdSegment } from './services/adDetector';
-import { STEP_ORDER, STEP_META, FORK_INDEX } from './workflows/podcastFlow';
+import { STEP_ORDER, STEP_META } from './workflows/podcastFlow';
 import type { FlowProgressStep, ParallelThread, ParallelConfig } from 'bilko-flow/react/components';
 
 // ─── Pipeline step tracking ────────────────────────────────────────────────
@@ -322,31 +323,6 @@ export default function App() {
     autoCollapseDelayMs: 2000,
   }), []);
 
-  // Split steps at the fork point so bilko-flow renders threads at the correct position
-  const preForkSteps = useMemo(() => pipelineSteps.slice(0, FORK_INDEX), [pipelineSteps]);
-  const postJoinSteps = useMemo(() => pipelineSteps.slice(FORK_INDEX), [pipelineSteps]);
-
-  // Derived status for each section
-  const preForkStatus = useMemo(() => {
-    if (preForkSteps.some(s => s.status === 'error')) return 'error' as const;
-    if (preForkSteps.every(s => s.status === 'complete' || s.status === 'skipped')) {
-      // Pre-fork steps done — check if threads are still running
-      if (chunkThreads.length > 0 && chunkThreads.some(t => t.status !== 'complete' && t.status !== 'error')) return 'running' as const;
-      if (chunkThreads.some(t => t.status === 'error')) return 'error' as const;
-      return 'complete' as const;
-    }
-    if (preForkSteps.some(s => s.status === 'active')) return 'running' as const;
-    return flowStatus;
-  }, [preForkSteps, chunkThreads, flowStatus]);
-
-  const postJoinStatus = useMemo(() => {
-    if (postJoinSteps.some(s => s.status === 'error')) return 'error' as const;
-    if (postJoinSteps.every(s => s.status === 'complete' || s.status === 'skipped')) return 'complete' as const;
-    if (postJoinSteps.some(s => s.status === 'active')) return 'running' as const;
-    if (postJoinSteps.every(s => s.status === 'pending')) return 'idle' as const;
-    return flowStatus;
-  }, [postJoinSteps, flowStatus]);
-
   if (page === 'sandbox') {
     return (
       <SandboxPage
@@ -402,28 +378,13 @@ export default function App() {
           {showFlow && (
             <div className="flow-widget-container">
               <FlowErrorBoundary>
-                {/* Pre-fork: Steps 1-4 + parallel chunk threads (expanded: supports parallelThreads) */}
-                <FlowProgress
-                  mode="expanded"
-                  steps={preForkSteps}
-                  status={preForkStatus}
-                  activity={activity}
-                  label="Ad Detection Pipeline"
-                  statusMap={STATUS_MAP}
+                <PipelineWaterfall
+                  steps={pipelineSteps}
+                  status={flowStatus}
                   parallelThreads={chunkThreads}
-                  parallelConfig={parallelConfig}
-                  radius={5}
+                  label="Ad Detection Pipeline"
+                  activity={activity}
                 />
-                {/* Post-join: Refine → Build → HTML → Finalize */}
-                {postJoinStatus !== 'idle' && (
-                  <FlowProgress
-                    mode="compact"
-                    steps={postJoinSteps}
-                    status={postJoinStatus}
-                    statusMap={STATUS_MAP}
-                    radius={5}
-                  />
-                )}
               </FlowErrorBoundary>
             </div>
           )}
