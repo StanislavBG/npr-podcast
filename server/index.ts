@@ -1766,8 +1766,9 @@ Rules:
 - If sentences immediately after the anchor end are also ad content, expand the boundary later.
 - If edge sentences are editorial content, contract the boundary inward.
 - An ad block is typically 3-10 consecutive sentences.
+- MERGE near-adjacent ad blocks: if two ad anchors are separated by only 1-2 sentences of apparent content, those gap sentences are almost certainly part of the same ad break (transitions, host banter between sponsor reads, etc.). Merge them into one larger block spanning the full range. Only keep ad blocks separate when there are 3+ sentences of genuine editorial content between them.
 - For each refined boundary, output adStart and adEnd as seconds from episode start, rounded to 0.1s.
-- Do NOT merge separate ad blocks — keep them as distinct segments.
+- The goal is smooth, accurate skip boundaries — the player will jump from adStart to adEnd, so false gaps in the middle of an ad break cause jarring interruptions.
 
 Return ONLY valid JSON.`;
 

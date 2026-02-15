@@ -994,6 +994,13 @@ button {
   color: var(--fg);
 }
 
+.sb-section-divider {
+  border: none;
+  border-top: 1px dashed var(--fg3);
+  margin: 16px 0;
+  opacity: 0.4;
+}
+
 .sb-sub-heading {
   font-size: 13px;
   font-weight: 700;

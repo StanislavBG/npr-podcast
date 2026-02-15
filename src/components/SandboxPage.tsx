@@ -9,7 +9,7 @@ import {
   type SandboxLine,
   type Episode,
 } from '../services/api';
-import { STEP_ORDER, STEP_META } from '../workflows/podcastFlow';
+import { STEP_ORDER, STEP_META, FORK_INDEX } from '../workflows/podcastFlow';
 
 // ─── Props: SandboxPage receives data from App (no self-fetching) ────────────
 
@@ -1142,6 +1142,29 @@ export function SandboxPage({
     return `${active.label}...`;
   }, [pipelineSteps]);
 
+  // Split steps at the fork point for two-section FlowProgress rendering
+  const preForkSteps = useMemo(() => pipelineSteps.slice(0, FORK_INDEX), [pipelineSteps]);
+  const postJoinSteps = useMemo(() => pipelineSteps.slice(FORK_INDEX), [pipelineSteps]);
+
+  const preForkStatus = useMemo(() => {
+    if (preForkSteps.some(s => s.status === 'error')) return 'error' as const;
+    if (preForkSteps.every(s => s.status === 'complete' || s.status === 'skipped')) {
+      if (chunkThreads.length > 0 && chunkThreads.some(t => t.status !== 'complete' && t.status !== 'error')) return 'running' as const;
+      if (chunkThreads.some(t => t.status === 'error')) return 'error' as const;
+      return 'complete' as const;
+    }
+    if (preForkSteps.some(s => s.status === 'active')) return 'running' as const;
+    return pipelineStatus;
+  }, [preForkSteps, chunkThreads, pipelineStatus]);
+
+  const postJoinStatus = useMemo(() => {
+    if (postJoinSteps.some(s => s.status === 'error')) return 'error' as const;
+    if (postJoinSteps.every(s => s.status === 'complete' || s.status === 'skipped')) return 'complete' as const;
+    if (postJoinSteps.some(s => s.status === 'active')) return 'running' as const;
+    if (postJoinSteps.every(s => s.status === 'pending')) return 'idle' as const;
+    return pipelineStatus;
+  }, [postJoinSteps, pipelineStatus]);
+
   const isIdle = pipelineStatus === 'idle';
   const isRunning = pipelineStatus === 'running';
 
@@ -1168,10 +1191,11 @@ export function SandboxPage({
       {!isIdle && (
         <div className="sb-flow-overview">
           <FlowErrorBoundary>
+            {/* Pre-fork: Steps 1-4 + Refine + parallel chunk threads */}
             <FlowProgress
               mode="expanded"
-              steps={pipelineSteps}
-              status={pipelineStatus}
+              steps={preForkSteps}
+              status={preForkStatus}
               label="Ad Detection Pipeline"
               activity={activity}
               parallelThreads={chunkThreads}
@@ -1179,6 +1203,16 @@ export function SandboxPage({
               radius={5}
               statusMap={{ done: 'complete', skipped: 'skipped' }}
             />
+            {/* Post-join: Steps 8, 8b, 9 */}
+            {postJoinStatus !== 'idle' && (
+              <FlowProgress
+                mode="compact"
+                steps={postJoinSteps}
+                status={postJoinStatus}
+                statusMap={{ done: 'complete', skipped: 'skipped' }}
+                radius={5}
+              />
+            )}
           </FlowErrorBoundary>
           <div className="sb-flow-stats">
             <span className="sb-stat sb-stat-ok">{completeCount} done</span>
@@ -1237,31 +1271,33 @@ export function SandboxPage({
             <StepStreamAudioChunks result={result} />
           </StepSection>
 
-          {/* Steps 5+6 per-chunk: parallel thread details */}
+          {/* Steps 5-7: Per-chunk processing + boundary refinement (fork section) */}
           <StepSection
             index={4}
-            step={{ id: 'step_chunk_processing', label: 'Per-Chunk Processing (Steps 5+6)', subtitle: 'Parallel: Transcribe each chunk (STT) then classify content vs ads (LLM)', type: 'ai.speech-to-text' }}
-            stepStatus={chunkThreads.length > 0 && chunkThreads.every(t => t.status === 'complete') ? 'complete'
+            step={{ id: 'step_chunk_processing', label: 'Per-Chunk Processing & Refine (Steps 5-7)', subtitle: 'Parallel: Transcribe + Classify each chunk, then LLM refines ad boundaries across all chunks', type: 'ai.speech-to-text' }}
+            stepStatus={
+              stepStatusMap['step_refine_ad_boundaries'] === 'complete' ? 'complete'
+              : stepStatusMap['step_refine_ad_boundaries'] === 'error' ? 'error'
               : chunkThreads.some(t => t.status === 'error') ? 'error'
-              : chunkThreads.some(t => t.status === 'running') ? 'active' : 'pending'}
+              : chunkThreads.some(t => t.status === 'running') || stepStatusMap['step_refine_ad_boundaries'] === 'active' ? 'active'
+              : chunkThreads.length > 0 && chunkThreads.every(t => t.status === 'complete') ? 'active' : 'pending'}
             defaultOpen={true}
           >
             <StepPerChunkProcessing result={result} chunkThreads={chunkThreads} />
-          </StepSection>
-
-          <StepSection index={5} step={STEPS[4]} stepStatus={stepStatusMap['step_refine_ad_boundaries']} defaultOpen={true}>
+            <hr className="sb-section-divider" />
+            <h3 className="sb-sub-heading">Step 7: Refine Ad Boundaries</h3>
             <StepRefineAdBoundaries result={result} />
           </StepSection>
 
-          <StepSection index={6} step={STEPS[5]} stepStatus={stepStatusMap['step_build_skip_map']}>
+          <StepSection index={5} step={STEPS[5]} stepStatus={stepStatusMap['step_build_skip_map']}>
             <StepBuildSkipMap result={result} />
           </StepSection>
 
-          <StepSection index={7} step={STEPS[6]} stepStatus={stepStatusMap['step_fetch_html_transcript']}>
+          <StepSection index={6} step={STEPS[6]} stepStatus={stepStatusMap['step_fetch_html_transcript']}>
             <StepFetchHtmlTranscript result={result} />
           </StepSection>
 
-          <StepSection index={8} step={STEPS[7]} stepStatus={stepStatusMap['step_finalize_playback']} defaultOpen={true}>
+          <StepSection index={7} step={STEPS[7]} stepStatus={stepStatusMap['step_finalize_playback']} defaultOpen={true}>
             <StepFinalizePlayback result={result} />
           </StepSection>
         </div>
