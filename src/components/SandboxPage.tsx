@@ -43,9 +43,7 @@ const STEPS: StepDef[] = STEP_ORDER.map(id => ({
     step_fetch_rss:              'Pull podcast RSS feed from NPR',
     step_parse_episodes:         'Extract episode metadata from feed',
     step_resolve_audio_stream:   'Resolve CDN URL, get audio metadata',
-    step_start_audio_streaming:  'Download audio and split into ~5-min chunks',
-    step_refine_ad_boundaries:   'LLM refines per-chunk ad anchors to precise boundaries (0.1s)',
-    step_build_skip_map:         'Merge refined ad segments into skip ranges',
+    step_plan_chunks:            'Calculate 1 MB byte-range chunks for parallel processing',
     step_fetch_html_transcript:  'Fetch NPR HTML transcript for cross-reference',
     step_finalize_playback:      'Reconcile + summary + build player config',
   }[id] || '',
@@ -607,227 +605,7 @@ function StepTranscribeChunks({ result }: { result: SandboxResult }) {
   );
 }
 
-function StepRefineAdBoundaries({ result }: { result: SandboxResult }) {
-  const { adBlocks, episode, summary, transcript } = result;
-  const { lines } = transcript;
-  const totalWords = lines.length > 0 ? lines[lines.length - 1].cumulativeWords : 0;
-  const dur = episode.durationSec;
-  let parsed: any = null;
-  try { parsed = JSON.parse(result.llmResponse); } catch { /* not JSON */ }
-
-  const adSentenceCount = adBlocks.reduce((s, b) => s + (b.endLine - b.startLine + 1), 0);
-  const contentSentenceCount = lines.length - adSentenceCount;
-
-  return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        Per-chunk ad anchors (from parallel Steps 5+6) are refined by the LLM examining surrounding
-        transcript context. Boundaries are adjusted to 0.1s precision. Strategy: {summary.strategy}
-      </div>
-
-      <h3 className="sb-sub-heading">Classification Summary</h3>
-      <div className="sb-kv-grid">
-        <div className="sb-kv"><span className="sb-kv-k">Input sentences</span><span className="sb-kv-v">{lines.length}</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Classified as CONTENT</span><span className="sb-kv-v">{contentSentenceCount} sentences ({lines.length > 0 ? ((contentSentenceCount / lines.length) * 100).toFixed(1) : 0}%)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Classified as AD</span><span className="sb-kv-v">{adSentenceCount} sentences in {adBlocks.length} block(s) ({lines.length > 0 ? ((adSentenceCount / lines.length) * 100).toFixed(1) : 0}%)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Ad words</span><span className="sb-kv-v">{summary.totalAdWords.toLocaleString()} / {totalWords.toLocaleString()} ({summary.adWordPercent}%)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Ad time</span><span className="sb-kv-v">{formatTimestamp(summary.totalAdTimeSec)} ({summary.totalAdTimeSec}s)</span></div>
-        <div className="sb-kv"><span className="sb-kv-k">Content time</span><span className="sb-kv-v">{formatTimestamp(summary.contentTimeSec)} ({summary.contentTimeSec}s)</span></div>
-      </div>
-
-      {summary.adWordPercent > 20 && (
-        <div className="sb-qa-alert">
-          Ad content is {summary.adWordPercent}% of transcript — this is unusually high.
-          Most NPR episodes have 5-15% ads. The LLM may be over-classifying editorial content as ads.
-        </div>
-      )}
-      {adBlocks.length === 0 && (
-        <div className="sb-qa-alert">
-          No ad blocks detected. The LLM found zero ad sentences. This could mean the episode
-          genuinely has no ads, or the transcript quality was too poor for classification.
-        </div>
-      )}
-
-      {adBlocks.length > 0 && <Timeline result={result} />}
-
-      {adBlocks.length > 0 && (
-        <>
-          <h3 className="sb-sub-heading">Detected Ad Blocks ({adBlocks.length})</h3>
-          <div className="sb-ad-list">
-            {adBlocks.map((b, i) => {
-              const blockLines = lines.filter(l => l.lineNum >= b.startLine && l.lineNum <= b.endLine);
-              const blockWords = blockLines.reduce((s, l) => s + l.wordCount, 0);
-              const duration = b.endTimeSec - b.startTimeSec;
-              return (
-                <div key={i} className="sb-ad-card">
-                  <div className="sb-ad-card-header">
-                    <span className="sb-ad-badge">AD {i + 1}</span>
-                    <span className="sb-ad-lines">Sentences {b.startLine}–{b.endLine} ({b.endLine - b.startLine + 1} sentences)</span>
-                    <span className="sb-ad-time">
-                      {formatTimestamp(b.startTimeSec)} – {formatTimestamp(b.endTimeSec)}
-                    </span>
-                    <span className="sb-ad-dur">{duration.toFixed(0)}s, {blockWords} words</span>
-                  </div>
-                  <div className="sb-ad-card-reason"><strong>Reason:</strong> {b.reason}</div>
-                  <div className="sb-parsed-lines" style={{ marginTop: '8px', borderLeft: '3px solid #e74c3c', paddingLeft: '8px' }}>
-                    {blockLines.map(l => {
-                      const approxTime = dur > 0 && totalWords > 0
-                        ? (l.cumulativeWords / totalWords) * dur
-                        : 0;
-                      return (
-                        <div key={l.lineNum} className="sb-parsed-line">
-                          <span className="sb-pl-time">{formatTimestamp(approxTime)}</span>
-                          <span className="sb-pl-num">[{l.lineNum}]</span>
-                          <span className="sb-pl-text" style={{ color: '#e74c3c' }}>
-                            {l.speaker && <strong>{l.speaker}: </strong>}
-                            {l.text}
-                          </span>
-                          <span className="sb-pl-wc">{l.wordCount}w</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-
-      <h3 className="sb-sub-heading">Annotated Transcript (full)</h3>
-      <div className="sb-qa-callout">
-        Sentences in red are classified as ads. Scan to verify the LLM's classification is correct.
-      </div>
-      <TranscriptViewer
-        lines={lines}
-        adBlocks={adBlocks}
-        durationSec={dur}
-      />
-
-      <h3 className="sb-sub-heading">LLM System Prompt</h3>
-      <pre className="sb-code-block sb-prompt-text">{result.prompts.system}</pre>
-
-      <h3 className="sb-sub-heading">LLM User Prompt (first 500 chars + last 300 chars)</h3>
-      <pre className="sb-code-block sb-prompt-text">
-        {result.prompts.user.length > 800
-          ? result.prompts.user.slice(0, 500) + '\n\n... (' + result.prompts.user.length.toLocaleString() + ' chars total) ...\n\n' + result.prompts.user.slice(-300)
-          : result.prompts.user}
-      </pre>
-
-      <h3 className="sb-sub-heading">Raw LLM Response</h3>
-      {parsed && (
-        <div className="sb-kv-grid" style={{ marginBottom: '8px' }}>
-          <div className="sb-kv"><span className="sb-kv-k">Blocks returned</span><span className="sb-kv-v">{parsed.adBlocks?.length ?? '(parse error)'}</span></div>
-        </div>
-      )}
-      <pre className="sb-code-block sb-json-text">{result.llmResponse}</pre>
-    </div>
-  );
-}
-
-function StepBuildSkipMap({ result }: { result: SandboxResult }) {
-  const { adBlocks, episode } = result;
-  const totalWords = result.transcript.lines.length > 0
-    ? result.transcript.lines[result.transcript.lines.length - 1].cumulativeWords
-    : 0;
-  const dur = episode.durationSec;
-  const totalAdTimeSec = adBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
-
-  return (
-    <div className="sb-step-body">
-      <div className="sb-qa-callout">
-        <strong>Pure computation</strong> — no external calls. Sentence-level ad classifications from
-        Step 6 are mapped to audio timestamps using proportional word position, then merged
-        into skip ranges for the player.
-      </div>
-
-      <h3 className="sb-sub-heading">Word-to-Time Mapping</h3>
-      <div className="sb-qa-math">
-        <div className="sb-qa-row">
-          <span className="sb-qa-label">Total transcript words</span>
-          <span className="sb-qa-val">{totalWords.toLocaleString()}</span>
-        </div>
-        <div className="sb-qa-row">
-          <span className="sb-qa-label">Audio duration</span>
-          <span className="sb-qa-val">{formatTimestamp(dur)} ({dur}s)</span>
-        </div>
-        <div className="sb-qa-row">
-          <span className="sb-qa-label">Mapping formula</span>
-          <span className="sb-qa-val">time = (cumulativeWords / {totalWords}) x {dur}s</span>
-        </div>
-      </div>
-
-      <h3 className="sb-sub-heading">Time Breakdown</h3>
-      <div className="sb-qa-math">
-        <div className="sb-qa-row">
-          <span className="sb-qa-label">Total episode</span>
-          <span className="sb-qa-val">{formatTimestamp(dur)}</span>
-        </div>
-        <div className="sb-qa-row" style={{ color: '#e74c3c' }}>
-          <span className="sb-qa-label">Ad time ({adBlocks.length} blocks)</span>
-          <span className="sb-qa-val">{formatTimestamp(totalAdTimeSec)} ({dur > 0 ? ((totalAdTimeSec / dur) * 100).toFixed(1) : 0}%)</span>
-        </div>
-        <div className="sb-qa-row sb-qa-highlight">
-          <span className="sb-qa-label">Content time</span>
-          <span className="sb-qa-val">{formatTimestamp(dur - totalAdTimeSec)} ({dur > 0 ? (((dur - totalAdTimeSec) / dur) * 100).toFixed(1) : 0}%)</span>
-        </div>
-      </div>
-
-      {adBlocks.length > 0 && (
-        <>
-          <h3 className="sb-sub-heading">Skip Ranges ({adBlocks.length})</h3>
-          <div className="sb-ad-list">
-            {adBlocks.map((b, i) => {
-              const blockDuration = b.endTimeSec - b.startTimeSec;
-              const blockWords = b.endWord - b.startWord;
-              return (
-                <div key={i} className="sb-ad-card">
-                  <div className="sb-ad-card-header">
-                    <span className="sb-ad-badge">SKIP {i + 1}</span>
-                    <span className="sb-ad-lines">Sentences {b.startLine}–{b.endLine}</span>
-                  </div>
-                  <div className="sb-qa-math" style={{ marginTop: '0.5rem' }}>
-                    <div className="sb-qa-row">
-                      <span className="sb-qa-label">Start</span>
-                      <span className="sb-qa-val">word {b.startWord}/{totalWords} → {formatTimestamp(b.startTimeSec)} ({b.startTimeSec.toFixed(1)}s)</span>
-                    </div>
-                    <div className="sb-qa-row">
-                      <span className="sb-qa-label">End</span>
-                      <span className="sb-qa-val">word {b.endWord}/{totalWords} → {formatTimestamp(b.endTimeSec)} ({b.endTimeSec.toFixed(1)}s)</span>
-                    </div>
-                    <div className="sb-qa-row sb-qa-highlight">
-                      <span className="sb-qa-label">Skip duration</span>
-                      <span className="sb-qa-val">{blockDuration.toFixed(1)}s ({blockWords} words)</span>
-                    </div>
-                    <div className="sb-qa-row">
-                      <span className="sb-qa-label">Reason</span>
-                      <span className="sb-qa-val">{b.reason}</span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-
-      <Timeline result={result} />
-
-      <h3 className="sb-sub-heading">Skip Map JSON</h3>
-      <div className="sb-qa-callout">
-        This JSON is passed to the audio player to auto-skip ad segments during playback.
-      </div>
-      {result.skipMap.length === 0 && (
-        <div className="sb-qa-alert">
-          Empty skip map — the player will not skip anything for this episode.
-        </div>
-      )}
-      <pre className="sb-code-block sb-json-text">
-        {JSON.stringify(result.skipMap, null, 2)}
-      </pre>
-    </div>
-  );
-}
+// StepRefineAdBoundaries and StepBuildSkipMap removed — refine + emit now run per-chunk
 
 function StepFetchHtmlTranscript({ result }: { result: SandboxResult }) {
   const { rawHtml, transcript, qa } = result;
@@ -1230,37 +1008,29 @@ export function SandboxPage({
             <StepResolveAudioStream result={result} />
           </StepSection>
 
-          <StepSection index={3} step={STEPS[3]} stepStatus={stepStatusMap['step_start_audio_streaming']}>
+          <StepSection index={3} step={STEPS[3]} stepStatus={stepStatusMap['step_plan_chunks']}>
             <StepStreamAudioChunks result={result} />
           </StepSection>
 
-          {/* Steps 5-7: Per-chunk processing + boundary refinement (fork section) */}
+          {/* Per-chunk parallel processing (fork section — no join) */}
           <StepSection
             index={4}
-            step={{ id: 'step_chunk_processing', label: 'Per-Chunk Processing & Refine (Steps 5-7)', subtitle: 'Parallel: Transcribe + Classify each chunk, then LLM refines ad boundaries across all chunks', type: 'ai.speech-to-text' }}
+            step={{ id: 'step_chunk_processing', label: 'Per-Chunk Processing (Parallel)', subtitle: 'Each chunk: Fetch → Transcribe → Classify → Refine → Emit skip ranges', type: 'ai.speech-to-text' }}
             stepStatus={
-              stepStatusMap['step_refine_ad_boundaries'] === 'complete' ? 'complete'
-              : stepStatusMap['step_refine_ad_boundaries'] === 'error' ? 'error'
-              : chunkThreads.some(t => t.status === 'error') ? 'error'
-              : chunkThreads.some(t => t.status === 'running') || stepStatusMap['step_refine_ad_boundaries'] === 'active' ? 'active'
-              : chunkThreads.length > 0 && chunkThreads.every(t => t.status === 'complete') ? 'active' : 'pending'}
+              chunkThreads.some(t => t.status === 'error') ? 'error'
+              : chunkThreads.length > 0 && chunkThreads.every(t => t.status === 'complete') ? 'complete'
+              : chunkThreads.some(t => t.status === 'running') ? 'active'
+              : chunkThreads.length > 0 ? 'active' : 'pending'}
             defaultOpen={true}
           >
             <StepPerChunkProcessing result={result} chunkThreads={chunkThreads} />
-            <hr className="sb-section-divider" />
-            <h3 className="sb-sub-heading">Step 7: Refine Ad Boundaries</h3>
-            <StepRefineAdBoundaries result={result} />
           </StepSection>
 
-          <StepSection index={5} step={STEPS[5]} stepStatus={stepStatusMap['step_build_skip_map']}>
-            <StepBuildSkipMap result={result} />
-          </StepSection>
-
-          <StepSection index={6} step={STEPS[6]} stepStatus={stepStatusMap['step_fetch_html_transcript']}>
+          <StepSection index={5} step={STEPS[4]} stepStatus={stepStatusMap['step_fetch_html_transcript']}>
             <StepFetchHtmlTranscript result={result} />
           </StepSection>
 
-          <StepSection index={7} step={STEPS[7]} stepStatus={stepStatusMap['step_finalize_playback']} defaultOpen={true}>
+          <StepSection index={6} step={STEPS[5]} stepStatus={stepStatusMap['step_finalize_playback']} defaultOpen={true}>
             <StepFinalizePlayback result={result} />
           </StepSection>
         </div>

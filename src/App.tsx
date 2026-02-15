@@ -176,16 +176,26 @@ export default function App() {
               const totalLabel = evt.totalChunks ? `/${evt.totalChunks}` : '';
               thread = {
                 id: evt.threadId!,
-                label: `Chunk ${chunkNum}${totalLabel}: Transcribe → Classify`,
+                label: `Chunk ${chunkNum}${totalLabel}`,
                 status: 'running' as const,
                 steps: [
+                  { id: `${evt.threadId}-fetch`, label: 'Fetch', status: 'pending' as const, type: 'http.request' },
                   { id: `${evt.threadId}-transcribe`, label: 'Transcribe', status: 'pending' as const, type: 'ai.speech-to-text' },
-                  { id: `${evt.threadId}-classify`, label: 'Classify Ads', status: 'pending' as const, type: 'ai.generate-text' },
+                  { id: `${evt.threadId}-classify`, label: 'Classify', status: 'pending' as const, type: 'ai.generate-text' },
+                  { id: `${evt.threadId}-refine`, label: 'Refine', status: 'pending' as const, type: 'ai.generate-text' },
+                  { id: `${evt.threadId}-emit`, label: 'Emit Skips', status: 'pending' as const, type: 'compute' },
                 ],
               };
               threads.push(thread);
             }
-            const stepSuffix = evt.step === 'step_transcribe_chunk' ? 'transcribe' : 'classify';
+            const STEP_SUFFIX_MAP: Record<string, string> = {
+              step_fetch_chunk: 'fetch',
+              step_transcribe_chunk: 'transcribe',
+              step_classify_chunk: 'classify',
+              step_refine_chunk: 'refine',
+              step_emit_skips: 'emit',
+            };
+            const stepSuffix = STEP_SUFFIX_MAP[evt.step] || 'fetch';
             const stepId = `${evt.threadId}-${stepSuffix}`;
             const mappedStatus = evt.status === 'done' ? 'complete' as const : evt.status === 'error' ? 'error' as const : 'active' as const;
             thread.steps = thread.steps.map(s =>
