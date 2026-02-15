@@ -1,267 +1,377 @@
-# Chunked Podcast Processing — Implementation Plan
+# Implementation Plan: Chunked Parallel Pipeline + Tubes Visualization
 
-## Problem
+## Summary
 
-The audio file is 32.7 MB, exceeding OpenAI Whisper's 25 MB limit. The current code in `transcribeAudioFromUrl()` (`server/index.ts:360-464`) downloads the entire file in one shot and sends it to Whisper as a single request — this fails for long podcasts (2h+).
-
-## Strategy: Lazy 5-Minute Chunks with 2-Chunk Lookahead
-
-Process **5-minute chunks on-demand**, staying **2 chunks (~10 min) ahead of playback**. A 2-hour podcast starts playing after processing just the first 2 chunks (~9.4 MB total), not the full 32+ MB file.
-
-### Key Parameters
-
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Chunk duration | 300s (5 min) | ~4.7 MB at 128kbps — well under 25 MB Whisper limit |
-| Lookahead | 2 chunks | Processes chunks `N` and `N+1` while user listens to chunk `N-1` |
-| Overlap | 10 seconds | Catches ad boundaries that straddle chunk edges |
-| Parallel chunk processing | 2 concurrent | Faster initial load |
-
-### Boundary Ad Detection
-
-The 10-second overlap between adjacent chunks is how we catch ads that cross boundaries:
-
-```
-Chunk 0: [0:00 ──────────────── 5:00] + overlap [5:00 ── 5:10]
-Chunk 1: overlap [4:50 ── 5:00] + [5:00 ──────────────── 10:00] + overlap [10:00 ── 10:10]
-```
-
-An ad starting at 4:55 is detected in chunk 0 (at 4:55) AND chunk 1 (at 4:55 after timestamp offset). The merge logic deduplicates overlapping segments.
+Restructure the pipeline so Steps 5+6 run **per-chunk in parallel** (dispatched as each chunk is produced by Step 4), add a new **Step 7** (LLM boundary refinement), and render it all using bilko-flow's `parallelThreads` as a tubes/lanes visualization.
 
 ---
 
-## Updated bilko-flow Pipeline
+## Open Question: Real-Time Transport
 
-The 9-step flow structure stays the same but **steps 4-7 now operate per-chunk in a loop** rather than on the whole file:
+**Recommendation: Keep SSE** (current transport). Reasons:
 
-```
-RSS → Parse ─┬─→ Resolve Audio → [Chunk Loop: Stream → Transcribe → Mark Ads → Merge Skip Map] ─┬─→ Finalize
-             └─→ Fetch HTML Transcript ──────────────────────────────────────────────────────────┘
-```
+- SSE is already wired end-to-end (server `sendEvent` → client `ReadableStream` parser).
+- The data flow is **server→client only** — no client-to-server messages needed mid-pipeline.
+- WebSockets add bidirectional complexity, reconnection logic, and a separate upgrade path for no benefit here.
+- SSE natively handles reconnection via `EventSource` (though we use `fetch` streaming, same idea).
+- Polling would add latency and waste bandwidth.
 
-The bilko-flow step definitions in `podcastFlow.ts` are updated:
-
-- **Step 4 (`stream.chunk`)**: Now fetches a single 5-min chunk via HTTP Range request (called per-chunk)
-- **Step 5 (`ai.speech-to-text`)**: Transcribes one chunk at a time (under 25 MB limit)
-- **Step 6 (`ai.generate-text`)**: LLM classifies that chunk's segments (lightweight per-chunk call)
-- **Step 7 (`compute`)**: Merges new chunk's ad segments into the growing skip map, deduplicates overlaps
-
-The flow visualizer shows progress as "Chunk 2/24" on steps 4-7.
+No transport change needed. The only change is the **shape of SSE events** — they'll now carry a `threadId` / `chunkIndex` to identify which parallel lane they belong to.
 
 ---
 
-## Implementation Steps
+## Architecture Overview
 
-### Step 1: New server endpoint `POST /api/audio/resolve`
-
-**File:** `server/index.ts`
-
-HEAD request to the audio URL, follows all redirects (podtrac → megaphone → CDN), returns metadata for chunking.
-
-```typescript
-// Request:  { audioUrl: string }
-// Response: {
-//   resolvedUrl: string,       // Final CDN URL after redirects
-//   contentLength: number,     // Total file size in bytes
-//   acceptRanges: boolean,     // Whether server supports Range requests
-//   contentType: string,       // "audio/mpeg"
-//   durationSec: number,       // Estimated: contentLength * 8 / 128000
-//   bitrate: number,           // Default 128000
-//   totalChunks: number,       // ceil(durationSec / 300)
-//   chunkDurationSec: number,  // 300
-// }
+### Current Flow (sequential)
+```
+Step 4 (download+chunk all) → Step 5 (transcribe sequentially) → Step 6 (classify all at once) → Step 7 (skip map) → Step 9 (finalize)
 ```
 
-Maps to bilko-flow **Step 3 (`step_resolve_audio_stream`)** — `http.request` type, HEAD method.
-
-### Step 2: New server endpoint `POST /api/audio/chunk`
-
-**File:** `server/index.ts`
-
-The core new endpoint — processes a single 5-minute chunk. Combines steps 4+5+6+7 for one chunk into a single server round-trip.
-
-```typescript
-// Request: {
-//   resolvedUrl: string,
-//   chunkIndex: number,         // 0-based
-//   totalChunks: number,
-//   contentLength: number,
-//   durationSec: number,
-//   bitrate: number,
-//   chunkDurationSec: number,   // 300
-//   overlapSec: number,         // 10
-//   episodeTitle: string,
-//   prevChunkTrailingText: string,  // Last ~200 chars from previous chunk for context
-// }
-// Response: {
-//   chunkIndex: number,
-//   startTimeSec: number,       // Chunk start in full audio
-//   endTimeSec: number,         // Chunk end in full audio
-//   transcript: {
-//     text: string,
-//     segments: Array<{start: number, end: number, text: string}>,
-//   },
-//   adSegments: Array<{startTime, endTime, type, confidence, reason}>,
-//   trailingText: string,       // Last ~200 chars for next chunk's context
-// }
+### New Flow (per-chunk parallel)
+```
+Step 4 (download + split) ─┬─ Thread "chunk-0": Step 5.0 (STT) → Step 6.0 (classify)
+                           ├─ Thread "chunk-1": Step 5.1 (STT) → Step 6.1 (classify)
+                           ├─ Thread "chunk-2": Step 5.2 (STT) → Step 6.2 (classify)
+                           └─ ...
+                              ↓ (all threads join)
+                           Step 7 (LLM boundary refinement) → Step 8 (skip map) → Step 9 (finalize)
 ```
 
-**Internal flow within this endpoint:**
-1. **Stream chunk (bilko step 4):** Calculate byte range from `chunkIndex * chunkDurationSec * bitrate / 8`. Fetch via `Range: bytes=startByte-endByte`. MP3 is frame-based so any byte-boundary cut works (decoder syncs to next frame header).
-2. **Transcribe chunk (bilko step 5):** Send chunk buffer (≤5 MB) to `openai.audio.transcriptions.create()` with `response_format: 'verbose_json'`. Offset all segment timestamps by `chunkStartTimeSec`.
-3. **Detect ads in chunk (bilko step 6):** Send chunk transcript + trailing context from previous chunk to LLM for classification (same `callLLM()` logic, but per-chunk — ~500 tokens in, ~200 out).
-4. **Return results** — the frontend merges into the skip map (bilko step 7).
+Step 8 (fetch HTML transcript) still runs in parallel with the main pipeline, joining at Step 9.
 
-### Step 3: Frontend chunk orchestrator in `App.tsx`
+---
 
-Replace the single `POST /api/transcribe` call with a progressive chunk loop:
+## Phase 1: Server — Parallelize Steps 5+6 Per Chunk
+
+### File: `server/index.ts`
+
+**1a. Restructure the transcription loop to dispatch chunks concurrently**
+
+Currently (lines 1870–1931): sequential `for` loop calling OpenAI STT one chunk at a time.
+
+Change to:
+- After `splitMp3IntoChunks`, launch all chunks as concurrent promises with `Promise.allSettled`.
+- Each chunk promise does: STT → classify ads → send progress per step.
+- Throttle concurrency to ~3 concurrent chunks (OpenAI rate limits). Use a simple semaphore pattern.
+- Each chunk sends SSE events tagged with `threadId: chunk-${i}` so the client can route them to the right parallel lane.
 
 ```typescript
-// New state:
-const [audioMeta, setAudioMeta] = useState<AudioMeta | null>(null);
-const chunksRef = useRef<Map<number, ChunkResult>>(new Map());
-const processingRef = useRef<Set<number>>(new Set());
+// Pseudocode
+const CONCURRENCY = 3;
+const semaphore = new Semaphore(CONCURRENCY);
 
-// On episode select (inside pick()):
-//   1. POST /api/audio/resolve → get audioMeta
-//      → bilko step 3 completes
-//   2. processChunk(0) and processChunk(1) in parallel
-//      → bilko steps 4-7 update with "Chunk 1/N"
-//   3. Start playback immediately after chunk 0 completes
-//   4. On timeupdate: ensureLookahead(currentChunkIndex)
-//      → triggers next chunk processing as user listens
+const chunkPromises = mp3Chunks.map((chunk, ci) =>
+  semaphore.run(async () => {
+    // Step 5.x: Transcribe this chunk
+    sendEvent('progress', {
+      step: 'step_transcribe_chunk',
+      threadId: `chunk-${ci}`,
+      chunkIndex: ci,
+      totalChunks: numChunks,
+      message: `Transcribing chunk ${ci+1}/${numChunks}...`
+    });
+    const segments = await transcribeChunk(chunk);
 
-async function processChunk(index: number): Promise<ChunkResult> {
-  // POST /api/audio/chunk with index
-  // On response: merge adSegments into global ads state
-  // Update bilko flow steps 4-7 progress
-}
+    // Step 6.x: Classify ads in this chunk immediately
+    sendEvent('progress', {
+      step: 'step_classify_chunk',
+      threadId: `chunk-${ci}`,
+      chunkIndex: ci,
+      totalChunks: numChunks,
+      message: `Classifying ads in chunk ${ci+1}...`
+    });
+    const chunkLines = buildLinesFromSegments(segments);
+    const adBlocks = await classifyAdsFromLines(chunkLines, ...);
 
-function ensureLookahead(currentChunkIndex: number) {
-  // If chunk currentChunk+1 and currentChunk+2 aren't processed,
-  // kick off processing
-}
+    // Send partial ads to player immediately
+    sendEvent('partial_ads', { skipMap: ..., source: `chunk-${ci}` });
+
+    return { segments, adBlocks, lines: chunkLines };
+  })
+);
+
+const results = await Promise.allSettled(chunkPromises);
 ```
 
-The bilko-flow step statuses update progressively:
-- Steps 4-7 show `running` with a progress annotation ("Chunk 3/24")
-- After ALL chunks processed, steps 4-7 show `completed`
-- Steps 4-7 only show `completed` after every chunk is done
+**1b. Send `partial_ads` after each chunk's Step 6 completes**
 
-### Step 4: API client functions in `src/services/api.ts`
+Instead of only sending early ads after chunk 0, send partial results after _every_ chunk's classification completes. The player accumulates ad segments progressively.
 
+**1c. New SSE event shape**
+
+Add `threadId` and `chunkIndex` fields to progress events:
 ```typescript
-export interface AudioMeta {
-  resolvedUrl: string;
-  contentLength: number;
-  acceptRanges: boolean;
-  contentType: string;
-  durationSec: number;
-  bitrate: number;
-  totalChunks: number;
-  chunkDurationSec: number;
-}
-
-export interface ChunkResult {
+interface ChunkedProgressEvent {
+  step: string;              // 'step_transcribe_chunk' | 'step_classify_chunk'
+  threadId: string;          // 'chunk-0', 'chunk-1', ...
   chunkIndex: number;
-  startTimeSec: number;
-  endTimeSec: number;
-  transcript: { text: string; segments: Array<{start: number; end: number; text: string}> };
-  adSegments: AdSegment[];
-  trailingText: string;
+  totalChunks: number;
+  status?: 'done' | 'error';
+  message: string;
 }
-
-export async function resolveAudio(audioUrl: string): Promise<AudioMeta>
-export async function processAudioChunk(params: ChunkRequest): Promise<ChunkResult>
 ```
 
-### Step 5: Ad segment merge/dedup in `src/services/adDetector.ts`
+### New Step 7 — LLM Boundary Refinement
+
+**1d. Add Step 7 after all chunk threads join**
+
+After all chunk threads complete:
+1. Merge all ad block anchors from Step 6 results across all chunks.
+2. For each anchor, extract surrounding transcript context (±5 sentences).
+3. Send to LLM with a refinement prompt asking it to find the precise start/end of each ad segment.
+4. Output: `{ adStart: number, adEnd: number }[]` in seconds from episode start, precision 0.1s.
+5. Send refined boundaries to the player via `partial_ads` (replaces earlier partials).
 
 ```typescript
-export function mergeChunkAdSegments(
-  existing: AdSegment[],
-  incoming: AdSegment[],
-  overlapSec: number,
-): AdSegment[] {
-  // 1. Combine existing + incoming
-  // 2. Sort by startTime
-  // 3. Merge segments that overlap or are within 3s gap
-  // 4. Deduplicate segments from the overlap region between chunks
-  // 5. Add padding: 0.5s before, 0.3s after
-  // 6. Return merged array
-}
+// Step 7: Refine ad boundaries
+sendEvent('progress', { step: 'step_refine_ad_boundaries', message: 'Refining ad boundaries with LLM...' });
+
+const refinedAds = await refineBoundariesWithLLM(allAdAnchors, allLines, durationSec, episodeTitle);
+// refinedAds = [{ adStart: 45.3, adEnd: 112.8 }, ...]
+
+sendEvent('progress', {
+  step: 'step_refine_ad_boundaries',
+  status: 'done',
+  message: `Refined ${refinedAds.length} ad boundaries`,
+});
 ```
 
-### Step 6: Update `podcastFlow.ts` bilko-flow workflow
+**Refinement prompt design:**
+```
+You are refining ad segment boundaries in a podcast transcript.
 
-Update the step inputs in `createPodcastWorkflow()` to reflect 5-minute chunking:
+Each anchor below was identified by a per-chunk classifier. Your job is to find
+the PRECISE start and end of each ad segment by examining the surrounding transcript.
 
+Rules:
+- Anchors are approximate. Examine sentences before/after each anchor boundary.
+- If sentences immediately before adStart are also ad content, expand adStart earlier.
+- If sentences immediately after adEnd are also ad content, expand adEnd later.
+- If edge sentences are editorial content, contract the boundary inward.
+- An ad block is typically 3-10 consecutive sentences (sponsor reads, funding credits, promos).
+- Output adStart and adEnd as seconds from episode start, rounded to 0.1s precision.
+
+For each anchor, output ONLY:
+  { "adStart": <seconds>, "adEnd": <seconds> }
+```
+
+**1e. Timestamp precision**
+
+All Step 7 output timestamps use 0.1s precision:
 ```typescript
-// Step 4 - updated
-{
-  id: 'step_start_audio_streaming',
-  type: 'stream.chunk',
-  inputs: {
-    chunkStrategy: 'time-based',
-    chunkDurationSec: 300,          // 5 minutes
-    overlapSec: 10,                 // 10s overlap for boundary ads
-    lookaheadChunks: 2,             // process 2 ahead of playback
-    parallelDownloads: 2,
-  },
-}
+const adStart = Math.round(rawStart * 10) / 10;
+const adEnd = Math.round(rawEnd * 10) / 10;
 ```
-
-Add progress metadata support to `FlowState`:
-
-```typescript
-export interface FlowState {
-  steps: Record<string, StepStatus>;
-  currentStep: string | null;
-  error: string | null;
-  chunkProgress?: {                 // NEW
-    currentChunk: number;
-    totalChunks: number;
-  };
-}
-```
-
-Update `getFlowActivity()` to show chunk progress:
-
-```typescript
-export function getFlowActivity(state: FlowState): string {
-  if (!state.currentStep) return '';
-  const meta = STEP_META[state.currentStep];
-  if (!meta) return '';
-  if (state.chunkProgress && ['step_start_audio_streaming', 'step_transcribe_chunks', 'step_mark_ad_locations', 'step_build_skip_map'].includes(state.currentStep)) {
-    return `${meta.label} (${state.chunkProgress.currentChunk}/${state.chunkProgress.totalChunks})...`;
-  }
-  return `${meta.label}...`;
-}
-```
-
-### Step 7: Remove old whole-file transcription
-
-- Remove `transcribeAudioFromUrl()` from `server/index.ts`
-- Remove `POST /api/transcribe` endpoint
-- Keep `POST /api/llm/detect-ads` but make it accept per-chunk transcripts
-- Keep `/api/audio` proxy endpoint unchanged (player still streams full audio for playback)
 
 ---
 
-## Edge Cases
+## Phase 2: Client — Parallel Threads (Tubes) Visualization
 
-1. **Server doesn't support Range requests**: `acceptRanges: false` from resolve. Fall back to downloading full file in memory on server, slice into 5-min buffers, process as chunks. Warn in UI.
-2. **User seeks forward**: If user jumps to 45:00 and chunk 9 isn't processed yet, immediately prioritize chunks 9-10 over sequential processing.
-3. **Short podcast (<5 min)**: Single chunk, no lookahead needed. Processed identically.
-4. **Last chunk is short**: May be <1 min. Still run through the pipeline, but ad detection context may be limited.
-5. **MP3 frame alignment**: MP3 decoders sync to the next valid frame header after any byte boundary cut. A few ms of silence/artifact at chunk start is fine since this audio is only used for transcription, not playback.
+### File: `src/workflows/podcastFlow.ts`
 
-## Files to Modify
+**2a. Update STEP_ORDER and STEP_META**
+
+- Steps 1–4 remain in main chain (sequential).
+- Steps 5+6 are removed from main chain — they live inside parallel chunk threads.
+- Step 7 (`step_refine_ad_boundaries`) is new — joins after all chunk threads complete.
+- Step 8 (`step_build_skip_map`) stays.
+- Step 8b (`step_fetch_html_transcript`) stays parallel with the main pipeline.
+- Step 9 (`step_finalize_playback`) joins both.
+
+```typescript
+const STEP_META = {
+  step_fetch_rss:              { label: 'Fetch RSS Feed',              type: 'http.request' },
+  step_parse_episodes:         { label: 'Parse Episodes',              type: 'http.request' },
+  step_resolve_audio_stream:   { label: 'Resolve Audio Stream',        type: 'http.request' },
+  step_start_audio_streaming:  { label: 'Download & Chunk Audio',      type: 'stream.chunk' },
+  // Steps 5+6 per-chunk — defined dynamically as ParallelThread steps
+  step_refine_ad_boundaries:   { label: 'Refine Ad Boundaries',        type: 'ai.generate-text' },
+  step_build_skip_map:         { label: 'Build Skip Map',              type: 'compute' },
+  step_fetch_html_transcript:  { label: 'Fetch HTML Transcript',       type: 'http.request' },
+  step_finalize_playback:      { label: 'Finalize Playback',           type: 'ai.summarize' },
+};
+
+// Main chain only — per-chunk steps are in parallelThreads
+const STEP_ORDER = [
+  'step_fetch_rss',
+  'step_parse_episodes',
+  'step_resolve_audio_stream',
+  'step_start_audio_streaming',
+  // ← parallelThreads inserted here visually
+  'step_refine_ad_boundaries',
+  'step_build_skip_map',
+  'step_fetch_html_transcript',
+  'step_finalize_playback',
+];
+
+// Per-chunk thread step definitions (used to build ParallelThread.steps)
+const CHUNK_STEP_META = {
+  step_transcribe_chunk:  { label: 'Transcribe', type: 'ai.speech-to-text' },
+  step_classify_chunk:    { label: 'Classify Ads', type: 'ai.generate-text' },
+};
+```
+
+### File: `src/App.tsx`
+
+**2b. Add `parallelThreads` state**
+
+```typescript
+import type { ParallelThread } from 'bilko-flow/react/components';
+
+const [chunkThreads, setChunkThreads] = useState<ParallelThread[]>([]);
+```
+
+**2c. Handle chunked progress events**
+
+When an SSE event arrives with `threadId`:
+1. Find or create the `ParallelThread` for that `threadId`.
+2. Find or create the step within that thread.
+3. Update step status + meta.
+
+```typescript
+const handleProgress = (evt: SandboxProgressEvent) => {
+  if (evt.threadId) {
+    // Per-chunk progress → update parallel thread
+    setChunkThreads(prev => {
+      const threads = [...prev];
+      let thread = threads.find(t => t.id === evt.threadId);
+      if (!thread) {
+        thread = {
+          id: evt.threadId!,
+          label: `Chunk ${(evt.chunkIndex ?? 0) + 1}`,
+          status: 'running' as const,
+          steps: [
+            { id: `${evt.threadId}-transcribe`, label: 'Transcribe', status: 'pending' as const, type: 'ai.speech-to-text' },
+            { id: `${evt.threadId}-classify`, label: 'Classify Ads', status: 'pending' as const, type: 'ai.generate-text' },
+          ],
+        };
+        threads.push(thread);
+      }
+      // Map step + status onto the thread's steps
+      const stepSuffix = evt.step === 'step_transcribe_chunk' ? 'transcribe' : 'classify';
+      const stepId = `${evt.threadId}-${stepSuffix}`;
+      const mappedStatus = evt.status === 'done' ? 'complete' : evt.status === 'error' ? 'error' : 'active';
+      thread.steps = thread.steps.map(s =>
+        s.id === stepId ? { ...s, status: mappedStatus, meta: { message: evt.message } } : s
+      );
+      // Update thread-level status
+      const allComplete = thread.steps.every(s => s.status === 'complete' || s.status === 'skipped');
+      const anyError = thread.steps.some(s => s.status === 'error');
+      thread.status = anyError ? 'error' : allComplete ? 'complete' : 'running';
+      return threads;
+    });
+  } else {
+    // Main pipeline step
+    updateStep(evt.step, ...);
+  }
+};
+```
+
+**2d. Pass threads to FlowProgress**
+
+```tsx
+<FlowProgress
+  mode="auto"
+  steps={pipelineSteps}
+  status={flowStatus}
+  activity={activity}
+  label="Ad Detection Pipeline"
+  statusMap={STATUS_MAP}
+  parallelThreads={chunkThreads}
+  parallelConfig={{ maxVisible: 5, autoCollapseCompleted: true }}
+/>
+```
+
+bilko-flow renders this as:
+- Main step chain (Steps 1–4)
+- Fork indicator
+- Parallel thread lanes (Chunk 1, Chunk 2, Chunk 3...) — each showing Transcribe → Classify
+- Join indicator
+- Main step chain resumes (Steps 7–9)
+
+### File: `src/components/SandboxPage.tsx`
+
+**2e. Same parallel threads in expanded mode**
+
+SandboxPage receives `chunkThreads` as a new prop and passes it to FlowProgress in expanded mode.
+
+**2f. Add Step 7 debug section**
+
+New `StepRefineAdBoundaries` component showing:
+- Input anchors from Step 6 (aggregated across all chunks)
+- LLM refinement prompt/response
+- Output: refined `{ adStart, adEnd }` pairs with 0.1s precision
+- Comparison of anchor vs refined boundaries
+
+---
+
+## Phase 3: SSE Event Schema Update
+
+### File: `src/services/api.ts`
+
+**3a. Extend `SandboxProgressEvent` type**
+
+```typescript
+export interface SandboxProgressEvent {
+  step: string;
+  status?: 'done' | 'error' | 'skipped';
+  message: string;
+  // New fields for parallel chunk tracking
+  threadId?: string;
+  chunkIndex?: number;
+  totalChunks?: number;
+}
+```
+
+**3b. SSE parser — no changes needed**
+
+The existing `sandboxAnalyzeStream` parser is generic — it forwards any parsed JSON to `onProgress`. The new fields (`threadId`, `chunkIndex`) flow through automatically.
+
+---
+
+## Phase 4: Step 7 Output → Player Integration
+
+### File: `src/App.tsx`
+
+**4a. Step 7 output replaces partial_ads**
+
+When Step 7 completes, it sends a final `partial_ads` event with the refined boundaries:
+```typescript
+{ adStart: 45.3, adEnd: 112.8 }  // seconds from episode start, 0.1s precision
+```
+
+These are converted to `AdSegment[]` and passed to the Player, replacing any earlier partial results from per-chunk Step 6.
+
+**4b. Timestamp precision**
+
+All Step 7 timestamps round to nearest 0.1s:
+```typescript
+const adStart = Math.round(rawStart * 10) / 10;
+const adEnd = Math.round(rawEnd * 10) / 10;
+```
+
+---
+
+## Files Changed
 
 | File | Changes |
 |------|---------|
-| `server/index.ts` | Add `POST /api/audio/resolve` + `POST /api/audio/chunk` endpoints. Refactor `callLLM()` ad detection to accept per-chunk transcripts. Remove `transcribeAudioFromUrl()` and `POST /api/transcribe`. |
-| `src/App.tsx` | Replace single transcribe call with chunk orchestrator loop. Add `audioMeta` state, `processChunk()`, `ensureLookahead()`. Wire up `timeupdate` for progressive chunk processing. |
-| `src/services/api.ts` | Add `resolveAudio()` and `processAudioChunk()` client functions + types. |
-| `src/services/adDetector.ts` | Add `mergeChunkAdSegments()` dedup/merge function. |
-| `src/workflows/podcastFlow.ts` | Update step inputs for 5-min chunks. Add `chunkProgress` to `FlowState`. Update `getFlowActivity()` for chunk progress display. |
+| `server/index.ts` | Parallelize chunk loop with semaphore, add Step 7 LLM refinement, tag SSE events with `threadId` |
+| `src/workflows/podcastFlow.ts` | Add `step_refine_ad_boundaries`, export `CHUNK_STEP_META`, update STEP_ORDER/STEP_META |
+| `src/App.tsx` | Add `chunkThreads` state, handle `threadId` in progress events, pass `parallelThreads` to FlowProgress |
+| `src/components/SandboxPage.tsx` | Accept + render `chunkThreads` prop, add Step 7 debug section |
+| `src/services/api.ts` | Extend `SandboxProgressEvent` type with `threadId`/`chunkIndex`/`totalChunks` |
+
+---
+
+## Risks & Mitigations
+
+1. **OpenAI rate limits with 3 concurrent STT calls** — The semaphore caps concurrency at 3. If rate-limited, back off to 2. Each chunk is ~5 min of audio, so a 15-min episode = 3 chunks = 3 concurrent calls.
+
+2. **bilko-flow 5-thread limit** — `MAX_PARALLEL_THREADS = 5`. Most episodes chunk into 2–4 pieces at 5 min each, so this fits. Long episodes (>25 min) would hit the limit; bilko-flow handles overflow with "+N more" indicator and `autoCollapseCompleted: true` collapses finished threads.
+
+3. **Step 7 LLM accuracy** — The refinement prompt gets full transcript context around each anchor, making it more accurate than per-chunk classification. Validate that `adStart < adEnd` and both are within `[0, durationSec]`. Discard invalid pairs.
+
+4. **Memory** — All chunks already loaded into memory (current behavior). No regression.
+
+5. **Chunk ordering** — Parallel chunks may finish out of order. Accumulate results into an array indexed by `chunkIndex`, merge in order after all complete.
