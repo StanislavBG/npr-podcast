@@ -1167,6 +1167,7 @@ interface SandboxLine {
   text: string;
   wordCount: number;
   cumulativeWords: number;
+  timeSec: number;  // actual timestamp from Whisper segment (seconds from episode start)
 }
 
 interface SandboxAdBlock {
@@ -1361,7 +1362,7 @@ function parseTranscriptToLines(html: string): SandboxLine[] {
     const wc = content.split(/\s+/).filter(Boolean).length;
     cumulative += wc;
 
-    lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative });
+    lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative, timeSec: 0 });
   }
 
   return lines;
@@ -1385,6 +1386,12 @@ function parseSrtToLines(srt: string): SandboxLine[] {
     const blockLines = block.trim().split('\n');
     // SRT blocks have: index, timestamp, text (1+ lines)
     if (blockLines.length < 3) continue;
+
+    // Parse timestamp from line like "00:00:01,000 --> 00:00:04,000"
+    const tsMatch = blockLines[1].match(/(\d{2}):(\d{2}):(\d{2})[,.](\d{3})/);
+    const timeSec = tsMatch
+      ? parseInt(tsMatch[1]) * 3600 + parseInt(tsMatch[2]) * 60 + parseInt(tsMatch[3]) + parseInt(tsMatch[4]) / 1000
+      : 0;
 
     // Skip the index line and timestamp line, get text
     const textLines = blockLines.slice(2);
@@ -1414,7 +1421,7 @@ function parseSrtToLines(srt: string): SandboxLine[] {
     const wc = content.split(/\s+/).filter(Boolean).length;
     cumulative += wc;
 
-    lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative });
+    lines.push({ lineNum, speaker, text: content, wordCount: wc, cumulativeWords: cumulative, timeSec: Math.round(timeSec * 10) / 10 });
   }
 
   return lines;
@@ -1441,9 +1448,21 @@ function parseVttToLines(vtt: string): SandboxLine[] {
     const blockLines = block.trim().split('\n');
     // Find the timestamp line
     let textStart = 0;
+    let timeSec = 0;
     for (let i = 0; i < blockLines.length; i++) {
       if (blockLines[i].includes('-->')) {
         textStart = i + 1;
+        // Parse VTT timestamp "00:00:01.000 --> 00:00:04.000"
+        const tsMatch = blockLines[i].match(/(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/);
+        if (tsMatch) {
+          timeSec = parseInt(tsMatch[1]) * 3600 + parseInt(tsMatch[2]) * 60 + parseInt(tsMatch[3]) + parseInt(tsMatch[4]) / 1000;
+        } else {
+          // Try mm:ss.mmm format
+          const shortMatch = blockLines[i].match(/(\d{2}):(\d{2})[.,](\d{3})/);
+          if (shortMatch) {
+            timeSec = parseInt(shortMatch[1]) * 60 + parseInt(shortMatch[2]) + parseInt(shortMatch[3]) / 1000;
+          }
+        }
         break;
       }
     }
@@ -1477,7 +1496,7 @@ function parseVttToLines(vtt: string): SandboxLine[] {
     const wc = cueText.split(/\s+/).filter(Boolean).length;
     cumulative += wc;
 
-    lines.push({ lineNum, speaker, text: cueText, wordCount: wc, cumulativeWords: cumulative });
+    lines.push({ lineNum, speaker, text: cueText, wordCount: wc, cumulativeWords: cumulative, timeSec: Math.round(timeSec * 10) / 10 });
   }
 
   return lines;
@@ -1506,7 +1525,8 @@ function parseJsonTranscriptToLines(json: string): SandboxLine[] {
       const wc = text.split(/\s+/).filter(Boolean).length;
       cumulative += wc;
 
-      lines.push({ lineNum, speaker, text, wordCount: wc, cumulativeWords: cumulative });
+      const timeSec = seg.startTime || seg.start || seg.time || 0;
+      lines.push({ lineNum, speaker, text, wordCount: wc, cumulativeWords: cumulative, timeSec: typeof timeSec === 'number' ? Math.round(timeSec * 10) / 10 : 0 });
     }
   } catch {
     // Invalid JSON — return empty
@@ -1575,9 +1595,13 @@ function buildLinesFromSegments(
       lineN++;
       const wc = content.split(/\s+/).filter(Boolean).length;
       cumW += wc;
-      lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW });
+      lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW, timeSec: Math.round(seg.start * 10) / 10 });
     } else {
+      // Split long segments into sentences; interpolate timestamps across them
       const sentences = seg.text.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
+      const segDuration = seg.end - seg.start;
+      const totalSegWords = segWords;
+      let wordsProcessed = 0;
       for (const sent of sentences) {
         let speaker = '';
         let content = sent.trim();
@@ -1586,8 +1610,11 @@ function buildLinesFromSegments(
         if (!content) continue;
         lineN++;
         const wc = content.split(/\s+/).filter(Boolean).length;
+        // Interpolate timestamp based on word position within the segment
+        const sentTimeSec = seg.start + (totalSegWords > 0 ? (wordsProcessed / totalSegWords) * segDuration : 0);
+        wordsProcessed += wc;
         cumW += wc;
-        lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW });
+        lines.push({ lineNum: lineN, speaker, text: content, wordCount: wc, cumulativeWords: cumW, timeSec: Math.round(sentTimeSec * 10) / 10 });
       }
     }
   }
@@ -1655,8 +1682,7 @@ async function classifyAdsFromLines(
 
   const numberedText = lines.map(l => {
     const spk = l.speaker ? `${l.speaker}: ` : '';
-    const approxTime = dur > 0 && totalWords > 0 ? (l.cumulativeWords / totalWords) * dur : 0;
-    return `[${l.lineNum}] (${fmtTs(approxTime)}) ${spk}${l.text}`;
+    return `[${l.lineNum}] (${fmtTs(l.timeSec)}) ${spk}${l.text}`;
   }).join('\n');
 
   const systemPrompt = buildAdClassificationPrompt(episodeTitle, topicContext);
@@ -1747,9 +1773,8 @@ async function refineBoundariesWithLLM(
       anchorEndLine: anchor.endLine,
       reason: anchor.reason,
       context: contextLines.map(l => {
-        const approxTime = dur > 0 && totalWords > 0 ? (l.cumulativeWords / totalWords) * dur : 0;
         const isAnchor = l.lineNum >= anchor.startLine && l.lineNum <= anchor.endLine;
-        return `[${l.lineNum}] (${fmtTs(approxTime)}) ${isAnchor ? '>>AD>> ' : ''}${l.text}`;
+        return `[${l.lineNum}] (${fmtTs(l.timeSec)}) ${isAnchor ? '>>AD>> ' : ''}${l.text}`;
       }).join('\n'),
     };
   });
@@ -1816,8 +1841,7 @@ Return JSON:
         }
         // Find closest lines for preview
         const matchingLines = lines.filter(l => {
-          const approxTime = dur > 0 && totalWords > 0 ? (l.cumulativeWords / totalWords) * dur : 0;
-          return approxTime >= block.startTimeSec && approxTime <= block.endTimeSec;
+          return l.timeSec >= block.startTimeSec && l.timeSec <= block.endTimeSec;
         });
         if (matchingLines.length > 0) {
           block.startLine = matchingLines[0].lineNum;
@@ -1848,9 +1872,8 @@ function mapAdBlocksToTimestamps(
   lines: SandboxLine[],
   durationSec: number,
 ): SandboxAdBlock[] {
-  if (lines.length === 0 || durationSec === 0) return blocks;
+  if (lines.length === 0) return blocks;
 
-  const totalWords = lines[lines.length - 1].cumulativeWords;
   const lineMap = new Map<number, SandboxLine>();
   for (const l of lines) lineMap.set(l.lineNum, l);
 
@@ -1861,8 +1884,9 @@ function mapAdBlocksToTimestamps(
 
     b.startWord = startLine.cumulativeWords - startLine.wordCount;
     b.endWord = endLine.cumulativeWords;
-    b.startTimeSec = (b.startWord / totalWords) * durationSec;
-    b.endTimeSec = (b.endWord / totalWords) * durationSec;
+    // Use real timestamps from Whisper segments (not word-ratio approximation)
+    b.startTimeSec = Math.round(startLine.timeSec * 10) / 10;
+    b.endTimeSec = Math.round(endLine.timeSec * 10) / 10;
   }
 
   return blocks;
@@ -2135,16 +2159,15 @@ app.post('/api/sandbox/analyze', async (req, res) => {
               console.warn(`[sandbox] Chunk ${ci + 1} ad classification failed (non-fatal): ${classifyErr.message}`);
             }
 
-            // Build per-line classification breakdown
+            // Build per-line classification breakdown (using real Whisper timestamps)
             const lineClassification = chunkLines.map(l => {
               const adBlock = chunkAdBlocks.find(b => l.lineNum >= b.startLine && l.lineNum <= b.endLine);
-              const totalWords = chunkLines.length > 0 ? chunkLines[chunkLines.length - 1].cumulativeWords : 0;
-              const approxTime = estDuration > 0 && totalWords > 0 ? (l.cumulativeWords / totalWords) * estDuration : 0;
               return {
                 lineNum: l.lineNum,
                 text: l.text,
                 speaker: l.speaker || undefined,
-                timestamp: fmtTs(approxTime),
+                timeSec: l.timeSec,
+                timestamp: fmtTs(l.timeSec),
                 classification: adBlock ? 'AD' as const : 'CONTENT' as const,
                 adReason: adBlock?.reason || undefined,
               };
@@ -2296,7 +2319,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             ln++;
             const wc = trimmed.split(/\s+/).filter(Boolean).length;
             cw += wc;
-            lines.push({ lineNum: ln, speaker: '', text: trimmed, wordCount: wc, cumulativeWords: cw });
+            lines.push({ lineNum: ln, speaker: '', text: trimmed, wordCount: wc, cumulativeWords: cw, timeSec: 0 });
           }
         }
 
