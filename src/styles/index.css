@@ -2906,11 +2906,30 @@ button {
 }
 
 .pt-boundary-block {
-  padding: 8px 12px;
+  padding: 10px 14px;
   margin-top: 6px;
   border-radius: 6px;
   border-left: 4px solid rgba(251, 146, 60, 0.6);
   background: rgba(251, 146, 60, 0.05);
+}
+
+.pt-boundary-mapping {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pt-boundary-lines {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.pt-boundary-arrow {
+  font-size: 14px;
+  color: var(--fg3);
 }
 
 .pt-boundary-time {
@@ -2924,7 +2943,6 @@ button {
   font-size: 12px;
   font-weight: 400;
   color: var(--fg3);
-  margin-left: 8px;
 }
 
 .pt-boundary-reason {
@@ -2949,13 +2967,21 @@ button {
 .pt-skip-range {
   display: flex;
   align-items: baseline;
-  gap: 12px;
+  gap: 10px;
   padding: 6px 10px;
   margin-top: 4px;
   border-radius: 6px;
   border-left: 4px solid rgba(231, 76, 60, 0.5);
   background: rgba(231, 76, 60, 0.05);
   font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.pt-skip-lines {
+  font-weight: 700;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
 
 .pt-skip-times {
@@ -2965,8 +2991,8 @@ button {
   flex-shrink: 0;
 }
 
-.pt-skip-conf {
-  font-size: 11px;
+.pt-skip-dur {
+  font-size: 12px;
   color: var(--fg3);
   flex-shrink: 0;
 }

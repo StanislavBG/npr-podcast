@@ -318,12 +318,14 @@ function ChunkCard({
   }> | undefined;
 
   const refinedBoundaries = refineOut?.refinedBoundaries as Array<{
+    startLine: number; endLine: number;
     startTimeSec: number; endTimeSec: number; durationSec: number;
     reason: string; textPreview?: string;
   }> | undefined;
 
   const skipMap = emitOut?.skipMap as Array<{
     startTime: number; endTime: number; reason: string; confidence: number;
+    startLine?: number; endLine?: number;
   }> | undefined;
 
   // Helper: render a step section
@@ -499,13 +501,19 @@ function ChunkCard({
               <div className="pt-stage-classification-header">Refined Ad Boundaries</div>
               {refinedBoundaries.map((b, i) => (
                 <div key={i} className="pt-boundary-block">
-                  <div className="pt-boundary-time">
-                    {Math.round(b.startTimeSec)}s &rarr; {Math.round(b.endTimeSec)}s
-                    <span className="pt-boundary-dur">({b.durationSec}s)</span>
+                  <div className="pt-boundary-mapping">
+                    <span className="pt-boundary-lines">
+                      Sentences [{b.startLine}]-[{b.endLine}]
+                    </span>
+                    <span className="pt-boundary-arrow">&rarr;</span>
+                    <span className="pt-boundary-time">
+                      {Math.round(b.startTimeSec)}s &ndash; {Math.round(b.endTimeSec)}s
+                    </span>
+                    <span className="pt-boundary-dur">({b.durationSec}s of ads)</span>
                   </div>
                   <div className="pt-boundary-reason">{b.reason}</div>
                   {b.textPreview && (
-                    <div className="pt-boundary-preview">{b.textPreview}</div>
+                    <div className="pt-boundary-preview">&ldquo;{b.textPreview}&rdquo;</div>
                   )}
                 </div>
               ))}
@@ -537,10 +545,13 @@ function ChunkCard({
               <div className="pt-stage-classification-header">Skip Map (sent to player)</div>
               {skipMap.map((s, i) => (
                 <div key={i} className="pt-skip-range">
+                  {s.startLine != null && s.endLine != null && (
+                    <span className="pt-skip-lines">[{s.startLine}]-[{s.endLine}]</span>
+                  )}
                   <span className="pt-skip-times">
                     {s.startTime}s &rarr; {s.endTime}s
                   </span>
-                  <span className="pt-skip-conf">conf: {s.confidence}</span>
+                  <span className="pt-skip-dur">({Math.round((s.endTime - s.startTime) * 10) / 10}s)</span>
                   <span className="pt-skip-reason">{s.reason}</span>
                 </div>
               ))}

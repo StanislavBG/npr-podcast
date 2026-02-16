@@ -2235,6 +2235,8 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             type: 'mid-roll' as const,
             confidence: 0.85,
             reason: b.reason,
+            startLine: b.startLine,
+            endLine: b.endLine,
           }));
           if (chunkAdBlocks.length > 0) {
             sendEvent('progress', {
