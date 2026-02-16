@@ -2094,12 +2094,26 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             const file = await toFile(chunkBuf, `chunk_${ci}.mp3`);
             const result = await sttOpenai.audio.transcriptions.create({ file, model: 'gpt-4o-mini-transcribe', response_format: 'verbose_json' }) as any;
             chunkText = (result.text || '').trim();
-            segs = (result.segments || []).map((s: any) => ({
-              start: (s.start || 0) + offsetSec,
-              end: (s.end || 0) + offsetSec,
+            const rawSegs = (result.segments || []).map((s: any) => ({
+              start: s.start || 0,
+              end: s.end || 0,
               text: (s.text || '').trim(),
             }));
-            console.log(`[sandbox] Chunk ${ci + 1}: ${segs.length} segments, ${chunkText.split(/\s+/).length} words`);
+
+            // Whisper timestamps are relative to the audio buffer it received,
+            // but may not match real duration (e.g. 7min timestamps for a 2min chunk).
+            // Normalize: scale Whisper's time range to fit the actual chunk duration,
+            // then shift by the chunk's offset in the episode.
+            const whisperEnd = rawSegs.length > 0 ? rawSegs[rawSegs.length - 1].end : 0;
+            const actualChunkDur = estChunkDuration; // expected real duration of this chunk
+            const scale = whisperEnd > 0 ? actualChunkDur / whisperEnd : 1;
+
+            segs = rawSegs.map((s: { start: number; end: number; text: string }) => ({
+              start: offsetSec + s.start * scale,
+              end: offsetSec + s.end * scale,
+              text: s.text,
+            }));
+            console.log(`[sandbox] Chunk ${ci + 1}: ${segs.length} segments, ${chunkText.split(/\s+/).length} words (whisper ${whisperEnd.toFixed(0)}s → scaled to ${actualChunkDur.toFixed(0)}s, offset ${offsetSec.toFixed(0)}s)`);
           } catch (chunkErr: any) {
             console.warn(`[sandbox] Chunk ${ci + 1} STT failed: ${chunkErr.message}`);
             try {
