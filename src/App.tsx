@@ -282,7 +282,7 @@ export default function App() {
               audioUrl: ep.audioUrl || '(none)',
               chunkIndex: evt.chunkIndex,
               totalChunks: evt.totalChunks,
-              chunkSizeBytes: 1_048_576,
+              chunkSizeBytes: 2_097_152,
               method: 'GET (Range header)',
             },
             step_transcribe_chunk: {
@@ -388,8 +388,8 @@ export default function App() {
               max_attempts: 3,
             },
             step_plan_chunks: {
-              chunkSizeBytes: 1_048_576,
-              chunkSizeLabel: '1 MB',
+              chunkSizeBytes: 2_097_152,
+              chunkSizeLabel: '2 MB',
               strategy: 'byte-range',
               estimatedChunkDuration: '~65s at 128kbps',
               audioUrl: ep.audioUrl || '(none)',

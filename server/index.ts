@@ -364,7 +364,7 @@ app.get('/api/transcript', async (req, res) => {
 // Chunked strategy: 1 MB byte-range chunks fetched via HTTP Range requests.
 // Each chunk is ~65s of audio at 128kbps — well under Whisper's 25 MB limit.
 
-const CHUNK_SIZE_BYTES = 1_048_576;  // 1 MB per chunk (~65s at 128kbps)
+const CHUNK_SIZE_BYTES = 2_097_152;  // 2 MB per chunk (~131s at 128kbps)
 const DEFAULT_BITRATE = 128000;      // 128kbps
 
 /**
@@ -1877,7 +1877,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
     audioUrl?: string;
     testMode?: boolean;
   };
-  const TEST_MODE_MAX_CHUNKS = 5;
+  const TEST_MODE_MAX_CHUNKS = Infinity;  // no chunk limit — process all chunks
 
   if (!transcriptUrl && !audioUrl && (!podcastTranscripts || podcastTranscripts.length === 0)) {
     res.status(400).json({ error: 'Missing transcriptUrl, audioUrl, or podcastTranscripts' });
@@ -1968,7 +1968,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           console.log(`[sandbox] TEST MODE: limiting from ${allChunksCount} to ${numChunks} chunks`);
         }
 
-        sendEvent('progress', { step: 'step_plan_chunks', message: `Planning ${numChunks} chunks (1 MB each)${testMode ? ' [TEST MODE]' : ''}...` });
+        sendEvent('progress', { step: 'step_plan_chunks', message: `Planning ${numChunks} chunks (2 MB each, ~${Math.round(estChunkDuration)}s)...` });
         console.log(`[sandbox] Planned ${numChunks} chunks for ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${estDuration.toFixed(0)}s${testMode ? ' [TEST MODE]' : ''}`);
         sendEvent('progress', {
           step: 'step_plan_chunks',
