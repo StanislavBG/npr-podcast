@@ -2015,6 +2015,12 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           sendEvent('progress', {
             step: 'step_fetch_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
             message: `Fetching chunk ${ci + 1}/${numChunks} (${chunkSizeKB} KB)...`,
+            input: {
+              resolvedUrl: resolvedUrl.slice(0, 120),
+              byteRange: `${startByte}-${endByte}`,
+              chunkSizeKB: Number(chunkSizeKB),
+              offsetSec: Math.round(offsetSec * 10) / 10,
+            },
           });
 
           let chunkBuf: Buffer;
@@ -2046,6 +2052,13 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           sendEvent('progress', {
             step: 'step_transcribe_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
             message: `Transcribing chunk ${ci + 1}/${numChunks}...`,
+            input: {
+              model: 'gpt-4o-mini-transcribe',
+              responseFormat: 'verbose_json',
+              language: 'en',
+              bufferSizeKB: Math.round(chunkBuf.length / 1024),
+              offsetSec: Math.round(offsetSec * 10) / 10,
+            },
           });
 
           let chunkText = '';
@@ -2077,13 +2090,22 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           }
 
           const chunkWordCount = chunkText.split(/\s+/).filter(Boolean).length;
+          const chunkAudioDuration = segs.length > 0 ? Math.round((segs[segs.length - 1].end - segs[0].start) * 10) / 10 : 0;
           sendEvent('progress', {
             step: 'step_transcribe_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
             status: 'done', message: `${segs.length} segments, ${chunkWordCount} words`,
             segmentCount: segs.length,
             wordCount: chunkWordCount,
             transcript: chunkText,
-            durationSec: segs.length > 0 ? Math.round((segs[segs.length - 1].end - segs[0].start) * 10) / 10 : 0,
+            durationSec: chunkAudioDuration,
+            timeRange: segs.length > 0
+              ? { startSec: Math.round(segs[0].start * 10) / 10, endSec: Math.round(segs[segs.length - 1].end * 10) / 10 }
+              : null,
+            segments: segs.map(s => ({
+              start: Math.round(s.start * 10) / 10,
+              end: Math.round(s.end * 10) / 10,
+              text: s.text,
+            })),
           });
 
           // ── Classify ads in this chunk ──
@@ -2094,11 +2116,21 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             sendEvent('progress', {
               step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
               message: `Classifying ads in chunk ${ci + 1}...`,
+              input: {
+                linesCount: chunkLines.length,
+                totalWords: chunkLines.length > 0 ? chunkLines[chunkLines.length - 1].cumulativeWords : 0,
+                episodeTitle,
+                strategy: LLM_API_KEY ? 'llm' : 'keyword-heuristic',
+                firstLine: chunkLines[0]?.text.slice(0, 120),
+                lastLine: chunkLines[chunkLines.length - 1]?.text.slice(0, 120),
+              },
             });
 
+            let classifyLlmRaw = '';
             try {
               const chunkClassify = await classifyAdsFromLines(chunkLines, episodeTitle, estDuration);
               chunkAdBlocks = chunkClassify.adBlocks;
+              classifyLlmRaw = chunkClassify.llmRaw;
             } catch (classifyErr: any) {
               console.warn(`[sandbox] Chunk ${ci + 1} ad classification failed (non-fatal): ${classifyErr.message}`);
             }
@@ -2108,6 +2140,15 @@ app.post('/api/sandbox/analyze', async (req, res) => {
               status: 'done', message: `${chunkAdBlocks.length} ad blocks`,
               adBlockCount: chunkAdBlocks.length,
               linesAnalyzed: chunkLines.length,
+              adBlocks: chunkAdBlocks.map(b => ({
+                startLine: b.startLine,
+                endLine: b.endLine,
+                reason: b.reason,
+                textPreview: b.textPreview,
+                startTimeSec: b.startTimeSec,
+                endTimeSec: b.endTimeSec,
+              })),
+              rawResponse: classifyLlmRaw || undefined,
             });
           } else {
             sendEvent('progress', {
@@ -2115,17 +2156,33 @@ app.post('/api/sandbox/analyze', async (req, res) => {
               status: 'done', message: `skipped (${chunkLines.length} lines)`,
               adBlockCount: 0,
               linesAnalyzed: chunkLines.length,
+              reason: `Too few lines to classify (${chunkLines.length} < 3)`,
             });
           }
 
           // ── Refine ad boundaries (per-chunk, local context only) ──
           if (chunkAdBlocks.length > 0 && LLM_API_KEY) {
+            const anchorSummary = chunkAdBlocks.map(b => ({
+              startLine: b.startLine, endLine: b.endLine,
+              reason: b.reason,
+              startTimeSec: b.startTimeSec, endTimeSec: b.endTimeSec,
+              textPreview: b.textPreview,
+            }));
             sendEvent('progress', {
               step: 'step_refine_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
               message: `Refining ${chunkAdBlocks.length} boundaries...`,
+              input: {
+                anchorCount: chunkAdBlocks.length,
+                anchors: anchorSummary,
+                contextWindow: 5,
+                linesCount: chunkLines.length,
+                episodeTitle,
+              },
             });
+            let refineLlmRaw = '';
             try {
               const refined = await refineBoundariesWithLLM(chunkAdBlocks, chunkLines, estDuration, episodeTitle, '');
+              refineLlmRaw = refined.llmRaw;
               chunkAdBlocks = refined.adBlocks;
             } catch (refineErr: any) {
               console.warn(`[sandbox] Chunk ${ci + 1} refine failed (non-fatal): ${refineErr.message}`);
@@ -2133,9 +2190,17 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             const refinedAdTimeSec = chunkAdBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
             sendEvent('progress', {
               step: 'step_refine_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-              status: 'done', message: `${chunkAdBlocks.length} refined`,
+              status: 'done', message: `${chunkAdBlocks.length} refined, ${Math.round(refinedAdTimeSec)}s ads`,
               refinedBlocks: chunkAdBlocks.length,
               totalAdTimeSec: Math.round(refinedAdTimeSec * 10) / 10,
+              refinedBoundaries: chunkAdBlocks.map(b => ({
+                startLine: b.startLine, endLine: b.endLine,
+                reason: b.reason,
+                startTimeSec: b.startTimeSec, endTimeSec: b.endTimeSec,
+                durationSec: Math.round((b.endTimeSec - b.startTimeSec) * 10) / 10,
+                textPreview: b.textPreview,
+              })),
+              rawResponse: refineLlmRaw || undefined,
             });
           } else {
             sendEvent('progress', {
@@ -2143,29 +2208,38 @@ app.post('/api/sandbox/analyze', async (req, res) => {
               status: 'done',
               message: chunkAdBlocks.length === 0 ? 'no ads found' : 'no LLM key',
               refinedBlocks: 0,
+              reason: chunkAdBlocks.length === 0 ? 'No ad blocks from classification step' : 'No LLM API key configured',
             });
           }
 
           // ── Emit skip ranges to player ──
+          const partialSkipMap = chunkAdBlocks.map(b => ({
+            startTime: Math.round(b.startTimeSec * 10) / 10,
+            endTime: Math.round(b.endTimeSec * 10) / 10,
+            type: 'mid-roll' as const,
+            confidence: 0.85,
+            reason: b.reason,
+          }));
           if (chunkAdBlocks.length > 0) {
             sendEvent('progress', {
               step: 'step_emit_skips', threadId, chunkIndex: ci, totalChunks: numChunks,
               message: `Emitting ${chunkAdBlocks.length} skip ranges...`,
+              input: {
+                adBlockCount: chunkAdBlocks.length,
+                skipRanges: partialSkipMap,
+              },
             });
-            const partialSkipMap = chunkAdBlocks.map(b => ({
-              startTime: Math.round(b.startTimeSec * 10) / 10,
-              endTime: Math.round(b.endTimeSec * 10) / 10,
-              type: 'mid-roll',
-              confidence: 0.85,
-              reason: b.reason,
-            }));
             sendEvent('partial_ads', { skipMap: partialSkipMap, source: `chunk-${ci}` });
             console.log(`[sandbox] Chunk ${ci + 1}: ${chunkAdBlocks.length} skip ranges emitted to player`);
           }
+          const totalSkipSec = partialSkipMap.reduce((s, r) => s + (r.endTime - r.startTime), 0);
           sendEvent('progress', {
             step: 'step_emit_skips', threadId, chunkIndex: ci, totalChunks: numChunks,
-            status: 'done', message: chunkAdBlocks.length > 0 ? `${chunkAdBlocks.length} ranges emitted` : 'no ads',
+            status: 'done',
+            message: chunkAdBlocks.length > 0 ? `${chunkAdBlocks.length} ranges (${Math.round(totalSkipSec)}s)` : 'no ads to skip',
             emittedRanges: chunkAdBlocks.length,
+            skipMap: partialSkipMap.length > 0 ? partialSkipMap : undefined,
+            totalSkipSec: totalSkipSec > 0 ? Math.round(totalSkipSec * 10) / 10 : 0,
           });
 
           chunkResults[ci] = { chunkIndex: ci, text: chunkText, segments: segs, lines: chunkLines, adBlocks: chunkAdBlocks };

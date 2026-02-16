@@ -162,16 +162,21 @@ function StepInspector({
         <div className="pt-inspector-section">
           <h4>Input</h4>
           <div className="pt-inspector-data">
-            {Object.entries(execution.input as Record<string, unknown>).map(([k, v]) => (
-              <div key={k} className="pt-inspector-field">
-                <span className="pt-inspector-key">{k}</span>
-                <span className="pt-inspector-value">
-                  {typeof v === 'string' && v.length > 200
-                    ? v.slice(0, 200) + '...'
-                    : typeof v === 'object' ? JSON.stringify(v) : String(v)}
-                </span>
-              </div>
-            ))}
+            {Object.entries(execution.input as Record<string, unknown>).map(([k, v]) => {
+              const isComplex = v != null && typeof v === 'object';
+              return (
+                <div key={k} className={`pt-inspector-field ${isComplex ? 'pt-inspector-field-wide' : ''}`}>
+                  <span className="pt-inspector-key">{k}</span>
+                  {isComplex ? (
+                    <pre className="pt-inspector-pre pt-inspector-pre-inline">
+                      {JSON.stringify(v, null, 2)}
+                    </pre>
+                  ) : (
+                    <span className="pt-inspector-value">{String(v)}</span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -183,16 +188,21 @@ function StepInspector({
           <div className="pt-inspector-data">
             {Object.entries(execution.output as Record<string, unknown>).map(([k, v]) => {
               const isTranscript = k === 'transcriptPreview' || k === 'transcript';
+              const isComplex = v != null && typeof v === 'object';
               return (
-                <div key={k} className={`pt-inspector-field ${isTranscript ? 'pt-inspector-field-wide' : ''}`}>
+                <div key={k} className={`pt-inspector-field ${isTranscript || isComplex ? 'pt-inspector-field-wide' : ''}`}>
                   <span className="pt-inspector-key">{k}</span>
-                  <span className={`pt-inspector-value ${isTranscript ? 'pt-inspector-transcript' : ''}`}>
-                    {isTranscript
-                      ? String(v)
-                      : typeof v === 'string' && v.length > 300
-                        ? v.slice(0, 300) + '...'
-                        : typeof v === 'object' ? JSON.stringify(v) : String(v)}
-                  </span>
+                  {isTranscript ? (
+                    <span className="pt-inspector-value pt-inspector-transcript">{String(v)}</span>
+                  ) : isComplex ? (
+                    <pre className="pt-inspector-pre pt-inspector-pre-inline">
+                      {JSON.stringify(v, null, 2)}
+                    </pre>
+                  ) : (
+                    <span className="pt-inspector-value">
+                      {typeof v === 'string' && v.length > 500 ? v.slice(0, 500) + '...' : String(v)}
+                    </span>
+                  )}
                 </div>
               );
             })}
@@ -206,8 +216,8 @@ function StepInspector({
           <h4>Raw LLM Response</h4>
           <pre className="pt-inspector-pre pt-inspector-pre-long">
             {typeof execution.rawResponse === 'string'
-              ? execution.rawResponse.slice(0, 1500)
-              : JSON.stringify(execution.rawResponse, null, 2).slice(0, 1500)}
+              ? execution.rawResponse
+              : JSON.stringify(execution.rawResponse, null, 2)}
           </pre>
         </div>
       )}
