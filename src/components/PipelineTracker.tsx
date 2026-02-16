@@ -277,7 +277,7 @@ function StepInspector({
   );
 }
 
-// ─── ChunkCard: single audio chunk with all substeps ──────────────────────
+// ─── ChunkCard: full-width vertical pipeline trace per chunk ────────────
 
 function ChunkCard({
   thread,
@@ -294,113 +294,263 @@ function ChunkCard({
   const totalCount = thread.steps.length;
   const progressPct = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
 
-  // Gather key data from executions for this chunk
-  const transcribeStep = thread.steps.find(s => s.id.endsWith('-transcribe'));
-  const fetchStep = thread.steps.find(s => s.id.endsWith('-fetch'));
-  const classifyStep = thread.steps.find(s => s.id.endsWith('-classify'));
-  const transcribeExec = transcribeStep ? stepExecutions[transcribeStep.id] : undefined;
-  const fetchExec = fetchStep ? stepExecutions[fetchStep.id] : undefined;
-  const classifyExec = classifyStep ? stepExecutions[classifyStep.id] : undefined;
+  // Gather executions for each substep
+  const getExec = (suffix: string) => {
+    const step = thread.steps.find(s => s.id.endsWith(`-${suffix}`));
+    return step ? { step, exec: stepExecutions[step.id] } : null;
+  };
 
-  const fetchOutput = fetchExec?.output as Record<string, any> | undefined;
-  const transcribeOutput = transcribeExec?.output as Record<string, any> | undefined;
-  const classifyOutput = classifyExec?.output as Record<string, any> | undefined;
-  const lineClassification = classifyOutput?.lineClassification as Array<{
+  const fetch = getExec('fetch');
+  const transcribe = getExec('transcribe');
+  const classify = getExec('classify');
+  const refine = getExec('refine');
+  const emit = getExec('emit');
+
+  const fetchOut = fetch?.exec?.output as Record<string, any> | undefined;
+  const transcribeOut = transcribe?.exec?.output as Record<string, any> | undefined;
+  const classifyOut = classify?.exec?.output as Record<string, any> | undefined;
+  const refineOut = refine?.exec?.output as Record<string, any> | undefined;
+  const emitOut = emit?.exec?.output as Record<string, any> | undefined;
+
+  const lineClassification = classifyOut?.lineClassification as Array<{
     lineNum: number; text: string; speaker?: string; timestamp: string;
     classification: 'AD' | 'CONTENT'; adReason?: string;
   }> | undefined;
 
-  return (
-    <div className={`pt-chunk ${threadStatusClass(thread.status)}`}>
-      {/* Chunk header */}
-      <div className="pt-chunk-header">
-        <span className="pt-chunk-label">{thread.label}</span>
-        <span className="pt-chunk-progress">{completedCount}/{totalCount}</span>
-        <div className="pt-chunk-bar">
-          <div className="pt-chunk-bar-fill" style={{ width: `${progressPct}%` }} />
-        </div>
-      </div>
+  const refinedBoundaries = refineOut?.refinedBoundaries as Array<{
+    startTimeSec: number; endTimeSec: number; durationSec: number;
+    reason: string; textPreview?: string;
+  }> | undefined;
 
-      {/* Audio chunk metadata summary */}
-      <div className="pt-chunk-meta">
-        {fetchOutput?.bytesFetched && (
-          <span className="pt-chunk-tag">{fmtBytes(fetchOutput.bytesFetched)}</span>
-        )}
-        {fetchOutput?.offsetSec != null && (
-          <span className="pt-chunk-tag">@{fetchOutput.offsetSec}s</span>
-        )}
-        {transcribeOutput?.wordCount && (
-          <span className="pt-chunk-tag">{transcribeOutput.wordCount} words</span>
-        )}
-        {transcribeOutput?.segmentCount && (
-          <span className="pt-chunk-tag">{transcribeOutput.segmentCount} segs</span>
-        )}
-        {thread.activity && (
-          <span className="pt-chunk-activity">{thread.activity}</span>
-        )}
-      </div>
+  const skipMap = emitOut?.skipMap as Array<{
+    startTime: number; endTime: number; reason: string; confidence: number;
+  }> | undefined;
 
-      {/* Substeps — all visible, not collapsed */}
-      <div className="pt-chunk-steps">
-        {thread.steps.map((step) => {
-          const exec = stepExecutions[step.id];
-          const isSelected = selectedStepId === step.id;
-          const output = exec?.output as Record<string, any> | undefined;
-
-          return (
-            <button
-              key={step.id}
-              className={`pt-substep ${statusClass(step.status)} ${isSelected ? 'pt-substep-selected' : ''}`}
-              onClick={() => onStepSelect(step.id)}
-              title={`${step.label} — click to inspect`}
-            >
-              <span className="pt-substep-icon">{statusIcon(step.status)}</span>
-              <span className="pt-substep-label">{step.label}</span>
-              {exec?.durationMs != null && (
-                <span className="pt-substep-dur">{fmtDuration(exec.durationMs)}</span>
-              )}
-              {/* Quick data badge */}
-              {output?.message && !output.transcript && (
-                <span className="pt-substep-badge">{output.message}</span>
-              )}
-              {output?.transcript && (
-                <span className="pt-substep-badge">{output.wordCount || '?'} words</span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Per-line classification (replaces plain transcript once classify completes) */}
-      {lineClassification && lineClassification.length > 0 ? (
-        <div className="pt-chunk-classification">
-          <span className="pt-chunk-transcript-label">
-            Classification ({lineClassification.length} lines):
-          </span>
-          <div className="pt-classification-lines">
-            {lineClassification.map(l => (
-              <div
-                key={l.lineNum}
-                className={`pt-classification-line ${l.classification === 'AD' ? 'pt-line-ad' : 'pt-line-content'}`}
-              >
-                <span className="pt-line-num">[{l.lineNum}]</span>
-                <span className="pt-line-ts">{l.timestamp}</span>
-                <span className={`pt-line-tag ${l.classification === 'AD' ? 'pt-tag-ad' : 'pt-tag-content'}`}>
-                  {l.classification}
-                </span>
-                {l.speaker && <span className="pt-line-speaker">{l.speaker}:</span>}
-                <span className="pt-line-text">{l.text}</span>
-                {l.adReason && <span className="pt-line-reason">({l.adReason})</span>}
-              </div>
-            ))}
+  // Helper: render a step section
+  const renderStepSection = (
+    label: string,
+    suffix: string,
+    stepData: ReturnType<typeof getExec>,
+    children: React.ReactNode,
+  ) => {
+    if (!stepData) return null;
+    const { step, exec } = stepData;
+    const isSelected = selectedStepId === step.id;
+    return (
+      <div className={`pt-stage ${statusClass(step.status)} ${isSelected ? 'pt-stage-selected' : ''}`}>
+        <button
+          className="pt-stage-header"
+          onClick={() => onStepSelect(step.id)}
+          title="Click to inspect full details"
+        >
+          <span className="pt-stage-icon">{statusIcon(step.status)}</span>
+          <span className="pt-stage-label">{label}</span>
+          {exec?.durationMs != null && (
+            <span className="pt-stage-dur">{fmtDuration(exec.durationMs)}</span>
+          )}
+          <span className="pt-stage-arrow">{isSelected ? '\u25BC' : '\u25B6'}</span>
+        </button>
+        {/* Always show inline data summary */}
+        {step.status === 'complete' || step.status === 'error' ? (
+          <div className="pt-stage-body">{children}</div>
+        ) : step.status === 'active' || step.status === 'running' ? (
+          <div className="pt-stage-body pt-stage-running">
+            <span className="pt-stage-spinner">Processing...</span>
           </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  return (
+    <div className={`pt-chunk-v2 ${threadStatusClass(thread.status)}`}>
+      {/* Chunk header */}
+      <div className="pt-chunk-header-v2">
+        <span className="pt-chunk-label-v2">{thread.label}</span>
+        <span className="pt-chunk-progress-v2">{completedCount}/{totalCount} steps</span>
+        <div className="pt-chunk-bar-v2">
+          <div className="pt-chunk-bar-fill-v2" style={{ width: `${progressPct}%` }} />
         </div>
-      ) : transcribeOutput?.transcript ? (
-        <div className="pt-chunk-transcript">
-          <span className="pt-chunk-transcript-label">Transcript:</span>
-          {transcribeOutput.transcript}
+        {thread.activity && <span className="pt-chunk-activity-v2">{thread.activity}</span>}
+      </div>
+
+      {/* ── Stage 1: Fetch Audio ── */}
+      {renderStepSection('1. Fetch Audio', 'fetch', fetch, (
+        <div className="pt-stage-data">
+          {fetchOut?.byteRange && (
+            <div className="pt-stage-row">
+              <span className="pt-stage-key">Byte Range</span>
+              <span className="pt-stage-val">{fetchOut.byteRange}</span>
+            </div>
+          )}
+          {fetchOut?.bytesFetched != null && (
+            <div className="pt-stage-row">
+              <span className="pt-stage-key">Size</span>
+              <span className="pt-stage-val">{fmtBytes(fetchOut.bytesFetched)}</span>
+            </div>
+          )}
+          {fetchOut?.offsetSec != null && (
+            <div className="pt-stage-row">
+              <span className="pt-stage-key">Audio Offset</span>
+              <span className="pt-stage-val">{fetchOut.offsetSec}s into episode</span>
+            </div>
+          )}
         </div>
-      ) : null}
+      ))}
+
+      {/* ── Stage 2: Transcribe ── */}
+      {renderStepSection('2. Transcribe', 'transcribe', transcribe, (
+        <div className="pt-stage-data">
+          <div className="pt-stage-row-group">
+            {transcribeOut?.segmentCount != null && (
+              <div className="pt-stage-row">
+                <span className="pt-stage-key">Segments</span>
+                <span className="pt-stage-val">{transcribeOut.segmentCount}</span>
+              </div>
+            )}
+            {transcribeOut?.wordCount != null && (
+              <div className="pt-stage-row">
+                <span className="pt-stage-key">Words</span>
+                <span className="pt-stage-val">{transcribeOut.wordCount}</span>
+              </div>
+            )}
+            {transcribeOut?.durationSec != null && (
+              <div className="pt-stage-row">
+                <span className="pt-stage-key">Duration</span>
+                <span className="pt-stage-val">{transcribeOut.durationSec}s</span>
+              </div>
+            )}
+          </div>
+          {/* Show full transcript if classify hasn't completed yet */}
+          {transcribeOut?.transcript && !lineClassification && (
+            <div className="pt-stage-transcript">
+              <div className="pt-stage-transcript-label">Transcript</div>
+              <div className="pt-stage-transcript-text">{transcribeOut.transcript}</div>
+            </div>
+          )}
+        </div>
+      ))}
+
+      {/* ── Stage 3: Classify (with per-line breakdown) ── */}
+      {renderStepSection('3. Classify Ads', 'classify', classify, (
+        <div className="pt-stage-data">
+          <div className="pt-stage-row-group">
+            {classifyOut?.linesAnalyzed != null && (
+              <div className="pt-stage-row">
+                <span className="pt-stage-key">Lines Analyzed</span>
+                <span className="pt-stage-val">{classifyOut.linesAnalyzed}</span>
+              </div>
+            )}
+            {classifyOut?.adBlockCount != null && (
+              <div className="pt-stage-row">
+                <span className="pt-stage-key">Ad Blocks Found</span>
+                <span className="pt-stage-val pt-stage-val-highlight">
+                  {classifyOut.adBlockCount}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* Per-line classification breakdown */}
+          {lineClassification && lineClassification.length > 0 && (
+            <div className="pt-stage-classification">
+              <div className="pt-stage-classification-header">
+                Per-Sentence Classification ({lineClassification.length} lines)
+              </div>
+              <div className="pt-classification-lines">
+                {lineClassification.map(l => (
+                  <div
+                    key={l.lineNum}
+                    className={`pt-cl-line ${l.classification === 'AD' ? 'pt-cl-ad' : 'pt-cl-content'}`}
+                  >
+                    <span className="pt-cl-num">[{l.lineNum}]</span>
+                    <span className="pt-cl-ts">{l.timestamp}</span>
+                    <span className={`pt-cl-tag ${l.classification === 'AD' ? 'pt-cl-tag-ad' : 'pt-cl-tag-content'}`}>
+                      {l.classification}
+                    </span>
+                    {l.speaker && <span className="pt-cl-speaker">{l.speaker}:</span>}
+                    <span className="pt-cl-text">{l.text}</span>
+                    {l.adReason && <span className="pt-cl-reason">({l.adReason})</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+
+      {/* ── Stage 4: Refine Boundaries ── */}
+      {renderStepSection('4. Refine Boundaries', 'refine', refine, (
+        <div className="pt-stage-data">
+          {refineOut?.refinedBlocks != null && (
+            <div className="pt-stage-row">
+              <span className="pt-stage-key">Refined Blocks</span>
+              <span className="pt-stage-val">{refineOut.refinedBlocks}</span>
+            </div>
+          )}
+          {refineOut?.totalAdTimeSec != null && (
+            <div className="pt-stage-row">
+              <span className="pt-stage-key">Total Ad Time</span>
+              <span className="pt-stage-val pt-stage-val-highlight">{refineOut.totalAdTimeSec}s</span>
+            </div>
+          )}
+          {refinedBoundaries && refinedBoundaries.length > 0 && (
+            <div className="pt-stage-boundaries">
+              <div className="pt-stage-classification-header">Refined Ad Boundaries</div>
+              {refinedBoundaries.map((b, i) => (
+                <div key={i} className="pt-boundary-block">
+                  <div className="pt-boundary-time">
+                    {Math.round(b.startTimeSec)}s &rarr; {Math.round(b.endTimeSec)}s
+                    <span className="pt-boundary-dur">({b.durationSec}s)</span>
+                  </div>
+                  <div className="pt-boundary-reason">{b.reason}</div>
+                  {b.textPreview && (
+                    <div className="pt-boundary-preview">{b.textPreview}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {refineOut?.refinedBlocks === 0 && (
+            <div className="pt-stage-empty">{refineOut?.reason || refineOut?.message || 'No ads to refine'}</div>
+          )}
+        </div>
+      ))}
+
+      {/* ── Stage 5: Emit Skip Ranges ── */}
+      {renderStepSection('5. Emit Skip Ranges', 'emit', emit, (
+        <div className="pt-stage-data">
+          {emitOut?.emittedRanges != null && (
+            <div className="pt-stage-row">
+              <span className="pt-stage-key">Ranges Emitted</span>
+              <span className="pt-stage-val">{emitOut.emittedRanges}</span>
+            </div>
+          )}
+          {emitOut?.totalSkipSec != null && emitOut.totalSkipSec > 0 && (
+            <div className="pt-stage-row">
+              <span className="pt-stage-key">Skip Duration</span>
+              <span className="pt-stage-val pt-stage-val-highlight">{emitOut.totalSkipSec}s</span>
+            </div>
+          )}
+          {skipMap && skipMap.length > 0 && (
+            <div className="pt-stage-skipmap">
+              <div className="pt-stage-classification-header">Skip Map (sent to player)</div>
+              {skipMap.map((s, i) => (
+                <div key={i} className="pt-skip-range">
+                  <span className="pt-skip-times">
+                    {s.startTime}s &rarr; {s.endTime}s
+                  </span>
+                  <span className="pt-skip-conf">conf: {s.confidence}</span>
+                  <span className="pt-skip-reason">{s.reason}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {emitOut?.emittedRanges === 0 && (
+            <div className="pt-stage-empty">No ads detected in this chunk</div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
