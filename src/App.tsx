@@ -274,10 +274,10 @@ export default function App() {
           const chunkSuffix = STEP_SUFFIX_MAP_EXEC[evt.step] || 'fetch';
           const chunkStepId = `${evt.threadId}-${chunkSuffix}`;
           const now = Date.now();
-          const { step: _cs, status: _cst, message: _cm, threadId: _ct, chunkIndex: _cci, totalChunks: _ctc, ...chunkExtraData } = evt;
+          const { step: _cs, status: _cst, message: _cm, threadId: _ct, chunkIndex: _cci, totalChunks: _ctc, input: sseInput, rawResponse: sseRawResponse, ...chunkExtraData } = evt;
 
-          // Build chunk-step-specific config for richer input data
-          const chunkStepConfig: Record<string, Record<string, unknown>> = {
+          // Use server-sent input when available, fall back to static config
+          const fallbackConfig: Record<string, Record<string, unknown>> = {
             step_fetch_chunk: {
               audioUrl: ep.audioUrl || '(none)',
               chunkIndex: evt.chunkIndex,
@@ -286,7 +286,7 @@ export default function App() {
               method: 'GET (Range header)',
             },
             step_transcribe_chunk: {
-              model: 'whisper-1',
+              model: 'gpt-4o-mini-transcribe',
               format: 'verbose_json',
               language: 'en',
               chunkIndex: evt.chunkIndex,
@@ -310,10 +310,11 @@ export default function App() {
             },
           };
 
-          // Always ensure config input is set on the first event for this step
-          const config = chunkStepConfig[evt.step];
-          const sseData = Object.keys(chunkExtraData).length > 0 ? chunkExtraData : undefined;
-          const inputData = config ? { ...config, ...sseData } : sseData;
+          // Prefer server-sent input data; merge with fallback config
+          const config = fallbackConfig[evt.step];
+          const inputData = sseInput
+            ? { ...config, ...(sseInput as Record<string, unknown>) }
+            : config;
 
           if (!stepStartTimesRef.current[chunkStepId]) {
             stepStartTimesRef.current[chunkStepId] = now;
@@ -321,7 +322,6 @@ export default function App() {
 
           if (evt.status === 'done') {
             const startedAt = stepStartTimesRef.current[chunkStepId];
-            // Use functional updater to conditionally set input (preserve existing if already set)
             setStepExecutions(prev => {
               const existing = prev[chunkStepId];
               return {
@@ -332,8 +332,9 @@ export default function App() {
                   status: 'success' as const,
                   completedAt: now,
                   durationMs: now - startedAt,
-                  input: existing?.input ?? inputData,
+                  input: sseInput ? { ...inputData, ...(sseInput as Record<string, unknown>) } : (existing?.input ?? inputData),
                   output: Object.keys(chunkExtraData).length > 0 ? chunkExtraData : { message: evt.message },
+                  rawResponse: sseRawResponse || existing?.rawResponse || undefined,
                 },
               };
             });
@@ -349,8 +350,9 @@ export default function App() {
                   status: 'error' as const,
                   completedAt: now,
                   durationMs: now - startedAt,
-                  input: existing?.input ?? inputData,
+                  input: sseInput ? { ...inputData, ...(sseInput as Record<string, unknown>) } : (existing?.input ?? inputData),
                   error: evt.message,
+                  rawResponse: sseRawResponse || existing?.rawResponse || undefined,
                 },
               };
             });
