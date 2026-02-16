@@ -187,9 +187,11 @@ function StepInspector({
                 <div key={k} className={`pt-inspector-field ${isTranscript ? 'pt-inspector-field-wide' : ''}`}>
                   <span className="pt-inspector-key">{k}</span>
                   <span className={`pt-inspector-value ${isTranscript ? 'pt-inspector-transcript' : ''}`}>
-                    {typeof v === 'string' && v.length > 300
-                      ? v.slice(0, 300) + '...'
-                      : typeof v === 'object' ? JSON.stringify(v) : String(v)}
+                    {isTranscript
+                      ? String(v)
+                      : typeof v === 'string' && v.length > 300
+                        ? v.slice(0, 300) + '...'
+                        : typeof v === 'object' ? JSON.stringify(v) : String(v)}
                   </span>
                 </div>
               );
@@ -341,10 +343,10 @@ function ChunkCard({
                 <span className="pt-substep-dur">{fmtDuration(exec.durationMs)}</span>
               )}
               {/* Quick data badge */}
-              {output?.message && !output.transcriptPreview && (
+              {output?.message && !output.transcript && (
                 <span className="pt-substep-badge">{output.message}</span>
               )}
-              {output?.transcriptPreview && (
+              {output?.transcript && (
                 <span className="pt-substep-badge">{output.wordCount || '?'} words</span>
               )}
             </button>
@@ -352,11 +354,11 @@ function ChunkCard({
         })}
       </div>
 
-      {/* Transcript preview if available */}
-      {transcribeOutput?.transcriptPreview && (
+      {/* Full transcript text if available */}
+      {transcribeOutput?.transcript && (
         <div className="pt-chunk-transcript">
           <span className="pt-chunk-transcript-label">Transcript:</span>
-          {transcribeOutput.transcriptPreview}
+          {transcribeOutput.transcript}
         </div>
       )}
     </div>

@@ -320,7 +320,7 @@ export const CHUNK_STEP_DEFINITIONS: Record<string, {
     outputSchema: [
       { name: 'segmentCount', type: 'number', required: true, description: 'Number of timed segments' },
       { name: 'wordCount', type: 'number', required: true, description: 'Total word count' },
-      { name: 'transcriptPreview', type: 'string', required: true, description: 'First 300 chars of transcript text' },
+      { name: 'transcript', type: 'string', required: true, description: 'Full transcribed text for this chunk' },
       { name: 'durationSec', type: 'number', required: true, description: 'Audio duration transcribed in seconds' },
     ],
     dependsOn: ['step_fetch_chunk'],
