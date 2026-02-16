@@ -297,11 +297,18 @@ function ChunkCard({
   // Gather key data from executions for this chunk
   const transcribeStep = thread.steps.find(s => s.id.endsWith('-transcribe'));
   const fetchStep = thread.steps.find(s => s.id.endsWith('-fetch'));
+  const classifyStep = thread.steps.find(s => s.id.endsWith('-classify'));
   const transcribeExec = transcribeStep ? stepExecutions[transcribeStep.id] : undefined;
   const fetchExec = fetchStep ? stepExecutions[fetchStep.id] : undefined;
+  const classifyExec = classifyStep ? stepExecutions[classifyStep.id] : undefined;
 
   const fetchOutput = fetchExec?.output as Record<string, any> | undefined;
   const transcribeOutput = transcribeExec?.output as Record<string, any> | undefined;
+  const classifyOutput = classifyExec?.output as Record<string, any> | undefined;
+  const lineClassification = classifyOutput?.lineClassification as Array<{
+    lineNum: number; text: string; speaker?: string; timestamp: string;
+    classification: 'AD' | 'CONTENT'; adReason?: string;
+  }> | undefined;
 
   return (
     <div className={`pt-chunk ${threadStatusClass(thread.status)}`}>
@@ -364,13 +371,36 @@ function ChunkCard({
         })}
       </div>
 
-      {/* Full transcript text if available */}
-      {transcribeOutput?.transcript && (
+      {/* Per-line classification (replaces plain transcript once classify completes) */}
+      {lineClassification && lineClassification.length > 0 ? (
+        <div className="pt-chunk-classification">
+          <span className="pt-chunk-transcript-label">
+            Classification ({lineClassification.length} lines):
+          </span>
+          <div className="pt-classification-lines">
+            {lineClassification.map(l => (
+              <div
+                key={l.lineNum}
+                className={`pt-classification-line ${l.classification === 'AD' ? 'pt-line-ad' : 'pt-line-content'}`}
+              >
+                <span className="pt-line-num">[{l.lineNum}]</span>
+                <span className="pt-line-ts">{l.timestamp}</span>
+                <span className={`pt-line-tag ${l.classification === 'AD' ? 'pt-tag-ad' : 'pt-tag-content'}`}>
+                  {l.classification}
+                </span>
+                {l.speaker && <span className="pt-line-speaker">{l.speaker}:</span>}
+                <span className="pt-line-text">{l.text}</span>
+                {l.adReason && <span className="pt-line-reason">({l.adReason})</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : transcribeOutput?.transcript ? (
         <div className="pt-chunk-transcript">
           <span className="pt-chunk-transcript-label">Transcript:</span>
           {transcribeOutput.transcript}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
