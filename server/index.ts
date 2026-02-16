@@ -2135,6 +2135,21 @@ app.post('/api/sandbox/analyze', async (req, res) => {
               console.warn(`[sandbox] Chunk ${ci + 1} ad classification failed (non-fatal): ${classifyErr.message}`);
             }
 
+            // Build per-line classification breakdown
+            const lineClassification = chunkLines.map(l => {
+              const adBlock = chunkAdBlocks.find(b => l.lineNum >= b.startLine && l.lineNum <= b.endLine);
+              const totalWords = chunkLines.length > 0 ? chunkLines[chunkLines.length - 1].cumulativeWords : 0;
+              const approxTime = estDuration > 0 && totalWords > 0 ? (l.cumulativeWords / totalWords) * estDuration : 0;
+              return {
+                lineNum: l.lineNum,
+                text: l.text,
+                speaker: l.speaker || undefined,
+                timestamp: fmtTs(approxTime),
+                classification: adBlock ? 'AD' as const : 'CONTENT' as const,
+                adReason: adBlock?.reason || undefined,
+              };
+            });
+
             sendEvent('progress', {
               step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
               status: 'done', message: `${chunkAdBlocks.length} ad blocks`,
@@ -2148,6 +2163,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
                 startTimeSec: b.startTimeSec,
                 endTimeSec: b.endTimeSec,
               })),
+              lineClassification,
               rawResponse: classifyLlmRaw || undefined,
             });
           } else {
