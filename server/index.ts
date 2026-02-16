@@ -2082,7 +2082,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             status: 'done', message: `${segs.length} segments, ${chunkWordCount} words`,
             segmentCount: segs.length,
             wordCount: chunkWordCount,
-            transcriptPreview: chunkText.slice(0, 300) + (chunkText.length > 300 ? '...' : ''),
+            transcript: chunkText,
             durationSec: segs.length > 0 ? Math.round((segs[segs.length - 1].end - segs[0].start) * 10) / 10 : 0,
           });
 
