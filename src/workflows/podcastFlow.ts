@@ -13,10 +13,12 @@ import {
  *   2. parse_episodes         – Extract episode list from XML          (http.request — server parses)
  *     ── user selects episode ──
  *   3. resolve_audio_stream   – Resolve CDN URL, get duration/size     (http.request — HEAD)
- *   4. plan_chunks            – Calculate 1 MB byte-range chunks       (compute)
+ *   4. plan_chunks            – Calculate byte-range chunks (priority sub-chunks + regular 2 MB)  (compute)
  *     ── fork: parallel per-chunk threads (no join — each emits independently) ──
+ *     Phase 1: 6 priority sub-chunks (~350 KB, ~22s each) from first 2 MB
+ *     Phase 2: regular 2 MB chunks for remaining audio
  *     Per chunk:
- *       a. fetch_chunk        – HTTP Range request for 1 MB slice      (http.request)
+ *       a. fetch_chunk        – HTTP Range request for chunk slice     (http.request)
  *       b. transcribe_chunk   – STT on chunk audio                     (ai.speech-to-text)
  *       c. classify_chunk     – LLM classifies chunk as content/ad     (ai.generate-text)
  *       d. refine_chunk       – LLM refines ad boundaries locally      (ai.generate-text)
@@ -98,9 +100,11 @@ export function createPodcastWorkflow(podcastId: string): Workflow {
       type: 'compute',
       dependsOn: ['step_resolve_audio_stream'],
       inputs: {
-        // Pure computation — divide Content-Length into 1 MB byte ranges.
-        // Each chunk will be fetched independently via HTTP Range request.
-        chunkSizeBytes: 1_048_576,       // 1 MB per chunk (~65s at 128kbps)
+        // Priority sub-chunking: first 2 MB → 6 sub-chunks (~350 KB, ~22s each),
+        // remaining audio → standard 2 MB chunks (~131s at 128kbps).
+        chunkSizeBytes: 2_097_152,       // 2 MB per regular chunk
+        subChunkSizeBytes: 349_525,      // ~350 KB per priority sub-chunk
+        prioritySubChunks: 6,
         strategy: 'byte-range',          // HTTP Range requests
       },
       policy: { timeoutMs: 5000, maxAttempts: 1 },
@@ -236,17 +240,19 @@ const STEP_DESCRIPTIONS: Record<string, {
     ],
   },
   step_plan_chunks: {
-    description: 'Pure computation — divide the audio file\'s Content-Length into 1 MB byte-range chunks for parallel streaming. Each chunk is ~65 seconds of audio at 128kbps. Chunks are processed independently with no join.',
+    description: 'Two-phase chunk planning: the first 2 MB of audio is split into 6 priority sub-chunks (~350 KB, ~22s each) for fast playback start. Remaining audio uses standard 2 MB chunks (~131s at 128kbps). All chunks are processed independently via HTTP Range requests.',
     inputSchema: [
       { name: 'contentLengthBytes', type: 'number', required: true, description: 'Total audio file size from HEAD' },
-      { name: 'chunkSizeBytes', type: 'number', required: true, description: 'Target chunk size (1,048,576 = 1 MB)' },
+      { name: 'chunkSizeBytes', type: 'number', required: true, description: 'Regular chunk size (2,097,152 = 2 MB)' },
+      { name: 'subChunkSizeBytes', type: 'number', required: false, description: 'Priority sub-chunk size (~349,525 bytes)' },
       { name: 'strategy', type: 'string', required: true, description: 'Chunking strategy (byte-range)' },
       { name: 'format', type: 'string', required: false, description: 'Audio format from Content-Type' },
       { name: 'resolvedUrl', type: 'string', required: true, description: 'CDN URL for byte-range requests' },
     ],
     outputSchema: [
-      { name: 'chunkCount', type: 'number', required: true, description: 'Number of chunks planned' },
-      { name: 'chunkDurationSec', type: 'number', required: true, description: 'Estimated seconds per chunk (~65s at 128kbps)' },
+      { name: 'chunkCount', type: 'number', required: true, description: 'Total number of chunks planned (priority + regular)' },
+      { name: 'priorityChunks', type: 'number', required: true, description: 'Number of priority sub-chunks (first 2 MB)' },
+      { name: 'regularChunks', type: 'number', required: true, description: 'Number of regular 2 MB chunks' },
       { name: 'totalEstimatedAudioSec', type: 'number', required: true, description: 'Total estimated audio duration' },
       { name: 'fileSizeMb', type: 'string', required: true, description: 'File size formatted in MB' },
     ],
@@ -291,12 +297,12 @@ export const CHUNK_STEP_DEFINITIONS: Record<string, {
   dependsOn: string[];
 }> = {
   step_fetch_chunk: {
-    description: 'HTTP Range request to fetch a 1 MB audio slice from the CDN. Uses byte-range headers to download only the relevant portion of the audio file.',
+    description: 'HTTP Range request to fetch an audio slice from the CDN. Priority sub-chunks are ~350 KB (~22s), regular chunks are 2 MB (~131s). Uses byte-range headers to download only the relevant portion.',
     inputSchema: [
       { name: 'audioUrl', type: 'string', required: true, description: 'CDN URL for byte-range request' },
       { name: 'chunkIndex', type: 'number', required: true, description: 'Zero-based chunk index' },
       { name: 'totalChunks', type: 'number', required: true, description: 'Total number of chunks' },
-      { name: 'chunkSizeBytes', type: 'number', required: true, description: 'Target chunk size (1,048,576 = 1 MB)' },
+      { name: 'chunkSizeBytes', type: 'number', required: true, description: 'Chunk size in bytes (varies: ~350 KB or 2 MB)' },
       { name: 'method', type: 'string', required: true, description: 'HTTP method (GET with Range header)' },
     ],
     outputSchema: [

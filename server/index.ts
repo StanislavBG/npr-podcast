@@ -361,11 +361,14 @@ app.get('/api/transcript', async (req, res) => {
 
 // ─── Audio Chunked Processing ────────────────────────────────────────────────
 //
-// Chunked strategy: 1 MB byte-range chunks fetched via HTTP Range requests.
-// Each chunk is ~65s of audio at 128kbps — well under Whisper's 25 MB limit.
+// Two-phase chunking: first 2 MB split into 6 priority sub-chunks (~350 KB, ~22s each)
+// for fast playback start; remaining audio uses standard 2 MB chunks (~131s at 128kbps).
+// All chunks fetched via HTTP Range requests — well under Whisper's 25 MB limit.
 
 const CHUNK_SIZE_BYTES = 2_097_152;  // 2 MB per chunk (~131s at 128kbps)
 const DEFAULT_BITRATE = 128000;      // 128kbps
+const FIRST_CHUNK_SUB_COUNT = 6;     // Split first 2 MB into 6 sub-chunks for faster playback start
+const SUB_CHUNK_SIZE_BYTES = Math.floor(CHUNK_SIZE_BYTES / FIRST_CHUNK_SUB_COUNT); // ~349 KB (~22s each)
 
 /**
  * Align a buffer to the first valid MP3 frame sync.
@@ -1893,15 +1896,13 @@ function mapAdBlocksToTimestamps(
 }
 
 app.post('/api/sandbox/analyze', async (req, res) => {
-  const { transcriptUrl, episodeTitle, durationSec, podcastTranscripts, audioUrl, testMode } = req.body as {
+  const { transcriptUrl, episodeTitle, durationSec, podcastTranscripts, audioUrl } = req.body as {
     transcriptUrl: string;
     episodeTitle: string;
     durationSec: number;
     podcastTranscripts?: PodcastTranscript[];
     audioUrl?: string;
-    testMode?: boolean;
   };
-  const TEST_MODE_MAX_CHUNKS = Infinity;  // no chunk limit — process all chunks
 
   if (!transcriptUrl && !audioUrl && (!podcastTranscripts || podcastTranscripts.length === 0)) {
     res.status(400).json({ error: 'Missing transcriptUrl, audioUrl, or podcastTranscripts' });
@@ -1979,32 +1980,65 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           audioDetails: { ...audioDetails },
         });
 
-        // Step 4: Plan chunks — calculate 1 MB byte ranges (no download yet)
+        // Step 4: Plan chunks — variable-size byte ranges
+        // First 2 MB is split into 6 priority sub-chunks (~350 KB, ~22s each) for faster playback start.
+        // Remaining audio uses standard 2 MB chunks.
         const resolvedUrl = audioDetails.resolvedUrl;
         const contentLength = audioDetails.contentLengthBytes;
         const bitrate = DEFAULT_BITRATE;
-        const allChunksCount = Math.ceil(contentLength / CHUNK_SIZE_BYTES);
-        const numChunks = testMode ? Math.min(allChunksCount, TEST_MODE_MAX_CHUNKS) : allChunksCount;
-        const estChunkDuration = (CHUNK_SIZE_BYTES * 8) / bitrate; // ~65.5s at 128kbps
         const estDuration = (contentLength * 8) / bitrate;
 
-        if (testMode && allChunksCount > TEST_MODE_MAX_CHUNKS) {
-          console.log(`[sandbox] TEST MODE: limiting from ${allChunksCount} to ${numChunks} chunks`);
+        interface ChunkPlan {
+          index: number;       // display index (0-based, sequential across all chunks)
+          startByte: number;
+          endByte: number;
+          offsetSec: number;
+          estDuration: number;
+          priority: boolean;   // true for first-chunk sub-chunks
         }
 
-        sendEvent('progress', { step: 'step_plan_chunks', message: `Planning ${numChunks} chunks (2 MB each, ~${Math.round(estChunkDuration)}s)...` });
-        console.log(`[sandbox] Planned ${numChunks} chunks for ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${estDuration.toFixed(0)}s${testMode ? ' [TEST MODE]' : ''}`);
+        const chunkPlans: ChunkPlan[] = [];
+
+        // Phase 1 sub-chunks: split the first CHUNK_SIZE_BYTES into FIRST_CHUNK_SUB_COUNT pieces
+        const firstChunkEnd = Math.min(CHUNK_SIZE_BYTES, contentLength);
+        for (let i = 0; i < FIRST_CHUNK_SUB_COUNT; i++) {
+          const startByte = i * SUB_CHUNK_SIZE_BYTES;
+          if (startByte >= firstChunkEnd) break;
+          const endByte = Math.min((i + 1) * SUB_CHUNK_SIZE_BYTES - 1, firstChunkEnd - 1);
+          const offsetSec = (startByte * 8) / bitrate;
+          const dur = ((endByte - startByte + 1) * 8) / bitrate;
+          chunkPlans.push({ index: chunkPlans.length, startByte, endByte, offsetSec, estDuration: dur, priority: true });
+        }
+
+        // Phase 2 chunks: standard 2 MB chunks for the rest of the file
+        let offset = CHUNK_SIZE_BYTES;
+        while (offset < contentLength) {
+          const startByte = offset;
+          const endByte = Math.min(offset + CHUNK_SIZE_BYTES - 1, contentLength - 1);
+          const offsetSec = (startByte * 8) / bitrate;
+          const dur = ((endByte - startByte + 1) * 8) / bitrate;
+          chunkPlans.push({ index: chunkPlans.length, startByte, endByte, offsetSec, estDuration: dur, priority: false });
+          offset += CHUNK_SIZE_BYTES;
+        }
+
+        const numChunks = chunkPlans.length;
+        const priorityCount = chunkPlans.filter(p => p.priority).length;
+        const regularCount = numChunks - priorityCount;
+
+        sendEvent('progress', { step: 'step_plan_chunks', message: `Planning ${numChunks} chunks (${priorityCount} priority + ${regularCount} regular)...` });
+        console.log(`[sandbox] Planned ${numChunks} chunks (${priorityCount} priority sub-chunks + ${regularCount} regular) for ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${estDuration.toFixed(0)}s`);
         sendEvent('progress', {
           step: 'step_plan_chunks',
           status: 'done',
-          message: `${numChunks}${testMode ? `/${allChunksCount}` : ''} chunks planned (${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${Math.round(estDuration)}s)${testMode ? ' [TEST MODE]' : ''}`,
+          message: `${numChunks} chunks planned: ${priorityCount} priority (~${Math.round((SUB_CHUNK_SIZE_BYTES * 8) / bitrate)}s each) + ${regularCount} regular (~${Math.round((CHUNK_SIZE_BYTES * 8) / bitrate)}s each) — ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${Math.round(estDuration)}s`,
           audioDetails: { ...audioDetails },
         });
 
         // ── Parallel per-chunk pipeline: Fetch → Transcribe → Classify → Refine → Emit ──
         // Each chunk independently fetches via Range request, processes, and emits skip ranges.
         // Semaphore limits concurrent OpenAI STT calls to avoid rate limits.
-        const STT_CONCURRENCY = 3;
+        // Two-phase execution: priority sub-chunks first for fast playback start, then regular chunks.
+        const STT_CONCURRENCY = 5;
         let activeCalls = 0;
         const waitQueue: Array<() => void> = [];
         const acquireSemaphore = (): Promise<void> => {
@@ -2028,11 +2062,12 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         const chunkResults: (ChunkResult | null)[] = new Array(numChunks).fill(null);
 
         // Process a single chunk: Fetch → Transcribe → Classify → Refine → Emit
-        const processChunk = async (ci: number): Promise<void> => {
+        const processChunk = async (plan: ChunkPlan): Promise<void> => {
+          const ci = plan.index;
           const threadId = `chunk-${ci}`;
-          const startByte = ci * CHUNK_SIZE_BYTES;
-          const endByte = Math.min((ci + 1) * CHUNK_SIZE_BYTES - 1, contentLength - 1);
-          const offsetSec = (startByte * 8) / bitrate;
+          const startByte = plan.startByte;
+          const endByte = plan.endByte;
+          const offsetSec = plan.offsetSec;
           const chunkSizeKB = ((endByte - startByte + 1) / 1024).toFixed(0);
 
           // ── Fetch chunk via Range request ──
@@ -2105,7 +2140,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             // Normalize: scale Whisper's time range to fit the actual chunk duration,
             // then shift by the chunk's offset in the episode.
             const whisperEnd = rawSegs.length > 0 ? rawSegs[rawSegs.length - 1].end : 0;
-            const actualChunkDur = estChunkDuration; // expected real duration of this chunk
+            const actualChunkDur = plan.estDuration; // expected real duration of this chunk
             const scale = whisperEnd > 0 ? actualChunkDur / whisperEnd : 1;
 
             segs = rawSegs.map((s: { start: number; end: number; text: string }) => ({
@@ -2120,7 +2155,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
               const plainText = await speechToText(chunkBuf, 'mp3');
               if (plainText) {
                 chunkText = plainText;
-                segs = [{ start: offsetSec, end: offsetSec + estChunkDuration, text: plainText.trim() }];
+                segs = [{ start: offsetSec, end: offsetSec + plan.estDuration, text: plainText.trim() }];
               }
             } catch { /* skip chunk */ }
           } finally {
@@ -2300,9 +2335,20 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           chunkResults[ci] = { chunkIndex: ci, text: chunkText, segments: segs, lines: chunkLines, adBlocks: chunkAdBlocks };
         };
 
-        // Launch all chunks concurrently (semaphore throttles STT to STT_CONCURRENCY)
-        const chunkPromises = Array.from({ length: numChunks }, (_, ci) => processChunk(ci));
-        await Promise.allSettled(chunkPromises);
+        // Two-phase execution: priority sub-chunks first for fast playback start, then regular chunks
+        const priorityPlans = chunkPlans.filter(p => p.priority);
+        const regularPlans = chunkPlans.filter(p => !p.priority);
+
+        // Phase 1: Process priority sub-chunks (first 2 MB split into 6 ~22s pieces)
+        console.log(`[sandbox] Phase 1: launching ${priorityPlans.length} priority sub-chunks...`);
+        const priorityPromises = priorityPlans.map(p => processChunk(p));
+        await Promise.allSettled(priorityPromises);
+        console.log(`[sandbox] Phase 1 complete. Phase 2: launching ${regularPlans.length} regular chunks...`);
+
+        // Phase 2: Process remaining regular chunks
+        const regularPromises = regularPlans.map(p => processChunk(p));
+        await Promise.allSettled(regularPromises);
+        console.log(`[sandbox] Phase 2 complete. All ${numChunks} chunks processed.`);
 
         // Merge results in order
         let allText = '';
