@@ -2024,13 +2024,15 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         const numChunks = chunkPlans.length;
         const priorityCount = chunkPlans.filter(p => p.priority).length;
         const regularCount = numChunks - priorityCount;
+        // Display count: 1 merged priority chunk + N regular chunks
+        const displayNumChunks = 1 + regularCount;
 
-        sendEvent('progress', { step: 'step_plan_chunks', message: `Planning ${numChunks} chunks (${priorityCount} priority + ${regularCount} regular)...` });
-        console.log(`[sandbox] Planned ${numChunks} chunks (${priorityCount} priority sub-chunks + ${regularCount} regular) for ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${estDuration.toFixed(0)}s`);
+        sendEvent('progress', { step: 'step_plan_chunks', message: `Planning ${displayNumChunks} chunks (first 2 MB priority + ${regularCount} regular)...` });
+        console.log(`[sandbox] Planned ${displayNumChunks} display chunks (${priorityCount} sub-chunks merged → 1 + ${regularCount} regular) for ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${estDuration.toFixed(0)}s`);
         sendEvent('progress', {
           step: 'step_plan_chunks',
           status: 'done',
-          message: `${numChunks} chunks planned: ${priorityCount} priority (~${Math.round((SUB_CHUNK_SIZE_BYTES * 8) / bitrate)}s each) + ${regularCount} regular (~${Math.round((CHUNK_SIZE_BYTES * 8) / bitrate)}s each) — ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${Math.round(estDuration)}s`,
+          message: `${displayNumChunks} chunks planned: Chunk 1 (${priorityCount} sub-chunks, ~${Math.round((CHUNK_SIZE_BYTES * 8) / bitrate)}s) + ${regularCount} regular (~${Math.round((CHUNK_SIZE_BYTES * 8) / bitrate)}s each) — ${(contentLength / 1024 / 1024).toFixed(1)} MB, ~${Math.round(estDuration)}s`,
           audioDetails: { ...audioDetails },
         });
 
@@ -2061,28 +2063,30 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         // Ordered results array — filled by parallel workers
         const chunkResults: (ChunkResult | null)[] = new Array(numChunks).fill(null);
 
-        // Process a single chunk: Fetch → Transcribe → (optionally) Classify → Refine → Emit
-        // When transcribeOnly=true, only Fetch+Transcribe run (used for priority sub-chunks
-        // whose transcripts are merged and classified together after Phase 1).
-        const processChunk = async (plan: ChunkPlan, transcribeOnly = false): Promise<void> => {
+        // Process a single chunk: Fetch → Transcribe → Classify → Refine → Emit
+        // silent=true: no SSE events (used for priority sub-chunks processed invisibly)
+        // displayIndex: 0-based index for UI thread labeling (different from plan.index)
+        const processChunk = async (plan: ChunkPlan, silent = false, displayIndex = 0): Promise<void> => {
           const ci = plan.index;
-          const threadId = `chunk-${ci}`;
+          const threadId = `chunk-${displayIndex}`;
           const startByte = plan.startByte;
           const endByte = plan.endByte;
           const offsetSec = plan.offsetSec;
           const chunkSizeKB = ((endByte - startByte + 1) / 1024).toFixed(0);
 
           // ── Fetch chunk via Range request ──
-          sendEvent('progress', {
-            step: 'step_fetch_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-            message: `Fetching chunk ${ci + 1}/${numChunks} (${chunkSizeKB} KB)...`,
-            input: {
-              resolvedUrl: resolvedUrl.slice(0, 120),
-              byteRange: `${startByte}-${endByte}`,
-              chunkSizeKB: Number(chunkSizeKB),
-              offsetSec: Math.round(offsetSec * 10) / 10,
-            },
-          });
+          if (!silent) {
+            sendEvent('progress', {
+              step: 'step_fetch_chunk', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
+              message: `Fetching chunk ${displayIndex + 1}/${displayNumChunks} (${chunkSizeKB} KB)...`,
+              input: {
+                resolvedUrl: resolvedUrl.slice(0, 120),
+                byteRange: `${startByte}-${endByte}`,
+                chunkSizeKB: Number(chunkSizeKB),
+                offsetSec: Math.round(offsetSec * 10) / 10,
+              },
+            });
+          }
 
           let chunkBuf: Buffer;
           const audioRes = await fetch(resolvedUrl, {
@@ -2100,27 +2104,31 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           chunkBuf = alignToMp3Frame(chunkBuf);
           console.log(`[sandbox] Chunk ${ci + 1}/${numChunks}: fetched ${chunkSizeKB} KB, offset ~${offsetSec.toFixed(0)}s`);
 
-          sendEvent('progress', {
-            step: 'step_fetch_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-            status: 'done', message: `${chunkSizeKB} KB fetched`,
-            bytesFetched: endByte - startByte + 1,
-            byteRange: `${startByte}-${endByte}`,
-            offsetSec: Math.round(offsetSec * 10) / 10,
-            audioUrl: resolvedUrl.slice(0, 120),
-          });
+          if (!silent) {
+            sendEvent('progress', {
+              step: 'step_fetch_chunk', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
+              status: 'done', message: `${chunkSizeKB} KB fetched`,
+              bytesFetched: endByte - startByte + 1,
+              byteRange: `${startByte}-${endByte}`,
+              offsetSec: Math.round(offsetSec * 10) / 10,
+              audioUrl: resolvedUrl.slice(0, 120),
+            });
+          }
 
           // ── Transcribe chunk with Whisper ──
-          sendEvent('progress', {
-            step: 'step_transcribe_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-            message: `Transcribing chunk ${ci + 1}/${numChunks}...`,
-            input: {
-              model: 'gpt-4o-mini-transcribe',
-              responseFormat: 'verbose_json',
-              language: 'en',
-              bufferSizeKB: Math.round(chunkBuf.length / 1024),
-              offsetSec: Math.round(offsetSec * 10) / 10,
-            },
-          });
+          if (!silent) {
+            sendEvent('progress', {
+              step: 'step_transcribe_chunk', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
+              message: `Transcribing chunk ${displayIndex + 1}/${displayNumChunks}...`,
+              input: {
+                model: 'gpt-4o-mini-transcribe',
+                responseFormat: 'verbose_json',
+                language: 'en',
+                bufferSizeKB: Math.round(chunkBuf.length / 1024),
+                offsetSec: Math.round(offsetSec * 10) / 10,
+              },
+            });
+          }
 
           let chunkText = '';
           let segs: Array<{ start: number; end: number; text: string }> = [];
@@ -2166,48 +2174,39 @@ app.post('/api/sandbox/analyze', async (req, res) => {
 
           const chunkWordCount = chunkText.split(/\s+/).filter(Boolean).length;
           const chunkAudioDuration = segs.length > 0 ? Math.round((segs[segs.length - 1].end - segs[0].start) * 10) / 10 : 0;
-          sendEvent('progress', {
-            step: 'step_transcribe_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-            status: 'done', message: `${segs.length} segments, ${chunkWordCount} words`,
-            segmentCount: segs.length,
-            wordCount: chunkWordCount,
-            transcript: chunkText,
-            durationSec: chunkAudioDuration,
-            timeRange: segs.length > 0
-              ? { startSec: Math.round(segs[0].start * 10) / 10, endSec: Math.round(segs[segs.length - 1].end * 10) / 10 }
-              : null,
-            segments: segs.map(s => ({
-              start: Math.round(s.start * 10) / 10,
-              end: Math.round(s.end * 10) / 10,
-              text: s.text,
-            })),
-          });
+          if (!silent) {
+            sendEvent('progress', {
+              step: 'step_transcribe_chunk', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
+              status: 'done', message: `${segs.length} segments, ${chunkWordCount} words`,
+              segmentCount: segs.length,
+              wordCount: chunkWordCount,
+              transcript: chunkText,
+              durationSec: chunkAudioDuration,
+              timeRange: segs.length > 0
+                ? { startSec: Math.round(segs[0].start * 10) / 10, endSec: Math.round(segs[segs.length - 1].end * 10) / 10 }
+                : null,
+              segments: segs.map(s => ({
+                start: Math.round(s.start * 10) / 10,
+                end: Math.round(s.end * 10) / 10,
+                text: s.text,
+              })),
+            });
+          }
 
           // ── Classify ads in this chunk ──
           const chunkLines = buildLinesFromSegments(segs);
           let chunkAdBlocks: SandboxAdBlock[] = [];
 
-          // Priority sub-chunks skip classification — their transcripts are merged
-          // and classified together after Phase 1 for better context.
-          if (transcribeOnly) {
-            // Sub-chunk 0 will receive merged classification results in Phase 1b.
-            // Sub-chunks 1-5 mark classify/refine/emit as skipped (merged into chunk 0).
-            if (ci > 0) {
-              for (const deferStep of ['step_classify_chunk', 'step_refine_chunk', 'step_emit_skips'] as const) {
-                sendEvent('progress', {
-                  step: deferStep, threadId, chunkIndex: ci, totalChunks: numChunks,
-                  status: 'done', message: 'see Chunk 1 (merged)',
-                });
-              }
-            }
+          // Silent sub-chunks: store results and return — no classification, no SSE events
+          if (silent) {
             chunkResults[ci] = { chunkIndex: ci, text: chunkText, segments: segs, lines: chunkLines, adBlocks: [] };
             return;
           }
 
           if (chunkLines.length >= 3) {
             sendEvent('progress', {
-              step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
-              message: `Classifying ads in chunk ${ci + 1}...`,
+              step: 'step_classify_chunk', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
+              message: `Classifying ads in chunk ${displayIndex + 1}...`,
               input: {
                 linesCount: chunkLines.length,
                 totalWords: chunkLines.length > 0 ? chunkLines[chunkLines.length - 1].cumulativeWords : 0,
@@ -2242,7 +2241,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             });
 
             sendEvent('progress', {
-              step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+              step: 'step_classify_chunk', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
               status: 'done', message: `${chunkAdBlocks.length} ad blocks`,
               adBlockCount: chunkAdBlocks.length,
               linesAnalyzed: chunkLines.length,
@@ -2259,7 +2258,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             });
           } else {
             sendEvent('progress', {
-              step: 'step_classify_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+              step: 'step_classify_chunk', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
               status: 'done', message: `skipped (${chunkLines.length} lines)`,
               adBlockCount: 0,
               linesAnalyzed: chunkLines.length,
@@ -2276,7 +2275,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
               textPreview: b.textPreview,
             }));
             sendEvent('progress', {
-              step: 'step_refine_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+              step: 'step_refine_chunk', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
               message: `Refining ${chunkAdBlocks.length} boundaries...`,
               input: {
                 anchorCount: chunkAdBlocks.length,
@@ -2296,7 +2295,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             }
             const refinedAdTimeSec = chunkAdBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
             sendEvent('progress', {
-              step: 'step_refine_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+              step: 'step_refine_chunk', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
               status: 'done', message: `${chunkAdBlocks.length} refined, ${Math.round(refinedAdTimeSec)}s ads`,
               refinedBlocks: chunkAdBlocks.length,
               totalAdTimeSec: Math.round(refinedAdTimeSec * 10) / 10,
@@ -2311,7 +2310,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             });
           } else {
             sendEvent('progress', {
-              step: 'step_refine_chunk', threadId, chunkIndex: ci, totalChunks: numChunks,
+              step: 'step_refine_chunk', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
               status: 'done',
               message: chunkAdBlocks.length === 0 ? 'no ads found' : 'no LLM key',
               refinedBlocks: 0,
@@ -2331,7 +2330,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           }));
           if (chunkAdBlocks.length > 0) {
             sendEvent('progress', {
-              step: 'step_emit_skips', threadId, chunkIndex: ci, totalChunks: numChunks,
+              step: 'step_emit_skips', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
               message: `Emitting ${chunkAdBlocks.length} skip ranges...`,
               input: {
                 adBlockCount: chunkAdBlocks.length,
@@ -2343,7 +2342,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           }
           const totalSkipSec = partialSkipMap.reduce((s, r) => s + (r.endTime - r.startTime), 0);
           sendEvent('progress', {
-            step: 'step_emit_skips', threadId, chunkIndex: ci, totalChunks: numChunks,
+            step: 'step_emit_skips', threadId, chunkIndex: displayIndex, totalChunks: displayNumChunks,
             status: 'done',
             message: chunkAdBlocks.length > 0 ? `${chunkAdBlocks.length} ranges (${Math.round(totalSkipSec)}s)` : 'no ads to skip',
             emittedRanges: chunkAdBlocks.length,
@@ -2358,29 +2357,92 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         const priorityPlans = chunkPlans.filter(p => p.priority);
         const regularPlans = chunkPlans.filter(p => !p.priority);
 
-        // Phase 1: Transcribe priority sub-chunks only (no classification yet)
-        console.log(`[sandbox] Phase 1: launching ${priorityPlans.length} priority sub-chunks (transcribe only)...`);
-        const priorityPromises = priorityPlans.map(p => processChunk(p, true));
+        // Phase 1: Transcribe priority sub-chunks silently (no SSE events, no classification)
+        console.log(`[sandbox] Phase 1: launching ${priorityPlans.length} priority sub-chunks (silent transcribe)...`);
+        const priorityPromises = priorityPlans.map(p => processChunk(p, /* silent */ true));
         await Promise.allSettled(priorityPromises);
 
-        // Phase 1b: Merge sub-chunk transcripts and classify as one unit
-        // This gives the LLM full context (~131s, ~40-50 sentences) instead of fragmented ~22s pieces.
+        // Phase 1b: Merge sub-chunk transcripts and emit as "Chunk 1" with full pipeline
+        // Sub-chunks ran silently — now we surface the combined result as a single chunk.
         {
           const mergedSegs: Array<{ start: number; end: number; text: string }> = [];
+          let mergedText = '';
+          let mergedTotalBytes = 0;
           for (const pp of priorityPlans) {
             const cr = chunkResults[pp.index];
-            if (cr) mergedSegs.push(...cr.segments);
+            if (cr) {
+              mergedSegs.push(...cr.segments);
+              mergedText += cr.text + ' ';
+            }
+            mergedTotalBytes += pp.endByte - pp.startByte + 1;
           }
+          mergedText = mergedText.trim();
           const mergedLines = buildLinesFromSegments(mergedSegs);
-          const mergedThreadId = 'chunk-0'; // Route merged results to first chunk's UI card
-          console.log(`[sandbox] Phase 1b: merged ${priorityPlans.length} sub-chunks → ${mergedLines.length} lines, classifying as one unit...`);
+          const mergedThreadId = 'chunk-0';
+          const firstPlan = priorityPlans[0];
+          const lastPlan = priorityPlans[priorityPlans.length - 1];
+          console.log(`[sandbox] Phase 1b: merged ${priorityPlans.length} sub-chunks → ${mergedLines.length} lines, emitting as Chunk 1...`);
 
+          // Emit aggregated Fetch event for Chunk 1
+          const mergedByteRange = `${firstPlan.startByte}-${lastPlan.endByte}`;
+          sendEvent('progress', {
+            step: 'step_fetch_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
+            message: `Fetching chunk 1/${displayNumChunks} (${Math.round(mergedTotalBytes / 1024)} KB, ${priorityPlans.length} parallel sub-chunks)...`,
+            input: {
+              resolvedUrl: resolvedUrl.slice(0, 120),
+              byteRange: mergedByteRange,
+              chunkSizeKB: Math.round(mergedTotalBytes / 1024),
+              offsetSec: 0,
+              subChunks: priorityPlans.length,
+            },
+          });
+          sendEvent('progress', {
+            step: 'step_fetch_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
+            status: 'done', message: `${Math.round(mergedTotalBytes / 1024)} KB fetched (${priorityPlans.length} sub-chunks)`,
+            bytesFetched: mergedTotalBytes,
+            byteRange: mergedByteRange,
+            offsetSec: 0,
+            audioUrl: resolvedUrl.slice(0, 120),
+          });
+
+          // Emit aggregated Transcribe event for Chunk 1
+          const mergedWordCount = mergedText.split(/\s+/).filter(Boolean).length;
+          const mergedAudioDur = mergedSegs.length > 0 ? Math.round((mergedSegs[mergedSegs.length - 1].end - mergedSegs[0].start) * 10) / 10 : 0;
+          sendEvent('progress', {
+            step: 'step_transcribe_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
+            message: `Transcribing chunk 1/${displayNumChunks} (${priorityPlans.length} sub-chunks)...`,
+            input: {
+              model: 'gpt-4o-mini-transcribe',
+              responseFormat: 'verbose_json',
+              language: 'en',
+              subChunks: priorityPlans.length,
+              totalBufferSizeKB: Math.round(mergedTotalBytes / 1024),
+            },
+          });
+          sendEvent('progress', {
+            step: 'step_transcribe_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
+            status: 'done', message: `${mergedSegs.length} segments, ${mergedWordCount} words (${priorityPlans.length} sub-chunks merged)`,
+            segmentCount: mergedSegs.length,
+            wordCount: mergedWordCount,
+            transcript: mergedText,
+            durationSec: mergedAudioDur,
+            timeRange: mergedSegs.length > 0
+              ? { startSec: Math.round(mergedSegs[0].start * 10) / 10, endSec: Math.round(mergedSegs[mergedSegs.length - 1].end * 10) / 10 }
+              : null,
+            segments: mergedSegs.map(s => ({
+              start: Math.round(s.start * 10) / 10,
+              end: Math.round(s.end * 10) / 10,
+              text: s.text,
+            })),
+          });
+
+          // Classify merged transcript
           let mergedAdBlocks: SandboxAdBlock[] = [];
 
           if (mergedLines.length >= 3) {
             sendEvent('progress', {
-              step: 'step_classify_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
-              message: `Classifying merged priority chunk (${mergedLines.length} lines from ${priorityPlans.length} sub-chunks)...`,
+              step: 'step_classify_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
+              message: `Classifying ads in chunk 1 (${mergedLines.length} lines)...`,
               input: {
                 linesCount: mergedLines.length,
                 totalWords: mergedLines.length > 0 ? mergedLines[mergedLines.length - 1].cumulativeWords : 0,
@@ -2414,7 +2476,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             });
 
             sendEvent('progress', {
-              step: 'step_classify_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              step: 'step_classify_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
               status: 'done', message: `${mergedAdBlocks.length} ad blocks (merged ${priorityPlans.length} sub-chunks)`,
               adBlockCount: mergedAdBlocks.length,
               linesAnalyzed: mergedLines.length,
@@ -2427,7 +2489,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             });
           } else {
             sendEvent('progress', {
-              step: 'step_classify_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              step: 'step_classify_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
               status: 'done', message: `skipped (${mergedLines.length} lines)`,
               adBlockCount: 0, linesAnalyzed: mergedLines.length,
               reason: `Too few lines to classify (${mergedLines.length} < 3)`,
@@ -2437,7 +2499,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           // Refine boundaries on merged result
           if (mergedAdBlocks.length > 0 && LLM_API_KEY) {
             sendEvent('progress', {
-              step: 'step_refine_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              step: 'step_refine_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
               message: `Refining ${mergedAdBlocks.length} boundaries (merged)...`,
               input: { anchorCount: mergedAdBlocks.length, linesCount: mergedLines.length, episodeTitle },
             });
@@ -2451,7 +2513,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             }
             const refinedAdTimeSec = mergedAdBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
             sendEvent('progress', {
-              step: 'step_refine_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              step: 'step_refine_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
               status: 'done', message: `${mergedAdBlocks.length} refined, ${Math.round(refinedAdTimeSec)}s ads`,
               refinedBlocks: mergedAdBlocks.length,
               totalAdTimeSec: Math.round(refinedAdTimeSec * 10) / 10,
@@ -2465,7 +2527,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             });
           } else {
             sendEvent('progress', {
-              step: 'step_refine_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              step: 'step_refine_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
               status: 'done',
               message: mergedAdBlocks.length === 0 ? 'no ads found' : 'no LLM key',
               refinedBlocks: 0,
@@ -2481,7 +2543,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           }));
           if (mergedAdBlocks.length > 0) {
             sendEvent('progress', {
-              step: 'step_emit_skips', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              step: 'step_emit_skips', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
               message: `Emitting ${mergedAdBlocks.length} skip ranges (merged)...`,
               input: { adBlockCount: mergedAdBlocks.length, skipRanges: mergedSkipMap },
             });
@@ -2490,7 +2552,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           }
           const mergedTotalSkip = mergedSkipMap.reduce((s, r) => s + (r.endTime - r.startTime), 0);
           sendEvent('progress', {
-            step: 'step_emit_skips', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+            step: 'step_emit_skips', threadId: mergedThreadId, chunkIndex: 0, totalChunks: displayNumChunks,
             status: 'done',
             message: mergedAdBlocks.length > 0 ? `${mergedAdBlocks.length} ranges (${Math.round(mergedTotalSkip)}s)` : 'no ads to skip',
             emittedRanges: mergedAdBlocks.length,
@@ -2507,8 +2569,9 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         }
 
         // Phase 2: Process remaining regular chunks (full pipeline per chunk)
+        // Display indices: regular chunks are numbered 1, 2, 3... (Chunk 2, Chunk 3, etc.)
         console.log(`[sandbox] Phase 2: launching ${regularPlans.length} regular chunks...`);
-        const regularPromises = regularPlans.map(p => processChunk(p));
+        const regularPromises = regularPlans.map((p, ri) => processChunk(p, /* silent */ false, /* displayIndex */ ri + 1));
         await Promise.allSettled(regularPromises);
         console.log(`[sandbox] Phase 2 complete. All ${numChunks} chunks processed.`);
 
