@@ -14,10 +14,13 @@ interface Props {
   scanProgress?: ScanProgressInfo;
   pipelineStatus?: 'idle' | 'running' | 'complete' | 'error';
   autoPlay?: boolean;
+  /** When provided, Player reuses this external <audio> element instead of rendering its own. */
+  audioRef?: React.RefObject<HTMLAudioElement | null>;
 }
 
-export function Player({ episode, adDetection, scanProgress, pipelineStatus, autoPlay }: Props) {
-  const audioRef = useRef<HTMLAudioElement>(null);
+export function Player({ episode, adDetection, scanProgress, pipelineStatus, autoPlay, audioRef: externalAudioRef }: Props) {
+  const internalAudioRef = useRef<HTMLAudioElement>(null);
+  const audioRef = externalAudioRef || internalAudioRef;
   const trackRef = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
@@ -129,7 +132,7 @@ export function Player({ episode, adDetection, scanProgress, pipelineStatus, aut
 
   return (
     <div className="player">
-      {src && <audio ref={audioRef} src={src} preload="metadata" />}
+      {!externalAudioRef && src && <audio ref={internalAudioRef} src={src} preload="metadata" />}
 
       {!src && (
         <div className="no-audio">No audio available for this episode</div>

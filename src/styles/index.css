@@ -1032,6 +1032,44 @@ button {
   margin-bottom: 2px;
 }
 
+/* Sandbox player — larger, more spacious than the phone dock player */
+.sb-player {
+  padding: 16px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.sb-player .player {
+  max-width: 720px;
+  margin: 0 auto;
+}
+.sb-player .player-info .now {
+  font-size: 16px;
+  font-weight: 600;
+}
+.sb-player .video-timeline {
+  margin-top: 10px;
+}
+.sb-player .timeline-track {
+  height: 10px;
+}
+.sb-player .timeline-thumb {
+  width: 16px;
+  height: 16px;
+  margin-top: -3px;
+}
+.sb-player .controls-centered {
+  gap: 28px;
+  padding: 10px 0 6px;
+}
+.sb-player .play {
+  width: 52px;
+  height: 52px;
+}
+.sb-player .ctl {
+  width: 40px;
+  height: 40px;
+}
+
 .sb-step-counter {
   font-size: 12px;
   font-weight: 700;
