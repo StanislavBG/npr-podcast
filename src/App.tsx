@@ -10,6 +10,7 @@ import {
   fetchEpisodes,
   sandboxAnalyzeStream,
   parseDuration,
+  getAudioProxyUrl,
   type Podcast,
   type Episode,
   type SandboxResult,
@@ -98,6 +99,10 @@ export default function App() {
   const [stepExecutions, setStepExecutions] = useState<Record<string, StepExecution>>({});
   const stepStartTimesRef = useRef<Record<string, number>>({});
   const flowDefinition = useMemo(() => createFlowDefinition(), []);
+
+  // Persistent audio element — survives page navigation so playback never interrupts
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const audioSrc = episode?.audioUrl ? getAudioProxyUrl(episode.audioUrl) : '';
 
   // Derived: has the pipeline started? (View Details enabled as soon as flow is non-idle)
   const pipelineStarted = pipelineStatus !== 'idle';
@@ -634,33 +639,45 @@ export default function App() {
     autoCollapseDelayMs: 2000,
   }), []);
 
+  // Persistent <audio> is always position 0 in the fragment so React preserves
+  // the DOM element (and playback) across app ↔ sandbox page switches.
+  const persistentAudio = audioSrc ? <audio ref={audioRef} src={audioSrc} preload="metadata" /> : null;
+
   if (page === 'sandbox') {
     return (
-      <SandboxPage
-        onBack={goToApp}
-        result={sandboxResult}
-        episode={episode}
-        podcastName={podcastName}
-        podcastId={selected}
-        pipelineSteps={pipelineSteps}
-        pipelineStatus={pipelineStatus}
-        chunkThreads={chunkThreads}
-        parallelConfig={parallelConfig}
-        stepExecutions={stepExecutions}
-        flowDefinition={flowDefinition}
-        podcasts={podcasts}
-        episodes={episodes}
-        selectedPodcast={selected}
-        episodesLoading={loading}
-        onSelectPodcast={setSelected}
-        onSelectEpisode={pick}
-      />
+      <>
+        {persistentAudio}
+        <SandboxPage
+          onBack={goToApp}
+          result={sandboxResult}
+          episode={episode}
+          podcastName={podcastName}
+          podcastId={selected}
+          pipelineSteps={pipelineSteps}
+          pipelineStatus={pipelineStatus}
+          chunkThreads={chunkThreads}
+          parallelConfig={parallelConfig}
+          stepExecutions={stepExecutions}
+          flowDefinition={flowDefinition}
+          podcasts={podcasts}
+          episodes={episodes}
+          selectedPodcast={selected}
+          episodesLoading={loading}
+          onSelectPodcast={setSelected}
+          onSelectEpisode={pick}
+          adDetection={ads}
+          scanProgress={scanProgress}
+          audioRef={audioRef}
+        />
+      </>
     );
   }
 
   const showFlow = flowStatus !== 'idle';
 
   return (
+    <>
+    {persistentAudio}
     <div className="phone-frame">
       <div className="phone-notch" />
       <div className="shell">
@@ -720,10 +737,12 @@ export default function App() {
               scanProgress={scanProgress}
               pipelineStatus={pipelineStatus}
               autoPlay
+              audioRef={audioRef}
             />
           </div>
         )}
       </div>
     </div>
+    </>
   );
 }

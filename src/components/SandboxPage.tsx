@@ -10,6 +10,8 @@ import type {
 import { PipelineTracker } from './PipelineTracker';
 import { PodcastSelector } from './PodcastSelector';
 import { EpisodeList } from './EpisodeList';
+import { Player } from './Player';
+import type { AdDetectionResult } from '../services/adDetector';
 import {
   formatTimestamp,
   type SandboxResult,
@@ -38,6 +40,10 @@ interface Props {
   episodesLoading: boolean;
   onSelectPodcast: (id: string) => void;
   onSelectEpisode: (ep: Episode) => void;
+  // Audio player (persistent across pages)
+  adDetection: AdDetectionResult | null;
+  scanProgress?: { totalChunks: number; completedChunks: Set<number> };
+  audioRef?: React.RefObject<HTMLAudioElement | null>;
 }
 
 // ─── Copy Feedback: accumulate debug info for agent/developer ────────────────
@@ -162,6 +168,9 @@ export function SandboxPage({
   episodesLoading,
   onSelectPodcast,
   onSelectEpisode,
+  adDetection,
+  scanProgress,
+  audioRef,
 }: Props) {
   const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
@@ -221,6 +230,19 @@ export function SandboxPage({
           onSelect={onSelectEpisode}
         />
       </div>
+
+      {/* Audio player — persistent across page navigation */}
+      {episode && (
+        <div className="sb-player">
+          <Player
+            episode={episode}
+            adDetection={adDetection}
+            scanProgress={scanProgress}
+            pipelineStatus={pipelineStatus}
+            audioRef={audioRef}
+          />
+        </div>
+      )}
 
       {/* Active / complete state — custom PipelineTracker */}
       {!isIdle && (
