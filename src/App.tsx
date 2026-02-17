@@ -648,6 +648,12 @@ export default function App() {
         parallelConfig={parallelConfig}
         stepExecutions={stepExecutions}
         flowDefinition={flowDefinition}
+        podcasts={podcasts}
+        episodes={episodes}
+        selectedPodcast={selected}
+        episodesLoading={loading}
+        onSelectPodcast={setSelected}
+        onSelectEpisode={pick}
       />
     );
   }

@@ -8,10 +8,13 @@ import type {
   FlowDefinition,
 } from 'bilko-flow/react/components';
 import { PipelineTracker } from './PipelineTracker';
+import { PodcastSelector } from './PodcastSelector';
+import { EpisodeList } from './EpisodeList';
 import {
   formatTimestamp,
   type SandboxResult,
   type Episode,
+  type Podcast,
 } from '../services/api';
 
 // ─── Props: SandboxPage receives data from App (no self-fetching) ────────────
@@ -28,6 +31,13 @@ interface Props {
   parallelConfig: ParallelConfig;
   stepExecutions: Record<string, StepExecution>;
   flowDefinition: FlowDefinition;
+  // Podcast/episode selection (shared with main app)
+  podcasts: Podcast[];
+  episodes: Episode[];
+  selectedPodcast: string;
+  episodesLoading: boolean;
+  onSelectPodcast: (id: string) => void;
+  onSelectEpisode: (ep: Episode) => void;
 }
 
 // ─── Copy Feedback: accumulate debug info for agent/developer ────────────────
@@ -146,6 +156,12 @@ export function SandboxPage({
   parallelConfig,
   stepExecutions,
   flowDefinition,
+  podcasts,
+  episodes,
+  selectedPodcast,
+  episodesLoading,
+  onSelectPodcast,
+  onSelectEpisode,
 }: Props) {
   const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
@@ -191,14 +207,20 @@ export function SandboxPage({
         </button>
       </header>
 
-      {/* Idle state */}
-      {isIdle && (
-        <div className="sb-error-full">
-          <div className="sb-error-icon">?</div>
-          <p>No pipeline running. Select an episode on the main screen to start.</p>
-          <button className="sb-retry-btn" onClick={onBack}>Go Back</button>
-        </div>
-      )}
+      {/* Podcast & episode selection — always visible in sandbox */}
+      <div className="sb-selector-bar">
+        <PodcastSelector
+          podcasts={podcasts}
+          selected={selectedPodcast}
+          onSelect={onSelectPodcast}
+        />
+        <EpisodeList
+          episodes={episodes}
+          loading={episodesLoading}
+          selectedId={episode?.id || null}
+          onSelect={onSelectEpisode}
+        />
+      </div>
 
       {/* Active / complete state — custom PipelineTracker */}
       {!isIdle && (
