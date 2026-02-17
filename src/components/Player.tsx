@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import type { Episode } from '../services/api';
-import { getAudioProxyUrl, formatTime } from '../services/api';
+import { getAudioProxyUrl, formatTime, parseDuration } from '../services/api';
 import { isInAdSegment, getNextContentTime, type AdDetectionResult } from '../services/adDetector';
 
 interface ScanProgressInfo {
@@ -54,11 +54,15 @@ export function Player({ episode, adDetection, scanProgress, pipelineStatus, aut
     const a = audioRef.current;
     if (!a) return;
     setAudioError(null);
+    const syncDuration = () => {
+      if (a.duration > 0 && isFinite(a.duration)) setDur(a.duration);
+    };
     const h = {
       loadedmetadata: () => {
-        setDur(a.duration);
+        syncDuration();
         if (autoPlay) a.play().catch(() => { /* browser may block autoplay */ });
       },
+      durationchange: syncDuration,
       timeupdate: () => setTime(a.currentTime),
       play: () => setPlaying(true),
       pause: () => setPlaying(false),
@@ -68,17 +72,32 @@ export function Player({ episode, adDetection, scanProgress, pipelineStatus, aut
       },
     };
     (Object.keys(h) as (keyof typeof h)[]).forEach((e) => a.addEventListener(e, h[e]));
-    // Sync initial state if audio already has metadata (e.g., persistent audio
-    // element shared across pages — loadedmetadata already fired before mount)
-    if (a.readyState >= 1 && a.duration > 0 && isFinite(a.duration)) {
-      setDur(a.duration);
-      setTime(a.currentTime);
-      setPlaying(!a.paused);
-    }
+    // Sync immediately for already-loaded audio (e.g. persistent element shared across pages)
+    syncDuration();
+    setTime(a.currentTime);
+    setPlaying(!a.paused);
     return () => {
       (Object.keys(h) as (keyof typeof h)[]).forEach((e) => a.removeEventListener(e, h[e]));
     };
   }, [episode, autoPlay]);
+
+  // Safety-net sync for external audio: rAF + short timeout catch ref-commit timing gaps
+  useEffect(() => {
+    if (!externalAudioRef?.current) return;
+    const sync = () => {
+      const a = externalAudioRef.current;
+      if (!a) return;
+      if (a.duration > 0 && isFinite(a.duration)) setDur(a.duration);
+      setTime(a.currentTime);
+      setPlaying(!a.paused);
+    };
+    const raf = requestAnimationFrame(sync);
+    const timer = setTimeout(sync, 150);
+    return () => { cancelAnimationFrame(raf); clearTimeout(timer); };
+  }, [externalAudioRef]);
+
+  // Fallback duration from episode metadata so timeline renders even if audio hasn't synced
+  const effectiveDur = dur || parseDuration(episode.duration) || 0;
 
   const toggle = useCallback(() => {
     const a = audioRef.current;
@@ -91,13 +110,13 @@ export function Player({ episode, adDetection, scanProgress, pipelineStatus, aut
     (clientX: number) => {
       const a = audioRef.current;
       const track = trackRef.current;
-      if (!a || !track || !dur) return;
+      if (!a || !track || !effectiveDur) return;
       const r = track.getBoundingClientRect();
       const ratio = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
-      a.currentTime = ratio * dur;
-      setTime(ratio * dur);
+      a.currentTime = ratio * effectiveDur;
+      setTime(ratio * effectiveDur);
     },
-    [dur],
+    [effectiveDur],
   );
 
   // Drag-to-scrub handlers for the timeline
@@ -125,12 +144,14 @@ export function Player({ episode, adDetection, scanProgress, pipelineStatus, aut
   const skip = useCallback(
     (s: number) => {
       const a = audioRef.current;
-      if (a) a.currentTime = Math.max(0, Math.min(a.currentTime + s, dur));
+      if (!a) return;
+      const d = (a.duration > 0 && isFinite(a.duration)) ? a.duration : effectiveDur;
+      if (d > 0) a.currentTime = Math.max(0, Math.min(a.currentTime + s, d));
     },
-    [dur],
+    [effectiveDur],
   );
 
-  const pct = dur > 0 ? (time / dur) * 100 : 0;
+  const pct = effectiveDur > 0 ? (time / effectiveDur) * 100 : 0;
   const adCount = adDetection?.segments.length ?? 0;
   const totalAdTimeSec = adDetection?.totalAdTime ?? 0;
 
@@ -168,7 +189,7 @@ export function Player({ episode, adDetection, scanProgress, pipelineStatus, aut
           onPointerCancel={onTrackPointerUp}
         >
           {/* Scan progress: show which chunks have been scanned */}
-          {scanProgress && scanProgress.totalChunks > 0 && dur > 0 && (
+          {scanProgress && scanProgress.totalChunks > 0 && effectiveDur > 0 && (
             Array.from({ length: scanProgress.totalChunks }, (_, i) => {
               const chunkLeft = (i / scanProgress.totalChunks) * 100;
               const chunkWidth = (1 / scanProgress.totalChunks) * 100;
@@ -184,9 +205,9 @@ export function Player({ episode, adDetection, scanProgress, pipelineStatus, aut
             })
           )}
           {/* Ad segments highlighted on the track */}
-          {adDetection && dur > 0 && adDetection.segments.map((seg, i) => {
-            const left = (seg.startTime / dur) * 100;
-            const width = ((seg.endTime - seg.startTime) / dur) * 100;
+          {adDetection && effectiveDur > 0 && adDetection.segments.map((seg, i) => {
+            const left = (seg.startTime / effectiveDur) * 100;
+            const width = ((seg.endTime - seg.startTime) / effectiveDur) * 100;
             return (
               <div
                 key={i}
@@ -203,7 +224,7 @@ export function Player({ episode, adDetection, scanProgress, pipelineStatus, aut
         </div>
         <div className="times">
           <span>{formatTime(time)}</span>
-          <span>{formatTime(dur)}</span>
+          <span>{formatTime(effectiveDur)}</span>
         </div>
       </div>
 
