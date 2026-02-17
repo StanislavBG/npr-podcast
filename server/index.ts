@@ -2190,13 +2190,15 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           // Priority sub-chunks skip classification — their transcripts are merged
           // and classified together after Phase 1 for better context.
           if (transcribeOnly) {
-            // Send "deferred" status for classify/refine/emit steps
-            for (const deferStep of ['step_classify_chunk', 'step_refine_chunk', 'step_emit_skips'] as const) {
-              sendEvent('progress', {
-                step: deferStep, threadId, chunkIndex: ci, totalChunks: numChunks,
-                status: 'done', message: 'deferred to merged classification',
-                reason: 'Sub-chunk transcript will be classified after all priority sub-chunks complete',
-              });
+            // Sub-chunk 0 will receive merged classification results in Phase 1b.
+            // Sub-chunks 1-5 mark classify/refine/emit as skipped (merged into chunk 0).
+            if (ci > 0) {
+              for (const deferStep of ['step_classify_chunk', 'step_refine_chunk', 'step_emit_skips'] as const) {
+                sendEvent('progress', {
+                  step: deferStep, threadId, chunkIndex: ci, totalChunks: numChunks,
+                  status: 'done', message: 'see Chunk 1 (merged)',
+                });
+              }
             }
             chunkResults[ci] = { chunkIndex: ci, text: chunkText, segments: segs, lines: chunkLines, adBlocks: [] };
             return;
@@ -2370,7 +2372,7 @@ app.post('/api/sandbox/analyze', async (req, res) => {
             if (cr) mergedSegs.push(...cr.segments);
           }
           const mergedLines = buildLinesFromSegments(mergedSegs);
-          const mergedThreadId = 'chunk-merged-priority';
+          const mergedThreadId = 'chunk-0'; // Route merged results to first chunk's UI card
           console.log(`[sandbox] Phase 1b: merged ${priorityPlans.length} sub-chunks → ${mergedLines.length} lines, classifying as one unit...`);
 
           let mergedAdBlocks: SandboxAdBlock[] = [];
