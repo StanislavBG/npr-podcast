@@ -68,6 +68,13 @@ export function Player({ episode, adDetection, scanProgress, pipelineStatus, aut
       },
     };
     (Object.keys(h) as (keyof typeof h)[]).forEach((e) => a.addEventListener(e, h[e]));
+    // Sync initial state if audio already has metadata (e.g., persistent audio
+    // element shared across pages — loadedmetadata already fired before mount)
+    if (a.readyState >= 1 && a.duration > 0 && isFinite(a.duration)) {
+      setDur(a.duration);
+      setTime(a.currentTime);
+      setPlaying(!a.paused);
+    }
     return () => {
       (Object.keys(h) as (keyof typeof h)[]).forEach((e) => a.removeEventListener(e, h[e]));
     };
