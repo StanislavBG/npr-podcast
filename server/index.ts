@@ -2061,8 +2061,10 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         // Ordered results array — filled by parallel workers
         const chunkResults: (ChunkResult | null)[] = new Array(numChunks).fill(null);
 
-        // Process a single chunk: Fetch → Transcribe → Classify → Refine → Emit
-        const processChunk = async (plan: ChunkPlan): Promise<void> => {
+        // Process a single chunk: Fetch → Transcribe → (optionally) Classify → Refine → Emit
+        // When transcribeOnly=true, only Fetch+Transcribe run (used for priority sub-chunks
+        // whose transcripts are merged and classified together after Phase 1).
+        const processChunk = async (plan: ChunkPlan, transcribeOnly = false): Promise<void> => {
           const ci = plan.index;
           const threadId = `chunk-${ci}`;
           const startByte = plan.startByte;
@@ -2184,6 +2186,21 @@ app.post('/api/sandbox/analyze', async (req, res) => {
           // ── Classify ads in this chunk ──
           const chunkLines = buildLinesFromSegments(segs);
           let chunkAdBlocks: SandboxAdBlock[] = [];
+
+          // Priority sub-chunks skip classification — their transcripts are merged
+          // and classified together after Phase 1 for better context.
+          if (transcribeOnly) {
+            // Send "deferred" status for classify/refine/emit steps
+            for (const deferStep of ['step_classify_chunk', 'step_refine_chunk', 'step_emit_skips'] as const) {
+              sendEvent('progress', {
+                step: deferStep, threadId, chunkIndex: ci, totalChunks: numChunks,
+                status: 'done', message: 'deferred to merged classification',
+                reason: 'Sub-chunk transcript will be classified after all priority sub-chunks complete',
+              });
+            }
+            chunkResults[ci] = { chunkIndex: ci, text: chunkText, segments: segs, lines: chunkLines, adBlocks: [] };
+            return;
+          }
 
           if (chunkLines.length >= 3) {
             sendEvent('progress', {
@@ -2339,13 +2356,156 @@ app.post('/api/sandbox/analyze', async (req, res) => {
         const priorityPlans = chunkPlans.filter(p => p.priority);
         const regularPlans = chunkPlans.filter(p => !p.priority);
 
-        // Phase 1: Process priority sub-chunks (first 2 MB split into 6 ~22s pieces)
-        console.log(`[sandbox] Phase 1: launching ${priorityPlans.length} priority sub-chunks...`);
-        const priorityPromises = priorityPlans.map(p => processChunk(p));
+        // Phase 1: Transcribe priority sub-chunks only (no classification yet)
+        console.log(`[sandbox] Phase 1: launching ${priorityPlans.length} priority sub-chunks (transcribe only)...`);
+        const priorityPromises = priorityPlans.map(p => processChunk(p, true));
         await Promise.allSettled(priorityPromises);
-        console.log(`[sandbox] Phase 1 complete. Phase 2: launching ${regularPlans.length} regular chunks...`);
 
-        // Phase 2: Process remaining regular chunks
+        // Phase 1b: Merge sub-chunk transcripts and classify as one unit
+        // This gives the LLM full context (~131s, ~40-50 sentences) instead of fragmented ~22s pieces.
+        {
+          const mergedSegs: Array<{ start: number; end: number; text: string }> = [];
+          for (const pp of priorityPlans) {
+            const cr = chunkResults[pp.index];
+            if (cr) mergedSegs.push(...cr.segments);
+          }
+          const mergedLines = buildLinesFromSegments(mergedSegs);
+          const mergedThreadId = 'chunk-merged-priority';
+          console.log(`[sandbox] Phase 1b: merged ${priorityPlans.length} sub-chunks → ${mergedLines.length} lines, classifying as one unit...`);
+
+          let mergedAdBlocks: SandboxAdBlock[] = [];
+
+          if (mergedLines.length >= 3) {
+            sendEvent('progress', {
+              step: 'step_classify_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              message: `Classifying merged priority chunk (${mergedLines.length} lines from ${priorityPlans.length} sub-chunks)...`,
+              input: {
+                linesCount: mergedLines.length,
+                totalWords: mergedLines.length > 0 ? mergedLines[mergedLines.length - 1].cumulativeWords : 0,
+                episodeTitle,
+                strategy: LLM_API_KEY ? 'llm' : 'keyword-heuristic',
+                mergedSubChunks: priorityPlans.length,
+                firstLine: mergedLines[0]?.text.slice(0, 120),
+                lastLine: mergedLines[mergedLines.length - 1]?.text.slice(0, 120),
+              },
+            });
+
+            let classifyLlmRaw = '';
+            try {
+              const mergedClassify = await classifyAdsFromLines(mergedLines, episodeTitle, estDuration);
+              mergedAdBlocks = mergedClassify.adBlocks;
+              classifyLlmRaw = mergedClassify.llmRaw;
+            } catch (classifyErr: any) {
+              console.warn(`[sandbox] Merged priority classification failed (non-fatal): ${classifyErr.message}`);
+            }
+
+            const lineClassification = mergedLines.map(l => {
+              const adBlock = mergedAdBlocks.find(b => l.lineNum >= b.startLine && l.lineNum <= b.endLine);
+              return {
+                lineNum: l.lineNum, text: l.text,
+                speaker: l.speaker || undefined,
+                timeSec: l.timeSec,
+                timestamp: fmtTs(l.timeSec),
+                classification: adBlock ? 'AD' as const : 'CONTENT' as const,
+                adReason: adBlock?.reason || undefined,
+              };
+            });
+
+            sendEvent('progress', {
+              step: 'step_classify_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              status: 'done', message: `${mergedAdBlocks.length} ad blocks (merged ${priorityPlans.length} sub-chunks)`,
+              adBlockCount: mergedAdBlocks.length,
+              linesAnalyzed: mergedLines.length,
+              adBlocks: mergedAdBlocks.map(b => ({
+                startLine: b.startLine, endLine: b.endLine, reason: b.reason,
+                textPreview: b.textPreview, startTimeSec: b.startTimeSec, endTimeSec: b.endTimeSec,
+              })),
+              lineClassification,
+              rawResponse: classifyLlmRaw || undefined,
+            });
+          } else {
+            sendEvent('progress', {
+              step: 'step_classify_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              status: 'done', message: `skipped (${mergedLines.length} lines)`,
+              adBlockCount: 0, linesAnalyzed: mergedLines.length,
+              reason: `Too few lines to classify (${mergedLines.length} < 3)`,
+            });
+          }
+
+          // Refine boundaries on merged result
+          if (mergedAdBlocks.length > 0 && LLM_API_KEY) {
+            sendEvent('progress', {
+              step: 'step_refine_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              message: `Refining ${mergedAdBlocks.length} boundaries (merged)...`,
+              input: { anchorCount: mergedAdBlocks.length, linesCount: mergedLines.length, episodeTitle },
+            });
+            let refineLlmRaw = '';
+            try {
+              const refined = await refineBoundariesWithLLM(mergedAdBlocks, mergedLines, estDuration, episodeTitle, '');
+              refineLlmRaw = refined.llmRaw;
+              mergedAdBlocks = refined.adBlocks;
+            } catch (refineErr: any) {
+              console.warn(`[sandbox] Merged priority refine failed (non-fatal): ${refineErr.message}`);
+            }
+            const refinedAdTimeSec = mergedAdBlocks.reduce((s, b) => s + (b.endTimeSec - b.startTimeSec), 0);
+            sendEvent('progress', {
+              step: 'step_refine_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              status: 'done', message: `${mergedAdBlocks.length} refined, ${Math.round(refinedAdTimeSec)}s ads`,
+              refinedBlocks: mergedAdBlocks.length,
+              totalAdTimeSec: Math.round(refinedAdTimeSec * 10) / 10,
+              refinedBoundaries: mergedAdBlocks.map(b => ({
+                startLine: b.startLine, endLine: b.endLine, reason: b.reason,
+                startTimeSec: b.startTimeSec, endTimeSec: b.endTimeSec,
+                durationSec: Math.round((b.endTimeSec - b.startTimeSec) * 10) / 10,
+                textPreview: b.textPreview,
+              })),
+              rawResponse: refineLlmRaw || undefined,
+            });
+          } else {
+            sendEvent('progress', {
+              step: 'step_refine_chunk', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              status: 'done',
+              message: mergedAdBlocks.length === 0 ? 'no ads found' : 'no LLM key',
+              refinedBlocks: 0,
+            });
+          }
+
+          // Emit skip ranges from merged classification
+          const mergedSkipMap = mergedAdBlocks.map(b => ({
+            startTime: Math.round(b.startTimeSec * 10) / 10,
+            endTime: Math.round(b.endTimeSec * 10) / 10,
+            type: 'mid-roll' as const, confidence: 0.85,
+            reason: b.reason, startLine: b.startLine, endLine: b.endLine,
+          }));
+          if (mergedAdBlocks.length > 0) {
+            sendEvent('progress', {
+              step: 'step_emit_skips', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+              message: `Emitting ${mergedAdBlocks.length} skip ranges (merged)...`,
+              input: { adBlockCount: mergedAdBlocks.length, skipRanges: mergedSkipMap },
+            });
+            sendEvent('partial_ads', { skipMap: mergedSkipMap, source: 'merged-priority' });
+            console.log(`[sandbox] Merged priority: ${mergedAdBlocks.length} skip ranges emitted to player`);
+          }
+          const mergedTotalSkip = mergedSkipMap.reduce((s, r) => s + (r.endTime - r.startTime), 0);
+          sendEvent('progress', {
+            step: 'step_emit_skips', threadId: mergedThreadId, chunkIndex: 0, totalChunks: numChunks,
+            status: 'done',
+            message: mergedAdBlocks.length > 0 ? `${mergedAdBlocks.length} ranges (${Math.round(mergedTotalSkip)}s)` : 'no ads to skip',
+            emittedRanges: mergedAdBlocks.length,
+            skipMap: mergedSkipMap.length > 0 ? mergedSkipMap : undefined,
+            totalSkipSec: mergedTotalSkip > 0 ? Math.round(mergedTotalSkip * 10) / 10 : 0,
+          });
+
+          // Store merged classification in the first sub-chunk result (index 0)
+          if (chunkResults[0]) {
+            chunkResults[0].adBlocks = mergedAdBlocks;
+            chunkResults[0].lines = mergedLines;
+          }
+          console.log(`[sandbox] Phase 1b complete. Merged classification: ${mergedAdBlocks.length} ad blocks`);
+        }
+
+        // Phase 2: Process remaining regular chunks (full pipeline per chunk)
+        console.log(`[sandbox] Phase 2: launching ${regularPlans.length} regular chunks...`);
         const regularPromises = regularPlans.map(p => processChunk(p));
         await Promise.allSettled(regularPromises);
         console.log(`[sandbox] Phase 2 complete. All ${numChunks} chunks processed.`);
